@@ -1,0 +1,13 @@
+{
+  "status": "done",
+  "video": {
+    "url": "https://vidgen.x.ai/xai-vidgen-bucket/xai-video-785249cb-2841-9f8c-8fca-01ee90fc40cd.mp4",
+    "duration": 6,
+    "respect_moderation": true
+  },
+  "model": "grok-imagine-video",
+  "usage": {
+    "cost_in_usd_ticks": 3020000000
+  },
+  "progress": 100
+}

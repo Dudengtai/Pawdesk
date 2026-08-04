@@ -1,0 +1,44 @@
+[package]
+name = "pawdesk"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop interactive pet for quick app access and health reminders"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = "0.21"
+uuid = { version = "1", features = ["v4", "serde"] }
+rfd = "0.15"
+winit = "0.30"
+wgpu = "24"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
