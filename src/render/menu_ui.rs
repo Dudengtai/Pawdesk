@@ -6,23 +6,39 @@
 use crate::render::text::{center_in_rect, rasterize_text};
 use crate::ui::radial_menu::{MenuEntry, RadialLayout};
 
-// ── Palette (iOS light) ───────────────────────────────────────────────────
-const CARD: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
-const GROUPED_BG: [u8; 4] = [0xF2, 0xF2, 0xF7, 0xFF];
+// ── Palette (warm glass · design §3 / §7 · no system Acrylic) ─────────────
+/// Warm panel ~88% alpha (L4 glass 拟态).
+const CARD: [u8; 4] = [0xFF, 0xF8, 0xF2, 0xE0];
+/// Soft frosted rows.
+const GROUPED_BG: [u8; 4] = [0xF5, 0xF0, 0xEB, 0xC8];
+const GROUPED_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xD8];
+const GROUPED_PRESS: [u8; 4] = [0xFF, 0xEE, 0xF5, 0xE8];
+const INVALID_BG: [u8; 4] = [0xFF, 0xB0, 0x20, 0x38];
+const INVALID_BG_HOVER: [u8; 4] = [0xFF, 0xB0, 0x20, 0x55];
+const HIGHLIGHT_ROW: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x40];
 const SEPARATOR: [u8; 4] = [0xC6, 0xC6, 0xC8, 0x70];
-const HAIRLINE: [u8; 4] = [0x00, 0x00, 0x00, 0x18];
-const LABEL: [u8; 4] = [0x1C, 0x1C, 0x1E, 0xFF];
+const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x55];
+const INNER_HL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x48];
+const LABEL: [u8; 4] = [0x3A, 0x35, 0x40, 0xFF];
 const SECONDARY: [u8; 4] = [0x3C, 0x3C, 0x43, 0xB0];
 const TERTIARY: [u8; 4] = [0x3C, 0x3C, 0x43, 0x70];
 const BLUE: [u8; 4] = [0x00, 0x7A, 0xFF, 0xFF];
 const BLUE_PRESS: [u8; 4] = [0x00, 0x64, 0xD6, 0xFF];
-const FILL_OPAQUE: [u8; 4] = [0xE5, 0xE5, 0xEA, 0xFF];
-const ORANGE: [u8; 4] = [0xFF, 0x95, 0x00, 0xFF];
+const FILL_OPAQUE: [u8; 4] = [0xE8, 0xE4, 0xE0, 0xE0];
+const FILL_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xE8];
+const ORANGE: [u8; 4] = [0xC4, 0x7A, 0x00, 0xFF];
 const RED: [u8; 4] = [0xFF, 0x3B, 0x30, 0xFF];
 const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
-const SHADOW_A: [u8; 4] = [0x00, 0x00, 0x00, 0x0C];
-const SHADOW_B: [u8; 4] = [0x00, 0x00, 0x00, 0x16];
-const SHADOW_C: [u8; 4] = [0x00, 0x00, 0x00, 0x24];
+const SHADOW_A: [u8; 4] = [0x00, 0x00, 0x00, 0x0E];
+const SHADOW_B: [u8; 4] = [0x00, 0x00, 0x00, 0x18];
+const SHADOW_C: [u8; 4] = [0x00, 0x00, 0x00, 0x28];
+
+/// Hover / press indices into `layout.items`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MenuChromeState {
+    pub hover: Option<usize>,
+    pub press: Option<usize>,
+}
 
 /// Device-pixel scale helper. Layout is logical; drawing is physical.
 #[derive(Clone, Copy)]
@@ -64,65 +80,88 @@ pub fn compose_menu_frame(
     layout: &RadialLayout,
     reminder_paused: bool,
     dpr: f32,
+    chrome: MenuChromeState,
 ) -> (u32, u32, Vec<u8>) {
     let dpi = Dpi::new(dpr);
     let w = dpi.su(layout.window_w);
     let h = dpi.su(layout.window_h);
     let mut out = vec![0u8; (w * h * 4) as usize];
-    let wf = w as f32;
-    let hf = h as f32;
 
-    // Window chrome — physical px shadows / hairline
+    // L3: scale card from pet center; opacity from open_t (0.92→1 visual scale).
+    let t = layout.open_t.clamp(0.0, 1.0);
+    let scale = 0.92 + 0.08 * t;
+    let pivot_x = layout.pet_x + layout.pet_w * 0.5;
+    let pivot_y = layout.pet_y + layout.pet_h * 0.5;
+    let layout = scale_layout_from_pivot(layout, pivot_x, pivot_y, scale);
+
+    // Glass card only (rest of union window stays transparent for pin-pet).
+    let cx0 = dpi.s(layout.card_x);
+    let cy0 = dpi.s(layout.card_y);
+    let cx1 = dpi.s(layout.card_x + layout.card_w);
+    let cy1 = dpi.s(layout.card_y + layout.card_h);
+    let crad = dpi.s(22.0);
+
     fill_rrect_aa(
         &mut out,
         w,
         h,
-        dpi.s(10.0),
-        dpi.s(14.0),
-        wf - dpi.s(10.0),
-        hf - dpi.s(8.0),
-        dpi.s(28.0),
+        cx0 + dpi.s(8.0),
+        cy0 + dpi.s(10.0),
+        cx1 + dpi.s(6.0),
+        cy1 + dpi.s(8.0),
+        crad,
         SHADOW_A,
     );
     fill_rrect_aa(
         &mut out,
         w,
         h,
-        dpi.s(6.0),
-        dpi.s(9.0),
-        wf - dpi.s(6.0),
-        hf - dpi.s(5.0),
-        dpi.s(26.0),
+        cx0 + dpi.s(4.0),
+        cy0 + dpi.s(5.0),
+        cx1 + dpi.s(3.0),
+        cy1 + dpi.s(4.0),
+        crad,
         SHADOW_B,
     );
     fill_rrect_aa(
         &mut out,
         w,
         h,
-        dpi.s(3.0),
-        dpi.s(5.0),
-        wf - dpi.s(3.0),
-        hf - dpi.s(3.0),
-        dpi.s(24.0),
+        cx0 + dpi.s(1.5),
+        cy0 + dpi.s(2.0),
+        cx1 + dpi.s(1.5),
+        cy1 + dpi.s(1.5),
+        crad,
         SHADOW_C,
     );
-    fill_rrect_aa(&mut out, w, h, 0.0, 0.0, wf, hf, dpi.s(22.0), CARD);
-    // 1 physical-pixel hairline
+    fill_rrect_aa(&mut out, w, h, cx0, cy0, cx1, cy1, crad, CARD);
+    // Inner top glass highlight (L4)
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        cx0 + dpi.s(2.0),
+        cy0 + dpi.s(2.0),
+        cx1 - dpi.s(2.0),
+        cy0 + dpi.s(18.0),
+        dpi.s(12.0),
+        INNER_HL,
+    );
     stroke_rrect_aa(
         &mut out,
         w,
         h,
-        0.5,
-        0.5,
-        wf - 0.5,
-        hf - 0.5,
-        dpi.s(22.0),
+        cx0 + 0.5,
+        cy0 + 0.5,
+        cx1 - 0.5,
+        cy1 - 0.5,
+        crad,
         HAIRLINE,
         1.0,
     );
 
-    let content_x = dpi.s(content_x_from(layout));
-    let content_w = dpi.s(content_w_from(layout));
+    let content_x = dpi.s(content_x_from(&layout));
+    let content_w = dpi.s(content_w_from(&layout));
 
     blit_text(
         &mut out,
@@ -130,7 +169,7 @@ pub fn compose_menu_frame(
         h,
         "快捷启动",
         content_x,
-        dpi.s(16.0),
+        dpi.s(layout.card_y + 16.0),
         dpi.su(220),
         dpi.px(17.0),
         LABEL,
@@ -141,7 +180,7 @@ pub fn compose_menu_frame(
         h,
         "打开常用应用",
         content_x,
-        dpi.s(38.0),
+        dpi.s(layout.card_y + 38.0),
         dpi.su(220),
         dpi.px(12.0),
         SECONDARY,
@@ -162,15 +201,18 @@ pub fn compose_menu_frame(
     );
 
     let mut saw_shortcut = false;
-    for item in &layout.items {
+    for (i, item) in layout.items.iter().enumerate() {
         let x = dpi.s(item.x);
         let y = dpi.s(item.y);
         let bw = dpi.s(item.w);
         let bh = dpi.s(item.h);
         let radius = dpi.s(12.0);
+        let pressed = chrome.press == Some(i);
+        let hovered = chrome.hover == Some(i);
 
         match &item.entry {
             MenuEntry::AddShortcut => {
+                let btn = if pressed { BLUE_PRESS } else { BLUE };
                 fill_rrect_aa(
                     &mut out,
                     w,
@@ -182,8 +224,7 @@ pub fn compose_menu_frame(
                     radius,
                     SHADOW_A,
                 );
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, BLUE);
-                // crisp top highlight band
+                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, btn);
                 fill_rrect_aa(
                     &mut out,
                     w,
@@ -193,18 +234,32 @@ pub fn compose_menu_frame(
                     x + bw - dpi.s(2.0),
                     y + dpi.s(5.0),
                     dpi.s(3.0),
-                    [0xFF, 0xFF, 0xFF, 0x28],
+                    INNER_HL,
                 );
                 blit_text_centered(
                     &mut out, w, h, "添加应用", x, y, bw, bh, dpi.px(15.0), WHITE, dpi,
                 );
             }
             MenuEntry::Manage => {
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, FILL_OPAQUE);
+                let bg = if pressed {
+                    GROUPED_PRESS
+                } else if hovered {
+                    FILL_HOVER
+                } else {
+                    FILL_OPAQUE
+                };
+                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, bg);
                 blit_text_centered(&mut out, w, h, "管理", x, y, bw, bh, dpi.px(14.0), BLUE, dpi);
             }
             MenuEntry::PauseReminder => {
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, FILL_OPAQUE);
+                let bg = if pressed {
+                    GROUPED_PRESS
+                } else if hovered {
+                    FILL_HOVER
+                } else {
+                    FILL_OPAQUE
+                };
+                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, bg);
                 let label = if reminder_paused {
                     "恢复提醒"
                 } else {
@@ -214,7 +269,20 @@ pub fn compose_menu_frame(
             }
             MenuEntry::Shortcut { name, valid, .. } => {
                 saw_shortcut = true;
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, GROUPED_BG);
+                let bg = if !*valid {
+                    if hovered || pressed {
+                        INVALID_BG_HOVER
+                    } else {
+                        INVALID_BG
+                    }
+                } else if pressed {
+                    GROUPED_PRESS
+                } else if hovered {
+                    GROUPED_HOVER
+                } else {
+                    GROUPED_BG
+                };
+                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, bg);
 
                 let icx = (x + dpi.s(22.0)) as i32;
                 let icy = (y + bh * 0.5) as i32;
@@ -233,8 +301,12 @@ pub fn compose_menu_frame(
                     disc_d,
                 );
 
-                let ch = name.chars().next().unwrap_or('A').to_string();
-                if let Some((tw, th, t)) = rasterize_text(&ch, dpi.su(24), dpi.px(12.0), WHITE) {
+                let ch = if *valid {
+                    name.chars().next().unwrap_or('A').to_string()
+                } else {
+                    "!".to_string()
+                };
+                if let Some((tw, th, tbuf)) = rasterize_text(&ch, dpi.su(24), dpi.px(12.0), WHITE) {
                     let (tx, ty) = center_in_rect(
                         icx as f32 - disc_r as f32,
                         icy as f32 - disc_r as f32,
@@ -244,23 +316,33 @@ pub fn compose_menu_frame(
                         th,
                         dpi.s(0.5),
                     );
-                    blit(&mut out, w, h, &t, tw, th, tx, ty);
+                    blit(&mut out, w, h, &tbuf, tw, th, tx, ty);
                 }
 
-                let title = if *valid {
-                    name.clone()
-                } else {
-                    format!("{name}（失效）")
-                };
-                let title_color = if *valid { LABEL } else { ORANGE };
                 let max_tw = (bw - dpi.s(88.0)).max(8.0) as u32;
-                if let Some((tw, th, t)) =
-                    rasterize_text(&title, max_tw, dpi.px(15.0), title_color)
-                {
-                    let ty = (y + (bh - th as f32) * 0.5 + dpi.s(0.5))
-                        .round()
-                        .max(0.0) as u32;
-                    blit(&mut out, w, h, &t, tw, th, (x + dpi.s(42.0)) as u32, ty);
+                if *valid {
+                    if let Some((tw, th, tbuf)) =
+                        rasterize_text(name, max_tw, dpi.px(15.0), LABEL)
+                    {
+                        let ty = (y + (bh - th as f32) * 0.5 + dpi.s(0.5))
+                            .round()
+                            .max(0.0) as u32;
+                        blit(&mut out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+                    }
+                } else {
+                    // design §7.10: ⚠ name + 无法找到程序
+                    if let Some((tw, th, tbuf)) =
+                        rasterize_text(name, max_tw, dpi.px(14.0), ORANGE)
+                    {
+                        let ty = (y + dpi.s(8.0)).round().max(0.0) as u32;
+                        blit(&mut out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+                    }
+                    if let Some((tw, th, tbuf)) =
+                        rasterize_text("无法找到程序 · 点此修复", max_tw, dpi.px(11.0), ORANGE)
+                    {
+                        let ty = (y + dpi.s(26.0)).round().max(0.0) as u32;
+                        blit(&mut out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+                    }
                 }
 
                 draw_chevron(
@@ -276,10 +358,85 @@ pub fn compose_menu_frame(
     }
 
     if !saw_shortcut {
-        draw_empty_state(&mut out, w, h, content_x, content_w, layout, dpi);
+        draw_empty_state(&mut out, w, h, content_x, content_w, &layout, dpi);
     }
 
+    // Fade whole overlay with open_t (card + labels already scaled; pet stays put).
+    apply_rgba_alpha(&mut out, t);
+
     (w, h, out)
+}
+
+/// Scale card + items around pivot; pet rect stays fixed (pin-pet).
+fn scale_layout_from_pivot(
+    layout: &RadialLayout,
+    pivot_x: f32,
+    pivot_y: f32,
+    scale: f32,
+) -> RadialLayout {
+    let s = scale.max(0.01);
+    let map = |x: f32, y: f32| (pivot_x + (x - pivot_x) * s, pivot_y + (y - pivot_y) * s);
+
+    let (cx, cy) = map(layout.card_x, layout.card_y);
+    // Size scales; top-left of scaled rect relative to pivot
+    let card_w = layout.card_w * s;
+    let card_h = layout.card_h * s;
+    // Re-map card corners properly: scale center of card
+    let ccx = layout.card_x + layout.card_w * 0.5;
+    let ccy = layout.card_y + layout.card_h * 0.5;
+    let (nccx, nccy) = map(ccx, ccy);
+    let card_x = nccx - card_w * 0.5;
+    let card_y = nccy - card_h * 0.5;
+
+    let items = layout
+        .items
+        .iter()
+        .map(|it| {
+            let icx = it.x + it.w * 0.5;
+            let icy = it.y + it.h * 0.5;
+            let (nx, ny) = map(icx, icy);
+            let nw = it.w * s;
+            let nh = it.h * s;
+            crate::ui::radial_menu::ItemGeom {
+                entry: it.entry.clone(),
+                x: nx - nw * 0.5,
+                y: ny - nh * 0.5,
+                w: nw,
+                h: nh,
+                cx: nx,
+                cy: ny,
+                radius: it.radius * s,
+            }
+        })
+        .collect();
+
+    let _ = cx;
+    let _ = cy;
+    RadialLayout {
+        items,
+        open_t: layout.open_t,
+        window: layout.window,
+        window_w: layout.window_w,
+        window_h: layout.window_h,
+        pet_x: layout.pet_x,
+        pet_y: layout.pet_y,
+        pet_w: layout.pet_w,
+        pet_h: layout.pet_h,
+        card_x,
+        card_y,
+        card_w,
+        card_h,
+    }
+}
+
+fn apply_rgba_alpha(buf: &mut [u8], a: f32) {
+    let a = a.clamp(0.0, 1.0);
+    if (a - 1.0).abs() < 0.001 {
+        return;
+    }
+    for px in buf.chunks_exact_mut(4) {
+        px[3] = ((px[3] as f32) * a).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 fn blit_text(
@@ -365,13 +522,13 @@ fn draw_empty_state(
         SECONDARY,
     );
 
-    if let Some((tw, th, tbuf)) = rasterize_text("暂无常用应用", dpi.su(220), dpi.px(14.0), LABEL)
+    if let Some((tw, th, tbuf)) = rasterize_text("还没有常用应用", dpi.su(220), dpi.px(14.0), LABEL)
     {
         let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
         blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(40.0)) as u32);
     }
     if let Some((tw, th, tbuf)) =
-        rasterize_text("点上方「添加应用」开始", dpi.su(280), dpi.px(12.0), SECONDARY)
+        rasterize_text("点「添加应用」选 exe / 快捷方式", dpi.su(300), dpi.px(12.0), SECONDARY)
     {
         let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
         blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(60.0)) as u32);
@@ -383,11 +540,15 @@ fn content_x_from(layout: &RadialLayout) -> f32 {
         .items
         .first()
         .map(|i| i.x)
-        .unwrap_or(layout.pet_x + layout.pet_w + 20.0)
+        .unwrap_or(layout.card_x + 16.0)
 }
 
 fn content_w_from(layout: &RadialLayout) -> f32 {
-    layout.items.first().map(|i| i.w).unwrap_or(200.0)
+    layout
+        .items
+        .first()
+        .map(|i| i.w)
+        .unwrap_or((layout.card_w - 32.0).max(80.0))
 }
 
 fn empty_y(layout: &RadialLayout) -> u32 {
@@ -395,7 +556,7 @@ fn empty_y(layout: &RadialLayout) -> u32 {
         .items
         .iter()
         .map(|i| i.y + i.h)
-        .fold(96.0_f32, f32::max)
+        .fold(layout.card_y + 96.0, f32::max)
         + 20.0;
     y as u32
 }
@@ -505,10 +666,12 @@ pub enum SettingsHit {
 }
 
 /// `reminder`: (enabled, interval_minutes, paused)
+/// `highlight_row`: optional list index to emphasize (invalid shortcut from launcher).
 pub fn compose_settings_frame(
     names: &[(String, bool, bool)],
     reminder: (bool, u32, bool),
     dpr: f32,
+    highlight_row: Option<usize>,
 ) -> (u32, u32, Vec<u8>) {
     let (enabled, interval_min, paused) = reminder;
     let dpi = Dpi::new(dpr);
@@ -788,7 +951,20 @@ pub fn compose_settings_frame(
         if y + row_h > list_bottom - dpi.s(8.0) {
             break;
         }
-        if i > 0 {
+        if highlight_row == Some(i) {
+            fill_rrect_aa(
+                &mut out,
+                w,
+                h,
+                dpi.s(24.0),
+                y + dpi.s(2.0),
+                wf - dpi.s(24.0),
+                y + row_h - dpi.s(2.0),
+                dpi.s(10.0),
+                HIGHLIGHT_ROW,
+            );
+        }
+        if i > 0 && highlight_row != Some(i) && highlight_row != Some(i - 1) {
             fill_rect_f(
                 &mut out,
                 w,
@@ -808,8 +984,12 @@ pub fn compose_settings_frame(
             "○"
         };
         let color = if *valid { LABEL } else { ORANGE };
-        let label = format!("{mark}  {name}");
-        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(180), dpi.px(14.0), color) {
+        let label = if *valid {
+            format!("{mark}  {name}")
+        } else {
+            format!("{mark}  {name} · 无法找到程序")
+        };
+        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(200), dpi.px(14.0), color) {
             let ty = (y + (row_h - th as f32) * 0.5 + dpi.s(0.5)).round() as u32;
             blit(&mut out, w, h, &t, tw, th, dpi.s(36.0) as u32, ty);
         }

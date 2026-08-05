@@ -21,16 +21,21 @@ use crate::pet::{
 use crate::platform;
 use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
 use crate::render::menu_ui::{
-    compose_menu_frame, compose_settings_frame, hit_settings, SettingsHit, SETTINGS_H, SETTINGS_W,
+    compose_menu_frame, compose_settings_frame, hit_settings, MenuChromeState, SettingsHit,
+    SETTINGS_H, SETTINGS_W,
 };
 use crate::render::reminder_ui::{client_to_layout, compose_reminder_frame, food_button_layout};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
 // Attaching a DXGI/Vulkan swapchain to a WS_EX_LAYERED window breaks per-pixel alpha.
 use crate::shortcut::{launch, pick_executable, ShortcutItem, ShortcutRepository};
+use crate::ui::launcher_place::{
+    logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
+    DEFAULT_GAP, DEFAULT_MARGIN,
+};
 use crate::ui::pet_window::DragState;
 use crate::ui::radial_menu::{
-    self, build_entries, hit_center, hit_test, layout as radial_layout, prefer_direction,
-    MenuEntry, RadialLayout, MENU_WINDOW_H, MENU_WINDOW_W,
+    self, build_entries, hit_center, hit_test_index, layout_pinned, MenuEntry, RadialLayout,
+    CARD_LOGICAL_H, CARD_LOGICAL_W, MENU_WINDOW_H, MENU_WINDOW_W,
 };
 use crate::ui::tray::TrayHandle;
 
@@ -71,9 +76,16 @@ pub struct App {
     menu_reopen_after: Option<Instant>,
     /// Expanded settings list UI.
     settings_ui_active: bool,
-    /// Last radial layout for hit-testing (menu-local coords).
+    /// Last radial layout for hit-testing (menu-local **logical** coords).
     menu_layout: Option<RadialLayout>,
-    /// Pet position before menu/settings expand (window top-left).
+    /// Dynamic menu window size in logical px (hit mapping).
+    menu_logical_size: (u32, u32),
+    /// Menu item hover / press (layout.items index).
+    menu_hover: Option<usize>,
+    menu_press: Option<usize>,
+    /// Settings list row to emphasize (from invalid launcher item).
+    settings_highlight_row: Option<usize>,
+    /// Pet position before menu/settings expand (window top-left, physical).
     overlay_origin: Option<Point>,
     /// Current pet frame RGBA for alpha hit-testing (normal pet size).
     hit_rgba: Vec<u8>,
@@ -125,6 +137,10 @@ impl App {
             menu_reopen_after: None,
             settings_ui_active: false,
             menu_layout: None,
+            menu_logical_size: (MENU_WINDOW_W, MENU_WINDOW_H),
+            menu_hover: None,
+            menu_press: None,
+            settings_highlight_row: None,
             overlay_origin: None,
             hit_rgba: Vec::new(),
             hit_size: (128, 128),
@@ -289,7 +305,8 @@ impl App {
                 self.config.reminder.interval_minutes,
                 self.config.reminder.paused,
             );
-            let (w, h, composed) = compose_settings_frame(&rows, reminder, dpr);
+            let (w, h, composed) =
+                compose_settings_frame(&rows, reminder, dpr, self.settings_highlight_row);
             // Logical size for hit-mapping; physical pixels in hit_rgba.
             self.sprite_logical = (SETTINGS_W, SETTINGS_H);
             self.hit_rgba = composed;
@@ -298,6 +315,7 @@ impl App {
             return;
         }
 
+        // Keep composing while menu is open or mid-close fade (still MenuOpen until anim ends).
         if self.menu_ui_active && pet.is_menu_open() {
             let clip = pet.active_clip();
             let pet_rgba = pet.display_rgba();
@@ -307,22 +325,39 @@ impl App {
                 .map(|s| s.is_paused())
                 .unwrap_or(false);
             let entries = build_entries(self.shortcuts.list_enabled_sorted().as_slice(), paused);
-            let dir = self
-                .window
+            let (lw, lh) = self.menu_logical_size;
+            // L3-02: geometry locked at open (open_t=1.0 for layout); visual uses menu_open_t.
+            let mut layout = self
+                .menu_layout
                 .as_ref()
-                .and_then(|w| {
-                    let pos = w.outer_position().ok()?;
-                    let size = w.outer_size();
-                    let center = Point::new(
-                        pos.x as f64 + size.width as f64 / 2.0,
-                        pos.y as f64 + size.height as f64 / 2.0,
-                    );
-                    let wa = platform::work_area_for_window(w.as_ref()).ok()?;
-                    Some(prefer_direction(center, wa))
+                .map(|prev| {
+                    layout_pinned(
+                        &entries,
+                        lw,
+                        lh,
+                        (prev.pet_x, prev.pet_y, prev.pet_w, prev.pet_h),
+                        (prev.card_x, prev.card_y, prev.card_w, prev.card_h),
+                        radial_menu::ExpandDir::Right,
+                        1.0,
+                    )
                 })
-                .unwrap_or(radial_menu::ExpandDir::Right);
-            let layout = radial_layout(&entries, dir, pet.menu_open_t);
+                .unwrap_or_else(|| {
+                    layout_pinned(
+                        &entries,
+                        lw,
+                        lh,
+                        (0.0, 0.0, 128.0, 128.0),
+                        (128.0, 0.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+                        radial_menu::ExpandDir::Right,
+                        1.0,
+                    )
+                });
+            layout.open_t = pet.menu_open_t;
             let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+            let chrome = MenuChromeState {
+                hover: self.menu_hover,
+                press: self.menu_press,
+            };
             let (w, h, composed) = compose_menu_frame(
                 &pet_rgba,
                 clip.frame_width,
@@ -330,9 +365,11 @@ impl App {
                 &layout,
                 paused,
                 dpr,
+                chrome,
             );
+            // Unscaled geometry for hit-test; open_t only drives fade/scale in compose.
             self.menu_layout = Some(layout);
-            self.sprite_logical = (MENU_WINDOW_W, MENU_WINDOW_H);
+            self.sprite_logical = (lw, lh);
             self.hit_rgba = composed;
             self.hit_size = (w, h);
             self.texture_dirty = false;
@@ -569,6 +606,16 @@ impl App {
         if self.reminder_ui_active || self.settings_ui_active {
             return;
         }
+
+        // L2: leave edge-hide before capture so pin uses fully-visible home.
+        if let Some(pet) = self.pet.as_mut() {
+            if let Some(home) = pet.snap_restore_from_edge(now) {
+                if let Some(w) = &self.window {
+                    w.set_outer_position(PhysicalPosition::new(home.x as i32, home.y as i32));
+                }
+            }
+        }
+
         let Some(pet) = self.pet.as_mut() else {
             return;
         };
@@ -576,53 +623,134 @@ impl App {
             return;
         }
         self.capture_overlay_origin();
-        // Anchor launcher so the pet portrait stays near the original pet position.
+
+        let dpr = snap_dpr(self.scale_factor);
         let origin = self.overlay_origin.unwrap_or(Point::new(100.0, 100.0));
-        let pet_cx = origin.x + PET_WINDOW_SIZE as f64 / 2.0;
-        let pet_cy = origin.y + PET_WINDOW_SIZE as f64 / 2.0;
-        // Prefer opening card to the side with more free space.
-        let dir = self
-            .window
-            .as_ref()
-            .and_then(|w| {
-                let wa = platform::work_area_for_window(w.as_ref()).ok()?;
-                Some(prefer_direction(Point::new(pet_cx, pet_cy), wa))
-            })
-            .unwrap_or(radial_menu::ExpandDir::Right);
-        // Portrait is ~left column for Right; for Left card, pet is on the right side of card.
-        let (ox, oy) = match dir {
-            radial_menu::ExpandDir::Left => (
-                pet_cx - MENU_WINDOW_W as f64 + 16.0 + 60.0,
-                pet_cy - MENU_WINDOW_H as f64 / 2.0,
-            ),
-            _ => (
-                pet_cx - 16.0 - 60.0,
-                pet_cy - MENU_WINDOW_H as f64 / 2.0,
-            ),
+        let pet_phys = logical_to_physical(PET_WINDOW_SIZE, dpr);
+        let pet_rect = platform::Rect {
+            x: origin.x as i32,
+            y: origin.y as i32,
+            width: pet_phys,
+            height: pet_phys,
         };
+        let card_w = logical_to_physical(CARD_LOGICAL_W, dpr);
+        let card_h = logical_to_physical(CARD_LOGICAL_H, dpr);
+
+        // Multi-monitor: work area of the screen under the pet center.
+        let pet_cx = pet_rect.x + pet_rect.width / 2;
+        let pet_cy = pet_rect.y + pet_rect.height / 2;
+        let work = platform::work_area_from_point(pet_cx, pet_cy)
+            .map(|m| m.work_area)
+            .ok()
+            .or_else(|| {
+                self.window
+                    .as_ref()
+                    .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
+            })
+            .or_else(|| platform::primary_work_area().ok())
+            .unwrap_or(platform::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
+
+        let place = place_launcher(
+            pet_rect,
+            card_w,
+            card_h,
+            DEFAULT_GAP,
+            work,
+            DEFAULT_MARGIN,
+        );
+
+        let win_log_w = physical_to_logical_u32(place.window.width, dpr);
+        let win_log_h = physical_to_logical_u32(place.window.height, dpr);
+        self.menu_logical_size = (win_log_w, win_log_h);
+
+        let pet_local = (
+            physical_to_logical(place.pet_local.x, dpr),
+            physical_to_logical(place.pet_local.y, dpr),
+            physical_to_logical(place.pet_local.width, dpr),
+            physical_to_logical(place.pet_local.height, dpr),
+        );
+        let card_local = (
+            physical_to_logical(place.card_local.x, dpr),
+            physical_to_logical(place.card_local.y, dpr),
+            physical_to_logical(place.card_local.width, dpr),
+            physical_to_logical(place.card_local.height, dpr),
+        );
+
+        let paused = self
+            .scheduler
+            .as_ref()
+            .map(|s| s.is_paused())
+            .unwrap_or(false);
+        let entries = build_entries(self.shortcuts.list_enabled_sorted().as_slice(), paused);
+        self.menu_layout = Some(layout_pinned(
+            &entries,
+            win_log_w,
+            win_log_h,
+            pet_local,
+            card_local,
+            place.dir,
+            0.0,
+        ));
+
         self.menu_ui_active = true;
-        self.resize_pet_window(MENU_WINDOW_W, MENU_WINDOW_H);
+        self.menu_hover = None;
+        self.menu_press = None;
+        self.resize_pet_window(win_log_w, win_log_h);
         if let Some(w) = &self.window {
-            w.set_outer_position(PhysicalPosition::new(ox as i32, oy as i32));
+            w.set_outer_position(PhysicalPosition::new(place.window.x, place.window.y));
             let _ = platform::set_click_through(w.as_ref(), false);
             self.click_through = false;
             w.request_redraw();
         }
         self.texture_dirty = true;
-        info!(?dir, "launcher dock entered");
+        info!(
+            ?place.dir,
+            win = ?(place.window.x, place.window.y, place.window.width, place.window.height),
+            delta = ?place.pet_screen_delta,
+            "launcher dock entered (pin-pet)"
+        );
     }
 
+    /// Request menu close with L3 closing animation when possible.
     fn exit_menu_ui(&mut self, now: Instant) {
         if let Some(pet) = self.pet.as_mut() {
-            pet.close_menu(now);
+            if pet.begin_close_menu(now) {
+                self.texture_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                info!("launcher close anim started");
+                return;
+            }
         }
+        self.finish_exit_menu_ui(now);
+    }
+
+    /// After close anim (or snap): restore pet window + debounce reopen.
+    fn finish_exit_menu_ui(&mut self, now: Instant) {
+        if let Some(pet) = self.pet.as_mut() {
+            if pet.is_menu_open() {
+                pet.close_menu(now);
+            }
+        }
+        self.menu_hover = None;
+        self.menu_press = None;
         self.restore_overlay_origin_window();
-        // Ignore click that closed the dock + brief double-tap reopen.
+        // L3-05: ignore click that closed the dock + brief double-tap reopen.
         self.menu_reopen_after = Some(now + Duration::from_millis(280));
-        info!("menu UI exited");
+        info!("launcher dock exited");
     }
 
     fn enter_settings_ui(&mut self) {
+        self.enter_settings_ui_highlight(None);
+    }
+
+    fn enter_settings_ui_highlight(&mut self, highlight_row: Option<usize>) {
         if self.reminder_ui_active {
             return;
         }
@@ -634,9 +762,12 @@ impl App {
             }
             self.menu_ui_active = false;
             self.menu_layout = None;
+            self.menu_hover = None;
+            self.menu_press = None;
         } else {
             self.capture_overlay_origin();
         }
+        self.settings_highlight_row = highlight_row;
         self.settings_ui_active = true;
         self.resize_pet_window(SETTINGS_W, SETTINGS_H);
         let center = self.work_area_center_top_left(SETTINGS_W as i32, SETTINGS_H as i32);
@@ -652,8 +783,49 @@ impl App {
 
     fn exit_settings_ui(&mut self) {
         self.settings_ui_active = false;
+        self.settings_highlight_row = None;
         self.restore_overlay_origin_window();
         info!("settings UI exited");
+    }
+
+    /// Map client cursor to menu layout logical coords.
+    fn menu_cursor_logical(&self) -> Option<(f32, f32)> {
+        if !self.menu_ui_active {
+            return None;
+        }
+        let (lw, lh) = self.menu_logical_size;
+        let (cw, ch) = self.window.as_ref().map(|w| {
+            let s = w.inner_size();
+            (s.width as f64, s.height as f64)
+        })?;
+        let lx = (self.cursor_in_window.x / cw.max(1.0) * lw as f64) as f32;
+        let ly = (self.cursor_in_window.y / ch.max(1.0) * lh as f64) as f32;
+        Some((lx, ly))
+    }
+
+    fn update_menu_hover(&mut self) {
+        if !self
+            .pet
+            .as_ref()
+            .map(|p| p.is_menu_interactive())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Some((lx, ly)) = self.menu_cursor_logical() else {
+            return;
+        };
+        let next = self
+            .menu_layout
+            .as_ref()
+            .and_then(|lay| hit_test_index(lay, lx, ly));
+        if next != self.menu_hover {
+            self.menu_hover = next;
+            self.texture_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
     }
 
     fn persist_shortcuts(&mut self) {
@@ -749,7 +921,12 @@ impl App {
             MenuEntry::Shortcut { id, valid, name } => {
                 if !valid {
                     warn!(%name, "shortcut path invalid — open manager to fix");
-                    self.enter_settings_ui();
+                    let row = self
+                        .shortcuts
+                        .list_sorted()
+                        .iter()
+                        .position(|s| s.id == id);
+                    self.enter_settings_ui_highlight(row);
                     return;
                 }
                 if let Some(item) = self.shortcuts.get(id).cloned() {
@@ -1152,6 +1329,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_in_window = Point::new(position.x, position.y);
                 let now = Instant::now();
+                if self.menu_ui_active {
+                    self.update_menu_hover();
+                }
                 // Threshold drag start.
                 if self.drag.consider_drag_start() {
                     if let Some(pet) = self.pet.as_mut() {
@@ -1221,41 +1401,44 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
 
-                    // Menu hits
+                    // Menu hits (map client → layout logical); ignore while closing
                     if self.menu_ui_active {
-                        let (cw, ch) = self
-                            .window
+                        let interactive = self
+                            .pet
                             .as_ref()
-                            .map(|w| {
-                                let s = w.inner_size();
-                                (s.width as f64, s.height as f64)
-                            })
-                            .unwrap_or((MENU_WINDOW_W as f64, MENU_WINDOW_H as f64));
-                        let lx = (self.cursor_in_window.x / cw.max(1.0) * MENU_WINDOW_W as f64)
-                            as f32;
-                        let ly = (self.cursor_in_window.y / ch.max(1.0) * MENU_WINDOW_H as f64)
-                            as f32;
-                        if let Some(layout) = self.menu_layout.clone() {
-                            if let Some(entry) = hit_test(&layout, lx, ly) {
-                                self.handle_menu_entry(entry.clone(), now);
-                                if let Some(w) = &self.window {
-                                    w.request_redraw();
+                            .map(|p| p.is_menu_interactive())
+                            .unwrap_or(false);
+                        if !interactive {
+                            return;
+                        }
+                        if let Some((lx, ly)) = self.menu_cursor_logical() {
+                            if let Some(layout) = self.menu_layout.clone() {
+                                if let Some(idx) = hit_test_index(&layout, lx, ly) {
+                                    self.menu_press = Some(idx);
+                                    self.texture_dirty = true;
+                                    if let Some(entry) = layout.items.get(idx) {
+                                        self.handle_menu_entry(entry.entry.clone(), now);
+                                    }
+                                    self.menu_press = None;
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
                                 }
-                                return;
-                            }
-                            if hit_center(&layout, lx, ly) {
+                                if hit_center(&layout, lx, ly) {
+                                    self.exit_menu_ui(now);
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
+                                }
+                                // Empty card / transparent union padding → close
                                 self.exit_menu_ui(now);
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
                                 return;
                             }
-                            // Click empty menu area → close
-                            self.exit_menu_ui(now);
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                            return;
                         }
                     }
 
@@ -1467,9 +1650,13 @@ impl ApplicationHandler<UserEvent> for App {
                 || self.settings_ui_active
                 || self.texture_dirty;
 
-            // Menu open animation
+            // Menu open/close animation (L3)
             if let Some(pet) = self.pet.as_mut() {
-                if pet.tick_menu_anim(now) || pet.is_menu_open() {
+                let (animating, close_done) = pet.tick_menu_anim(now);
+                if close_done {
+                    self.finish_exit_menu_ui(now);
+                    need_redraw = true;
+                } else if animating || pet.is_menu_open() {
                     need_redraw = true;
                     self.texture_dirty = true;
                 }

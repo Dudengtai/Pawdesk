@@ -61,8 +61,13 @@ pub struct PetController {
     /// Food button rect in window client coords (logical px), set while Showing.
     pub food_button_rect: Option<(f32, f32, f32, f32)>,
     // ── M4 menu ──
+    /// Visual progress 0→1 open, 1→0 while closing (task §14 L3).
     pub menu_open_t: f32,
     pub menu_anim_started: Option<Instant>,
+    /// True while playing close animation (still `MenuOpen` until done).
+    pub menu_closing: bool,
+    /// `menu_open_t` at the moment close started (for reverse lerp).
+    menu_close_from_t: f32,
     /// Horizontal facing while approaching: -1 = face left, 1 = face right.
     pub face_dir: f32,
     /// Continuous frame index for smooth 30fps sampling (`frame_rgba_smooth`).
@@ -106,6 +111,8 @@ impl PetController {
             food_button_rect: None,
             menu_open_t: 0.0,
             menu_anim_started: None,
+            menu_closing: false,
+            menu_close_from_t: 1.0,
             face_dir: 1.0,
             display_frame_f: 0.0,
         }
@@ -133,6 +140,7 @@ impl PetController {
         if matches!(self.state, PetState::MenuOpen) {
             self.menu_open_t = 0.0;
             self.menu_anim_started = None;
+            self.menu_closing = false;
         }
         self.movement.cancel();
         if let Ok(s) = try_transition(&self.state, PetState::Dragging) {
@@ -168,6 +176,8 @@ impl PetController {
         if let Ok(s) = try_transition(&self.state, PetState::MenuOpen) {
             self.state = s;
             self.menu_open_t = 0.0;
+            self.menu_closing = false;
+            self.menu_close_from_t = 1.0;
             self.menu_anim_started = Some(now);
             self.switch_clip_for_state(now);
             info!("menu opened");
@@ -177,35 +187,90 @@ impl PetController {
         }
     }
 
+    /// Instant close (settings handoff / drag). Prefer [`begin_close_menu`] for UI.
     pub fn close_menu(&mut self, now: Instant) {
         if !matches!(self.state, PetState::MenuOpen) {
             return;
         }
         self.menu_open_t = 0.0;
         self.menu_anim_started = None;
+        self.menu_closing = false;
         self.interaction.reset_dwell();
         self.go_idle(now);
-        info!("menu closed");
+        info!("menu closed (immediate)");
     }
 
-    /// Advance menu open animation (MENU-05). Returns true if still animating.
-    pub fn tick_menu_anim(&mut self, now: Instant) -> bool {
+    /// Start close animation. Returns `true` if animating; `false` if already closed / snap.
+    pub fn begin_close_menu(&mut self, now: Instant) -> bool {
         if !matches!(self.state, PetState::MenuOpen) {
             return false;
         }
-        const DUR: f32 = 0.25;
-        if let Some(start) = self.menu_anim_started {
-            let t = now.duration_since(start).as_secs_f32() / DUR;
-            self.menu_open_t = crate::render::easing::ease_snappy(t.min(1.0));
-            t < 1.0
-        } else {
-            self.menu_open_t = 1.0;
-            false
+        if self.menu_closing {
+            return true;
         }
+        // Nearly closed or still at start of open → snap.
+        if self.menu_open_t < 0.08 {
+            self.close_menu(now);
+            return false;
+        }
+        self.menu_closing = true;
+        self.menu_close_from_t = self.menu_open_t.clamp(0.0, 1.0);
+        self.menu_anim_started = Some(now);
+        info!(from = self.menu_close_from_t, "menu close anim start");
+        true
+    }
+
+    /// Advance open/close animation.
+    /// Returns `(needs_redraw, close_finished)` — when `close_finished`, state is Idle.
+    pub fn tick_menu_anim(&mut self, now: Instant) -> (bool, bool) {
+        if !matches!(self.state, PetState::MenuOpen) {
+            return (false, false);
+        }
+        const OPEN_DUR: f32 = 0.25;
+        const CLOSE_DUR: f32 = 0.18;
+
+        if self.menu_closing {
+            let Some(start) = self.menu_anim_started else {
+                self.close_menu(now);
+                return (true, true);
+            };
+            let u = (now.duration_since(start).as_secs_f32() / CLOSE_DUR).clamp(0.0, 1.0);
+            let e = crate::render::easing::ease_smooth(u);
+            self.menu_open_t = self.menu_close_from_t * (1.0 - e);
+            if u >= 1.0 {
+                self.menu_open_t = 0.0;
+                self.menu_anim_started = None;
+                self.menu_closing = false;
+                self.interaction.reset_dwell();
+                self.go_idle(now);
+                info!("menu close anim done");
+                return (true, true);
+            }
+            return (true, false);
+        }
+
+        // Opening
+        if let Some(start) = self.menu_anim_started {
+            let u = now.duration_since(start).as_secs_f32() / OPEN_DUR;
+            self.menu_open_t = crate::render::easing::ease_snappy(u.min(1.0));
+            if u >= 1.0 {
+                self.menu_open_t = 1.0;
+                self.menu_anim_started = None;
+                return (false, false);
+            }
+            return (true, false);
+        }
+        self.menu_open_t = 1.0;
+        (false, false)
     }
 
     pub fn is_menu_open(&self) -> bool {
         matches!(self.state, PetState::MenuOpen)
+    }
+
+    /// Menu visible and accepting clicks (not mid-close).
+    pub fn is_menu_interactive(&self) -> bool {
+        matches!(self.state, PetState::MenuOpen) && !self.menu_closing
     }
 
     pub fn end_drag(&mut self, now: Instant) {
@@ -621,6 +686,32 @@ impl PetController {
                 self.player = AnimationPlayer::start(clip, now);
                 self.current_frame = 0;
             }
+        }
+    }
+
+    /// Instantly leave edge-hide (for launcher open). Returns home top-left if restored.
+    pub fn snap_restore_from_edge(&mut self, now: Instant) -> Option<Point> {
+        if !matches!(self.state, PetState::HiddenAtEdge(_)) {
+            return None;
+        }
+        let home = self.pre_edge_position.or(self.hidden_position)?;
+        self.movement.cancel();
+        self.pre_edge_position = None;
+        self.hidden_position = None;
+        self.interaction.reset_dwell();
+        let name = IDLE_BASE.to_string();
+        if let Ok(s) = try_transition(&self.state, PetState::Idle(name.clone())) {
+            self.state = s;
+            self.picker.mark_base(now);
+            if let Some(clip) = self.library.get(&name) {
+                self.player = AnimationPlayer::start(clip, now);
+                self.current_frame = 0;
+                self.display_frame_f = 0.0;
+            }
+            info!("pet snap-restored from edge for launcher");
+            Some(home)
+        } else {
+            None
         }
     }
 
