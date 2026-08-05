@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PawDesk · 钉宠 + Flip/Shift 交互效果图</title>
+  <style>
+    :root {
+      --label: #1c1c1e;
+      --secondary: rgba(60, 60, 67, 0.65);
+      --tertiary: rgba(60, 60, 67, 0.42);
+      --blue: #007aff;
+      --glass: rgba(255, 248, 242, 0.78);
+      --grouped: rgba(242, 242, 247, 0.75);
+      --hairline: rgba(255, 255, 255, 0.55);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+      background: #121216;
+      color: #fff;
+      min-height: 100vh;
+    }
+    .page { max-width: 1240px; margin: 0 auto; padding: 24px 20px 40px; }
+    h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+    .sub {
+      margin-top: 6px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.55);
+      line-height: 1.55;
+    }
+    .badge {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(142, 209, 214, 0.15);
+      color: #8ed1d6;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .grid {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: #0c0c10;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+    .panel-h {
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.55);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .panel-h em {
+      font-style: normal;
+      color: #ff9ec4;
+      font-weight: 600;
+    }
+    .panel-h .ok { color: #8ed1d6; }
+
+    .desk {
+      position: relative;
+      height: 300px;
+      overflow: hidden;
+      background:
+        radial-gradient(ellipse 70% 55% at 15% 25%, #5b7cfa88 0%, transparent 55%),
+        radial-gradient(ellipse 60% 50% at 85% 75%, #e07a9a77 0%, transparent 50%),
+        linear-gradient(145deg, #243048 0%, #1a2030 45%, #2a1e2c 100%);
+    }
+    .desk.wide { height: 340px; }
+    .desk::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 40px 40px;
+      opacity: 0.55;
+      pointer-events: none;
+    }
+    .work-frame {
+      position: absolute;
+      inset: 18px 18px 42px 18px;
+      border: 1.5px dashed rgba(255,255,255,0.18);
+      border-radius: 6px;
+      pointer-events: none;
+    }
+    .work-label {
+      position: absolute;
+      top: 4px; left: 8px;
+      font-size: 10px;
+      color: rgba(255,255,255,0.35);
+      letter-spacing: 0.04em;
+    }
+    .taskbar {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 32px;
+      background: rgba(16, 18, 24, 0.55);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      font-size: 10px;
+      color: rgba(255,255,255,0.4);
+      gap: 8px;
+    }
+    .taskbar i {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: linear-gradient(135deg, #ff9ec4, #8ed1d6);
+      display: inline-block;
+    }
+
+    /* pet */
+    .pet {
+      position: absolute;
+      width: 72px;
+      height: 84px;
+      z-index: 3;
+      filter: drop-shadow(0 8px 16px rgba(0,0,0,0.28));
+    }
+    .pet svg { width: 100%; height: 100%; display: block; }
+    .pet-pin {
+      position: absolute;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #ff5c5c;
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 3px rgba(255,92,92,0.35);
+      z-index: 5;
+      transform: translate(-50%, -50%);
+    }
+    .ghost-pet {
+      position: absolute;
+      width: 72px;
+      height: 84px;
+      opacity: 0.28;
+      filter: grayscale(0.3);
+      z-index: 1;
+    }
+    .ghost-pet svg { width: 100%; height: 100%; }
+    .arrow {
+      position: absolute;
+      z-index: 4;
+      font-size: 11px;
+      font-weight: 700;
+      color: #ffb6d0;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      white-space: nowrap;
+    }
+
+    /* glass card */
+    .card {
+      position: absolute;
+      z-index: 2;
+      width: 210px;
+      height: 168px;
+      border-radius: 16px;
+      background: var(--glass);
+      backdrop-filter: blur(22px) saturate(1.3);
+      -webkit-backdrop-filter: blur(22px) saturate(1.3);
+      border: 1px solid var(--hairline);
+      box-shadow: 0 14px 36px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.1);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      padding: 10px 12px;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(160deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.06) 40%, transparent 60%);
+      pointer-events: none;
+    }
+    .card .t {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--label);
+      position: relative;
+    }
+    .card .s {
+      font-size: 10px;
+      color: var(--secondary);
+      margin-bottom: 8px;
+      position: relative;
+    }
+    .card .add {
+      height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(180deg, #1a86ff, var(--blue));
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      display: grid;
+      place-items: center;
+      margin-bottom: 6px;
+      position: relative;
+      box-shadow: 0 3px 8px rgba(0,122,255,0.25);
+    }
+    .chips { display: flex; gap: 5px; margin-bottom: 6px; position: relative; }
+    .chips span {
+      flex: 1;
+      height: 22px;
+      border-radius: 7px;
+      background: rgba(229,229,234,0.9);
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--label);
+      display: grid;
+      place-items: center;
+    }
+    .chips span.b { color: var(--blue); }
+    .row {
+      height: 26px;
+      border-radius: 8px;
+      background: var(--grouped);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 7px;
+      margin-bottom: 4px;
+      position: relative;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--label);
+    }
+    .row .ic {
+      width: 16px; height: 16px; border-radius: 4px;
+      display: grid; place-items: center;
+      font-size: 9px; color: #fff; font-weight: 700;
+    }
+    .ic.g { background: #1db954; }
+    .ic.c { background: #4285f4; }
+    .ic.v { background: #0078d4; }
+
+    /* bridge line pet to card */
+    .bridge {
+      position: absolute;
+      z-index: 2;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(255,158,196,0.0), rgba(255,158,196,0.85), rgba(0,122,255,0.5));
+      border-radius: 2px;
+      pointer-events: none;
+    }
+
+    .legend {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    @media (max-width: 800px) { .legend { grid-template-columns: 1fr; } }
+    .leg {
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      font-size: 12px;
+      line-height: 1.55;
+      color: rgba(255,255,255,0.62);
+    }
+    .leg strong { display: block; color: #fff; font-size: 13px; margin-bottom: 4px; }
+    .leg .step { color: #8ed1d6; font-weight: 700; }
+
+    /* full-width compare */
+    .compare {
+      margin-top: 16px;
+      grid-column: 1 / -1;
+    }
+    .compare .desk { height: 360px; }
+    .tag-bad, .tag-good {
+      position: absolute;
+      z-index: 6;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .tag-bad {
+      background: rgba(255, 92, 92, 0.2);
+      color: #ff8a8a;
+      border: 1px solid rgba(255,92,92,0.35);
+    }
+    .tag-good {
+      background: rgba(142, 209, 214, 0.18);
+      color: #8ed1d6;
+      border: 1px solid rgba(142,209,214,0.35);
+    }
+    .fade-out {
+      opacity: 0.35;
+      outline: 2px dashed rgba(255,92,92,0.5);
+      outline-offset: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>钉宠 + Flip / Shift · 交互效果图</h1>
+    <p class="sub">
+      半透明玻璃坞 · 宠物尽量钉在屏幕原位 · 卡片像气泡一样换边/滑移 · 整卡始终在工作区内
+    </p>
+    <span class="badge">推荐交互 · 优于「整卡硬钳制导致宠瞬移」</span>
+
+    <div class="grid">
+      <!-- 1 右空：卡在右 -->
+      <div class="panel">
+        <div class="panel-h">
+          <span>场景 1 · 宠物偏左</span>
+          <span class="ok">flip：卡在右侧</span>
+        </div>
+        <div class="desk">
+          <div class="work-frame"><span class="work-label">WORK AREA</span></div>
+          <div class="pet" style="left: 56px; top: 100px;" title="钉死">
+            <div class="pet-pin" style="left: 36px; top: 40px;"></div>
+            <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+          </div>
+          <div class="bridge" style="left: 128px; top: 140px; width: 28px;"></div>
+          <div class="card" style="left: 150px; top: 70px;">
+            <div class="t">快捷启动</div>
+            <div class="s">打开常用应用</div>
+            <div class="add">＋ 添加应用</div>
+            <div class="chips"><span class="b">管理</span><span>暂停</span></div>
+            <div class="row"><span class="ic g">S</span>Spotify</div>
+            <div class="row"><span class="ic c">C</span>Chrome</div>
+          </div>
+          <div class="taskbar"><i></i>宠钉原位 · 卡向右展开</div>
+        </div>
+      </div>
+
+      <!-- 2 贴右：卡翻到左 -->
+      <div class="panel">
+        <div class="panel-h">
+          <span>场景 2 · 贴屏幕右边</span>
+          <span class="ok">flip：卡翻到左侧</span>
+        </div>
+        <div class="desk">
+          <div class="work-frame"><span class="work-label">WORK AREA</span></div>
+          <div class="pet" style="right: 36px; top: 100px; left: auto;">
+            <div class="pet-pin" style="left: 36px; top: 40px;"></div>
+            <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+          </div>
+          <div class="arrow" style="right: 120px; top: 48px;">← flip 换边</div>
+          <div class="card" style="right: 120px; top: 70px; left: auto;">
+            <div class="t">快捷启动</div>
+            <div class="s">右侧空间不够</div>
+            <div class="add">＋ 添加应用</div>
+            <div class="chips"><span class="b">管理</span><span>暂停</span></div>
+            <div class="row"><span class="ic g">S</span>Spotify</div>
+            <div class="row"><span class="ic v">V</span>VS Code</div>
+          </div>
+          <div class="taskbar"><i></i>若整卡硬左移 → 宠会跑；flip 后宠仍钉右边</div>
+        </div>
+      </div>
+
+      <!-- 3 贴底：卡上移 shift -->
+      <div class="panel">
+        <div class="panel-h">
+          <span>场景 3 · 贴底边 / 任务栏上</span>
+          <span class="ok">shift：卡上滑</span>
+        </div>
+        <div class="desk">
+          <div class="work-frame"><span class="work-label">WORK AREA</span></div>
+          <div class="pet" style="left: 48%; top: auto; bottom: 48px; transform: translateX(-50%);">
+            <div class="pet-pin" style="left: 36px; top: 40px;"></div>
+            <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+          </div>
+          <div class="arrow" style="left: 58%; top: 88px;">↑ shift</div>
+          <div class="card" style="left: 50%; top: 36px; transform: translateX(-10%); width: 200px;">
+            <div class="t">快捷启动</div>
+            <div class="s">垂直居中会出屏 → 上移</div>
+            <div class="add">＋ 添加应用</div>
+            <div class="chips"><span class="b">管理</span><span>暂停</span></div>
+            <div class="row"><span class="ic c">C</span>Chrome</div>
+            <div class="row"><span class="ic g">S</span>Spotify</div>
+          </div>
+          <div class="taskbar"><i></i>宠仍贴底可见 · 卡完整在 work 内</div>
+        </div>
+      </div>
+
+      <!-- 4 角落：flip + shift -->
+      <div class="panel">
+        <div class="panel-h">
+          <span>场景 4 · 右下角（最难）</span>
+          <span class="ok">flip 左 + shift 上</span>
+        </div>
+        <div class="desk">
+          <div class="work-frame"><span class="work-label">WORK AREA</span></div>
+          <div class="pet" style="right: 28px; bottom: 48px; top: auto; left: auto;">
+            <div class="pet-pin" style="left: 36px; top: 40px;"></div>
+            <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+          </div>
+          <div class="arrow" style="right: 130px; top: 56px;">↖ flip + shift</div>
+          <div class="card" style="right: 100px; bottom: 100px; top: auto; left: auto;">
+            <div class="t">快捷启动</div>
+            <div class="s">角部落点 · 双轴修正</div>
+            <div class="add">＋ 添加应用</div>
+            <div class="chips"><span class="b">管理</span><span>暂停</span></div>
+            <div class="row"><span class="ic v">V</span>VS Code</div>
+            <div class="row"><span class="ic g">S</span>Spotify</div>
+          </div>
+          <div class="taskbar"><i></i>红点 = 钉死锚点 · 卡绕锚点找最大空间</div>
+        </div>
+      </div>
+
+      <!-- compare full width -->
+      <div class="panel compare" style="grid-column: 1 / -1;">
+        <div class="panel-h">
+          <span>对比 · 贴右边开坞</span>
+          <span><em>左：整卡硬钳制</em>　<span class="ok">右：钉宠 + flip</span></span>
+        </div>
+        <div class="desk wide" style="display:grid; grid-template-columns:1fr 1fr;">
+          <!-- bad -->
+          <div style="position:relative; border-right:1px solid rgba(255,255,255,0.08);">
+            <div class="work-frame" style="inset:16px 12px 42px 16px;"></div>
+            <span class="tag-bad" style="top: 14px; left: 20px;">整卡 clamp · 宠被拖走</span>
+            <!-- original ghost -->
+            <div class="ghost-pet" style="right: 24px; top: 120px; left: auto;">
+              <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+            </div>
+            <div class="arrow" style="right: 20px; top: 100px; color:#ff8a8a;">原位</div>
+            <!-- moved block -->
+            <div class="fade-out card" style="left: 20px; top: 70px; width: 200px; height: 150px;">
+              <div class="t">快捷启动</div>
+              <div class="s">整窗左移后…</div>
+              <div class="add">＋ 添加</div>
+              <div class="row"><span class="ic g">S</span>…</div>
+            </div>
+            <!-- pet moved with card -->
+            <div class="pet" style="left: 28px; top: 95px; opacity: 0.95;">
+              <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+            </div>
+            <div class="arrow" style="left: 100px; top: 200px; color:#ff8a8a;">宠瞬移到这里 ✗</div>
+          </div>
+          <!-- good -->
+          <div style="position:relative;">
+            <div class="work-frame" style="inset:16px 16px 42px 12px;"></div>
+            <span class="tag-good" style="top: 14px; left: 20px;">钉宠 + flip · 锚点不动</span>
+            <div class="pet" style="right: 24px; top: 120px; left: auto;">
+              <div class="pet-pin" style="left: 36px; top: 40px;"></div>
+              <svg viewBox="0 0 84 96" fill="none"><use href="#cat"/></svg>
+            </div>
+            <div class="card" style="right: 108px; top: 70px; left: auto; width: 200px;">
+              <div class="t">快捷启动</div>
+              <div class="s">卡翻到左侧</div>
+              <div class="add">＋ 添加应用</div>
+              <div class="chips"><span class="b">管理</span><span>暂停</span></div>
+              <div class="row"><span class="ic g">S</span>Spotify</div>
+              <div class="row"><span class="ic c">C</span>Chrome</div>
+            </div>
+            <div class="arrow" style="right: 40px; top: 210px; color:#8ed1d6;">宠仍在原位 ✓</div>
+          </div>
+          <div class="taskbar" style="grid-column:1/-1;"><i></i>红点 = 屏幕锚点 · 关闭后回 origin · 玻璃半透明可接受</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="leg">
+        <strong><span class="step">1 · Flip</span></strong>
+        水平优先：右空间不够 → 卡翻到宠左侧；再不够才考虑上/下。
+      </div>
+      <div class="leg">
+        <strong><span class="step">2 · Shift</span></strong>
+        换边后仍裁切 → 沿边平移卡片（上/下为主），尽量不挪宠物锚点。
+      </div>
+      <div class="leg">
+        <strong><span class="step">3 · Size（少用）</span></strong>
+        仍放不下 → 略缩卡片高度/宽度，保证主按钮与列表可点。
+      </div>
+    </div>
+  </div>
+
+  <!-- sprite -->
+  <svg width="0" height="0" style="position:absolute">
+    <symbol id="cat" viewBox="0 0 84 96">
+      <ellipse cx="42" cy="88" rx="22" ry="5" fill="rgba(0,0,0,0.12)"/>
+      <path d="M18 52c0-18 10-34 24-34s24 16 24 34c0 14-8 28-24 28S18 66 18 52z" fill="#fff"/>
+      <ellipse cx="28" cy="40" rx="10" ry="12" fill="#2b2b2e"/>
+      <ellipse cx="58" cy="38" rx="8" ry="10" fill="#2b2b2e"/>
+      <ellipse cx="42" cy="58" rx="7" ry="5" fill="#2b2b2e"/>
+      <circle cx="32" cy="48" r="4.2" fill="#2b2b2e"/>
+      <circle cx="52" cy="48" r="4.2" fill="#2b2b2e"/>
+      <circle cx="33.2" cy="46.8" r="1.4" fill="#fff"/>
+      <circle cx="53.2" cy="46.8" r="1.4" fill="#fff"/>
+      <ellipse cx="42" cy="56" rx="3.2" ry="2.2" fill="#ffb6c1"/>
+      <path d="M38 60c2 3 6 3 8 0" stroke="#3a3540" stroke-width="1.4" stroke-linecap="round"/>
+      <path d="M22 28c-2-10 4-16 8-12 2 8-2 14-8 12z" fill="#2b2b2e"/>
+      <path d="M62 26c2-10-4-16-8-12-2 8 2 14 8 12z" fill="#2b2b2e"/>
+      <ellipse cx="30" cy="78" rx="5" ry="3.5" fill="#ffb6c1" opacity=".85"/>
+      <ellipse cx="54" cy="78" rx="5" ry="3.5" fill="#ffb6c1" opacity=".85"/>
+    </symbol>
+  </svg>
+</body>
+</html>

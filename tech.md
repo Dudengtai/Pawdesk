@@ -1,612 +1,345 @@
-# 桌面快速访问互动宠物技术设计文档
-
-## 1. 文档信息
+# PawDesk 技术设计文档
 
 | 项目 | 内容 |
 | --- | --- |
-| 项目名称 | 桌面快速访问互动宠物 |
-| 文档类型 | 技术设计文档 |
-| 目标平台 | Windows 10/11，x64 为主 |
-| 开发语言 | Rust |
-| 当前版本 | v0.1 |
-| 依据文档 | `prd.md` **v0.2** |
+| 版本 | **v0.3** |
+| 依据 | `prd.md` v0.4 · `design.md` v0.4 |
+| 排期 | `task.md` |
+| 环境 | `env.md` |
 
-## 2. 项目概述
+---
 
-本项目是一款常驻 Windows 桌面的互动宠物应用。应用以动漫奶牛猫为首个宠物形象，在桌面上以透明悬浮窗显示，支持拖动、待机动画、鼠标接近互动、健康提醒和 Windows 软件快捷访问。
+## 阅读导航
 
-技术方案需要重点解决以下问题：
+| 想了解… | 看 |
+| --- | --- |
+| 整体架构与目录 | [§1](#1-架构总览) · [§2](#2-源码模块地图) |
+| 宠物状态机 / 动画 | [§3](#3-宠物领域) |
+| 透明窗 / 呈现 | [§4](#4-窗口与呈现) |
+| 启动坞钉宠算法 | [§5](#5-快捷启动坞) |
+| 提醒调度 | [§6](#6-健康提醒) |
+| 快捷方式 / 配置 | [§7](#7-快捷方式与配置) |
+| 性能 / 测试 / 发布 | [§8](#8-性能错误与发布) |
+| 风险与验收 | [§9](#9-风险与技术验收) |
 
-1. 创建无边框、透明、置顶且可拖动的桌面窗口。
-2. 在低 CPU、低内存条件下稳定播放帧动画和处理定时任务。
-3. 通过状态机管理待机、互动、提醒、菜单等互斥行为。
-4. 支持快捷方式的添加、删除、排序和启动，并为后续扩展预留数据结构。
-5. 在不阻塞 UI 的情况下执行文件读写、进程启动和配置保存。
+**实现原则（一句话）**
 
-## 3. 范围与非目标
+- 业务状态机集中在 `pet`；UI 不直改状态。  
+- 主线程不阻塞 I/O；配置防抖写盘。  
+- 宠物 HWND：**CPU RGBA + `UpdateLayeredWindow`**，不挂 DXGI/wgpu 交换链。  
+- 启动坞：**钉宠 + Flip/Shift**，单窗 union(宠, 卡)。
 
-### 3.1 首期范围
+---
 
-- 单一宠物形象：动漫奶牛猫。
-- 透明悬浮宠物窗口。
-- 宠物窗口拖动和边缘探头行为。
-- 待机 base：`idle_blink` 循环；每 30s 随机 one-shot 动作（`idle_stretch` 等）后回 base。
-- 鼠标中/近距：`Watching` 观察；**飞扑 `ENABLE_MOUSE_POUNCE=false` 已关闭，后期再开**。
-- 每隔 1 小时触发一次健康提醒。
-- 宠物移动至屏幕中央、展示提示语、点击食物完成投喂并返回原位。
-- 以宠物为中心展开快捷菜单。
-- Windows 快捷方式的添加、删除、排序和启动。
-- 系统托盘菜单：显示/隐藏宠物、暂停提醒、打开设置、退出应用。
+## 1. 架构总览
 
-### 3.2 非首期范围
+### 1.1 要解决的技术问题
 
-- 多宠物形象和宠物商店。
-- 基于电脑使用时长的智能提醒模型。
-- 云同步、账号系统和跨设备同步。
-- 自定义动画编辑器。
-- 全局快捷键配置界面。
-- 多屏幕复杂布局的高级策略。
+1. 无边框、真透明、置顶、可拖动的桌面窗。  
+2. 低占用下播帧动画 + 定时任务。  
+3. 待机 / 互动 / 提醒 / 菜单互斥的状态机。  
+4. 快捷方式增删排序启动 + 本地配置。  
+5. 文件选择、启动进程不堵主循环。
 
-## 4. 总体技术方案
+### 1.2 技术栈
 
-### 4.1 推荐技术栈
-
-| 层级 | 技术选择 | 主要职责 |
+| 层级 | 选型 | 职责 |
 | --- | --- | --- |
-| 应用运行时 | Rust | 核心业务、状态机、任务调度、数据管理 |
-| 窗口系统 | `winit` | 创建透明无边框窗口、处理鼠标和窗口事件 |
-| 渲染层 | `wgpu` | 绘制宠物帧、菜单、文字和视觉特效 |
-| UI/菜单 | Rust 原生 UI 组件或 `egui` | 设置页、快捷菜单、编辑表单 |
-| Windows API | `windows` crate | 屏幕信息、窗口属性、快捷方式、进程启动等 |
-| 系统托盘 | `tray-icon` 或等价 Rust crate | 托盘图标及菜单 |
-| 序列化 | `serde` + JSON/TOML | 配置和快捷方式数据持久化 |
-| 日志 | `tracing` | 分级日志、故障定位 |
-| 测试 | Rust 单元测试、集成测试 | 状态机、调度器、数据层和关键边界验证 |
+| 语言 | Rust 2021 | 业务与状态 |
+| 窗口 | `winit` | 事件循环、窗口 |
+| 平台 | `windows` crate | 工作区、分层窗、Shell 启动等 |
+| 呈现 | CPU 位图 + `UpdateLayeredWindow` | 宠物与叠层 UI 真透明 |
+| 自绘 UI | `fontdue` + 自写 compose | 启动坞 / 设置 / 提醒卡 |
+| 托盘 | `tray-icon` | 托盘与菜单 |
+| 序列化 | `serde` + JSON | 配置 |
+| 日志 | `tracing` | 文件日志 |
+| 文件框 | `rfd`（工作线程） | 选 exe/lnk |
 
-说明：项目直接使用 `wgpu` 构建轻量 2D 渲染器，不引入 `pixels` 作为默认渲染层。渲染器负责纹理加载与缓存、精灵图绘制、批次提交、文字/面板绘制以及后续 Shader 特效；业务模块只通过高层绘制接口访问渲染能力。若设置界面采用 `egui`，应将设置 UI 与宠物主窗口渲染解耦，避免在每一帧执行文件读写或复杂布局计算。
+说明：仓库内保留 `wgpu` 相关代码，**当前宠物主路径不走 GPU 表面**，避免与 layered 冲突。
 
-建议的渲染器接口包括：
-
-```rust
-trait Renderer {
-    fn draw_sprite(&mut self, sprite: SpriteDrawCommand);
-    fn draw_text(&mut self, text: TextDrawCommand);
-    fn draw_panel(&mut self, panel: PanelDrawCommand);
-    fn draw_button(&mut self, button: ButtonDrawCommand);
-}
-```
-
-通过该接口隔离 `wgpu` 的设备、交换链、纹理、绑定组和渲染管线细节，避免业务代码直接依赖底层 GPU 实现。
-
-### 4.2 进程与线程模型
-
-首期采用单进程模型，分为以下逻辑组件：
+### 1.3 线程模型
 
 ```text
-主线程
-├─ 窗口事件循环
-├─ 输入事件分发
-├─ 宠物状态机
-├─ 动画时钟与渲染请求
-└─ 菜单/托盘事件分发
-
-后台任务
-├─ 配置加载与保存
-├─ 快捷方式解析与校验
-├─ 软件进程启动
-└─ 日志与异常记录
+主线程：事件循环 · 状态机 · 动画时钟 · 合成 present · 托盘命令
+后台：  配置写盘（防抖）· 异步文件选择 · 进程启动校验
 ```
 
-原则：
+- 后台只通过通道 / 事件回主线程，不直接改 UI 状态。  
+- 用户操作进入 `AppEvent` / 状态机，避免隐式交叉修改。
 
-- 主线程只处理轻量事件和渲染，不执行阻塞 I/O。
-- 配置变更采用防抖保存，避免拖动排序或连续点击造成频繁写盘。
-- 后台任务通过消息通道向主线程返回结果，不直接修改 UI 状态。
-- 所有用户操作都通过事件消息进入状态机，避免组件之间相互调用形成隐式状态。
+---
 
-## 5. 目录与模块设计
-
-建议项目结构如下：
+## 2. 源码模块地图
 
 ```text
 src/
-├─ main.rs                 # 程序入口、运行时初始化
-├─ app.rs                  # 应用上下文和生命周期
-├─ config/
-│  ├─ mod.rs               # 配置模型和默认值
-│  ├─ repository.rs        # 配置读写、防抖保存
-│  └─ migration.rs         # 配置版本升级
-├─ pet/
-│  ├─ mod.rs               # 宠物领域模块
-│  ├─ state.rs             # 宠物状态机
-│  ├─ animation.rs         # 动画资源与播放控制
-│  ├─ movement.rs          # 移动、边缘行为和路径插值
-│  └─ interaction.rs       # 鼠标距离和互动规则
-├─ reminder/
-│  ├─ mod.rs               # 提醒服务
-│  ├─ scheduler.rs         # 定时调度
-│  └─ messages.rs          # 提示文案选择
-├─ shortcut/
-│  ├─ mod.rs               # 快捷方式领域模型
-│  ├─ repository.rs        # 快捷方式持久化
-│  └─ launcher.rs          # Windows 程序启动
-├─ ui/
-│  ├─ mod.rs               # UI 组装
-│  ├─ pet_window.rs        # 宠物窗口
-│  ├─ radial_menu.rs       # 环形/自适应快捷菜单
-│  ├─ settings.rs          # 设置界面
-│  └─ tray.rs              # 系统托盘
-├─ platform/
-│  └─ windows.rs           # Windows 专用能力封装
-└─ error.rs                # 统一错误类型
+├─ main.rs              入口、日志
+├─ app.rs               生命周期、叠层 UI 切换、开坞接线
+├─ error.rs · event.rs
+├─ config/              AppConfig、原子写、防抖
+├─ pet/                 状态机 · 动画 · 移动 · 互动
+├─ reminder/            调度 · 文案
+├─ shortcut/            模型 · 仓库 · 启动 · 选择器
+├─ render/              menu_ui · reminder_ui · text · easing
+├─ ui/                  radial_menu · launcher_place · tray · pet_window
+└─ platform/windows.rs  分层窗、工作区、DPI、启动
 
-assets/
-├─ pets/cow-cat/           # 宠物动画帧或精灵图
-├─ menu/                   # 菜单图标和按钮资源
-└─ tray/                   # 托盘图标
+assets/pets/cow-cat/    分 clip 帧序列 + meta.json
+assets/tray/            托盘图标
+tools/                  抽帧、打包、视频工具
+dist/PawDesk/           便携包（package.ps1）
 ```
 
-## 6. 核心领域模型
+| 模块 | 职责 |
+| --- | --- |
+| `app` | 窗尺寸/位置切换（宠 / 坞 / 提醒 / 设置）、事件汇总 |
+| `pet` | `PetState`、clip 切换、拖动/边缘/菜单动画 t |
+| `launcher_place` | **纯函数** `place_launcher`（物理像素） |
+| `radial_menu` | 条目布局 `layout_pinned`、命中 |
+| `menu_ui` | 玻璃坞 + 设置面板 CPU 绘制 |
+| `reminder` | 间隔、暂停、补发一次 |
+| `shortcut` | 列表持久化、`ShellExecute` 类启动 |
+| `platform` | `UpdateLayeredWindow`、work area、钳制 |
 
-### 6.1 宠物状态
+---
 
-```rust
-enum PetState {
-    Idle(IdleAnimation),
-    Watching,
-    Approaching { target: Point, started_at: Instant },
-    PlayingInteraction(InteractionAnimation),
-    Reminder(ReminderStage),
-    MenuOpen,
-    Dragging,
-    HiddenAtEdge(Edge),
-}
-```
+## 3. 宠物领域
 
-状态切换必须集中在状态机中处理，禁止 UI 组件直接改写状态字段。
-
-主要状态转换：
+### 3.1 状态机
 
 ```text
-Idle(blink) ──每30s──> Idle(action one-shot) ──结束──> Idle(blink)
-Idle ──鼠标中/近距──> Watching ──远离──> Idle(blink)
-（延后）Watching ──近距且 ENABLE_MOUSE_POUNCE──> Approaching ──到达──> PlayingInteraction ──> Idle
-任意可中断状态 ──提醒──> Reminder(...) ──回位──> Idle(blink)
-Idle ──单击──> MenuOpen ──关闭──> Idle(blink)
-* ──拖动──> Dragging ──释放──> Idle(blink)
+Idle ──30s──> Idle(one-shot) ──完──> Idle
+Idle ──中/近距──> Watching ──远──> Idle
+（关闭）Watching ──飞扑──> Approaching ──> Playing ──> Idle
+* ──提醒──> Reminder(*) ──回位──> Idle
+Idle/Watching/Edge ──单击──> MenuOpen ──关──> Idle
+* ──拖──> Dragging ──放──> Idle
+Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 ```
 
-#### 6.1.1 已实现动画清单（资源 + 逻辑，2026-08-04）
+优先级（高 → 低）：**Dragging &gt; Reminder &gt; MenuOpen &gt; Edge &gt; Playing &gt; Approaching &gt; Watching &gt; Idle**。
 
-资源目录：`assets/pets/cow-cat/<clip>/`（256×256 PNG + `meta.json`）。  
-当前主来源：`source=video_extract`（`_video/*.mp4` 抽帧；品红键、**禁止黑毛键**）。
+规则：
 
-| Clip 目录 | 触发条件 | 循环 | 约帧/fps | 行为说明 |
-| --- | --- | --- | --- | --- |
-| `idle_blink` | **默认待机**（`IDLE_BASE`） | 是 | 60 / 20 | 坐姿呼吸 + 眨眼；连续采样 |
-| `idle_stretch` | Idle base 上约 **30s** 随机 one-shot | 否 | 30 / 20 | 伸懒腰，播完回 `idle_blink` |
-| `idle_cute` | 同上 30s 池 | 否 | 30 / 20 | 卖萌/歪头 |
-| `idle_tail_wag` | 同上 30s 池 | 否 | 24 / 16 | 轻摇/轻晃（当前视频源复用 cute 片段） |
-| `idle_sleep` | 同上 30s 池 | 否 | 24 / 12 | 小睡感（当前源复用 idle 片段） |
-| `idle_watch` | `Watching`（鼠标中距 120–300px） | 是 | 40 / 16 | 观察；**不进** 30s 动作池 |
-| `approaching` | `Approaching` 扑向光标（**当前关闭**） | 否 | 30 / 24 | 资源保留；`ENABLE_MOUSE_POUNCE` 后期再开 |
-| `playing_interaction` | 扑后互动（依赖飞扑，**当前基本不进**） | 是 | 24 / 16 | 资源保留 |
-| `dragging` | `Dragging` | 是 | 16 / 12 | 拖动晃动反馈 |
-| `edge_peek` | `HiddenAtEdge` | 是 | 16 / 10 | 边缘探头 |
-| `reminder_wave` | 提醒移动/展示阶段 | 是 | 24 / 16 | 提醒姿态 |
-| `reminder_feed` | 提醒投喂阶段 | 是 | 20 / 16 | 投喂满足 |
+- 拖动打断提醒 → 结束后再处理 pending。  
+- 提醒中不进菜单；菜单中不自动扑近。  
+- 开坞前若 `HiddenAtEdge`：`snap_restore_from_edge` 再 place。
 
-**状态 → clip 映射**（`PetController::switch_clip_for_state`）：
+### 3.2 动画资源
 
-| `PetState` | Clip |
+路径：`assets/pets/cow-cat/<clip>/`（PNG + `meta.json`，常见 256 帧图）。
+
+| Clip | 用途 |
 | --- | --- |
-| `Idle(name)` | `name`（base=`idle_blink` 或 30s action 名） |
-| `Watching` | `idle_watch` |
-| `Approaching` | `approaching`（进度驱动 `display_frame_f`） |
-| `PlayingInteraction` | `playing_interaction` |
-| `Dragging` | `dragging` |
-| `HiddenAtEdge` | `edge_peek` |
-| `Reminder(Feeding)` | `reminder_feed` |
-| `Reminder(*)` 其它子阶段 | `reminder_wave` |
-| `MenuOpen` | `idle_blink` |
+| `idle_blink` | 默认待机（循环） |
+| `idle_stretch` / `cute` / `tail_wag` / `sleep` | 30s 撒娇 one-shot |
+| `idle_watch` | Watching |
+| `approaching` / `playing_interaction` | 飞扑链路（**运行关闭**） |
+| `dragging` / `edge_peek` | 拖动 / 边缘 |
+| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 |
 
 **待机规则**
 
-- Base：`idle_blink`（`loop=true`）。
-- 30s 动作池：`idle_stretch` / `idle_cute` / `idle_tail_wag` / `idle_sleep`（`loop=false`）；`IdlePicker` 防短历史连播。
-- **墙钟计时**：自上次撒娇起满 30s 即可再触发；**Watching 不重置**（中距鼠标不再饿死定时撒娇）。
-- 可在 `Idle` 或 `Watching` 时启动 one-shot；播完回 `idle_blink`。
-- one-shot 至少播约 **3s**（自动降 fps），避免 1.5s 闪过看不清。
+- Base：`idle_blink`。  
+- 墙钟约 30s 随机 one-shot；**Watching 不重置** 30s 计时。  
+- one-shot 需足够长（约 ≥3s 可感知）。  
 
-**飞扑（后期）**
+**飞扑**
 
-- 开关：`pet::ENABLE_MOUSE_POUNCE`（**当前 `false`**）。关闭时近距只 `Watching`。
-- 实现草稿仍保留：位移抛物线、`progress` 驱动 `approaching` 帧、水平镜像；重新打开开关即可恢复联调。
+- `ENABLE_MOUSE_POUNCE = false`：近距只 Watching。  
+- 资源与路径代码保留，后期开开关。
 
-**呈现与管线**
+### 3.3 移动
 
-- 主循环 ~33ms；`display_rgba()` = `frame_rgba_smooth(display_frame_f)`。
-- 透明：CPU RGBA → `UpdateLayeredWindow(ULW_ALPHA)`；抽帧**仅品红键**，勿键纯黑（伤黑毛）。
-- 视频：`tools/gen_pet_videos.py` → `_video/*.mp4` → `tools/extract_video_frames.py`；降级 `build_coherent_30fps.py`。
+`movement`：去光标（抛物线，飞扑用）、回家、去屏幕中心、边缘 hide/restore。缓动见 design `ease.smooth`。
 
-提醒状态优先级高于普通互动，但不应打断用户正在进行的拖动。拖动结束后，如果提醒仍处于待处理状态，再进入提醒流程。
+---
 
-### 6.2 快捷方式模型
+## 4. 窗口与呈现
 
-```rust
-struct ShortcutItem {
-    id: Uuid,
-    name: String,
-    target_path: PathBuf,
-    arguments: Vec<String>,
-    working_directory: Option<PathBuf>,
-    icon_path: Option<PathBuf>,
-    sort_order: u32,
-    enabled: bool,
-}
-```
+### 4.1 窗口属性
 
-设计要求：
+- 无边框、置顶、不抢焦点。  
+- 关窗 ≠ 退出（退出走托盘）。  
+- 位置：工作区坐标；多屏用宠所在屏 `work_area`；显示器变化时钳制。
 
-- 使用稳定 `id`，避免通过名称识别项目。
-- `sort_order` 只表达用户排序，不依赖数组索引。
-- 启动前校验目标路径；路径失效时保留条目并提示用户修复或删除。
-- 对名称、路径和参数做长度限制，避免异常配置影响菜单布局。
-
-### 6.3 应用配置模型
-
-```rust
-struct AppConfig {
-    schema_version: u32,
-    pet: PetConfig,
-    reminder: ReminderConfig,
-    shortcuts: Vec<ShortcutItem>,
-    window: WindowConfig,
-}
-
-struct ReminderConfig {
-    enabled: bool,
-    interval_minutes: u32,
-    custom_messages: Vec<String>,
-    last_completed_at: Option<DateTime<Utc>>,
-}
-```
-
-配置必须带 `schema_version`，后续增加字段时通过迁移逻辑兼容旧版本。
-
-## 7. 窗口与交互设计
-
-### 7.1 宠物窗口
-
-宠物窗口采用以下属性：
-
-- 无边框。
-- 透明背景，仅绘制宠物和必要 UI。
-- 默认置顶，但不抢夺输入焦点。
-- 支持鼠标穿透策略切换：宠物区域可点击，透明区域尽量不拦截桌面操作。
-- 支持自由拖动。
-- 支持多显示器坐标体系。
-- 关闭窗口时不直接退出，退出由托盘菜单执行。
-
-窗口位置使用屏幕工作区坐标保存。保存前需要记录当前显示器标识或工作区信息；显示器移除时，将宠物位置限制到当前可用工作区内。
-
-### 7.2 边缘行为
-
-当宠物窗口进入屏幕边缘阈值区域时，触发 `HiddenAtEdge`：
-
-1. 计算需要隐藏的窗口比例。
-2. 以短时缓动动画移动到边缘。
-3. 保留可点击的探头区域。
-4. 鼠标进入探头区域或用户点击时恢复显示。
-
-边缘阈值、隐藏比例和动画时长放入配置常量，后续可以开放到设置界面。
-
-### 7.3 快捷菜单
-
-单击宠物后打开以宠物中心为基准的径向菜单。菜单展开方向根据宠物所在屏幕区域自动选择：
-
-- 左侧区域：优先向右展开。
-- 右侧区域：优先向左展开。
-- 顶部区域：优先向下展开。
-- 底部区域：优先向上展开。
-- 角落区域：选择可用空间最大的方向，必要时退化为弧形菜单。
-
-菜单项分为固定入口和动态快捷方式两类。动态快捷方式按 `sort_order` 渲染，菜单尺寸超过屏幕可用空间时使用分页或滚动布局。
-
-## 8. 动画与渲染方案
-
-### 8.1 资源格式
-
-首期建议使用精灵图或按动作拆分的 PNG/WebP 帧序列，并配套元数据：
-
-```json
-{
-  "name": "tail_wag",
-  "frame_width": 256,
-  "frame_height": 256,
-  "frames": 12,
-  "fps": 12,
-  "loop": true,
-  "anchor": { "x": 128, "y": 230 }
-}
-```
-
-动画资源在应用启动后按需加载，并缓存已使用的纹理。睡觉等低活动动画可以降低更新频率，减少 CPU 占用。
-
-### 8.2 动画控制器
-
-动画控制器至少包含：
-
-- 当前动作。
-- 当前帧。
-- 动作开始时间。
-- 播放速度。
-- 是否循环。
-- 动画结束回调。
-
-使用基于时间的帧推进，不依赖固定渲染帧数。非循环 clip 在时长结束时发出 finished，供 idle action / 扑姿收尾。待机 base 与 30s one-shot 见 §6.1；动作池内避免短历史重复。
-
-### 8.3 性能策略
-
-- 宠物未发生变化时不强制高频重绘。
-- 待机状态目标刷新率建议为 12～24 FPS；菜单和移动状态临时提高刷新率。
-- 复用纹理和绘制缓冲区，避免每帧分配大对象。
-- 不在渲染循环中读取磁盘、解析配置或查询进程列表。
-- 菜单关闭后释放不必要的临时布局状态，但保留常用图标缓存。
-
-## 9. 提醒服务设计
-
-### 9.1 调度规则
-
-默认每 60 分钟触发一次。应用启动时根据 `last_completed_at` 计算是否需要补发提醒：
-
-- 若应用关闭期间未超过一个周期，不补发。
-- 若超过一个周期，只补发一次，避免启动时连续弹出多次提醒。
-- 用户完成投喂后更新 `last_completed_at`。
-- 用户暂停提醒时停止计时，恢复后重新开始一个完整周期。
-
-调度器不直接操作窗口，只发布 `ReminderDue` 事件。
-
-### 9.2 提醒流程
+### 4.2 呈现路径（关键）
 
 ```text
-Timer -> ReminderDue
-       -> 保存宠物原位置
-       -> 移动到当前屏幕工作区中心
-       -> 播放提醒动画
-       -> 随机展示提示文案
-       -> 显示食物按钮
-       -> 用户点击食物
-       -> 播放投喂反馈
-       -> 返回原位置
-       -> 更新 last_completed_at
+业务合成 RGBA（逻辑布局 × DPR → 物理缓冲）
+        ↓
+UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 ```
 
-如果用户在提醒过程中点击关闭或切换应用，应保留提醒状态，并允许通过托盘菜单重新进入提醒或标记为稍后提醒。
+- **禁止**在宠物 HWND 上挂 DXGI/wgpu surface。  
+- 透明命中：按 alpha / 实体区；勿对整窗永久 `WS_EX_TRANSPARENT`。  
+- 色键：资源处理**仅品红**；禁止黑键（伤黑毛）。
 
-## 10. 快捷方式管理
+### 4.3 DPI
 
-### 10.1 添加
+- 布局用逻辑像素（96 DPI 基准）。  
+- 合成与窗尺寸：`logical × snap_dpr` → 物理。  
+- 叠层 UI 尽量 1:1 物理像素绘制，避免模糊放大。
 
-支持通过文件选择器选择 `.lnk` 文件、可执行文件或其他可启动文件。添加后解析名称、目标路径、参数和工作目录，保存为应用内部模型。
+### 4.4 叠层模式（同一 HWND）
 
-### 10.2 删除与排序
-
-- 删除操作需要二次确认，且只删除应用配置中的条目，不删除用户磁盘上的原快捷方式。
-- 排序使用拖拽或上移/下移操作。
-- 排序结果经过防抖后持久化。
-
-### 10.3 启动
-
-启动前执行路径存在性和权限检查。启动过程使用 Windows 进程 API，并将失败原因转换为用户可读提示：文件不存在、无权限、参数错误或系统拒绝启动。
-
-快捷方式中的参数不得通过未经处理的 shell 拼接执行，避免命令注入和引号解析问题。
-
-## 11. 数据存储
-
-### 11.1 文件位置
-
-配置建议保存在当前用户的应用数据目录，例如：
-
-```text
-%APPDATA%/PawDesk/config.json
-%APPDATA%/PawDesk/backups/config.json.bak
-%LOCALAPPDATA%/PawDesk/logs/app.log
-```
-
-实际应用名和目录名应在项目初始化时统一定义。
-
-### 11.2 原子写入
-
-配置保存流程：
-
-1. 序列化到临时文件。
-2. 刷新文件内容。
-3. 将临时文件原子替换为正式配置文件。
-4. 保留最近一次备份。
-
-读取失败时优先尝试备份文件；两者均失败时加载默认配置并记录错误日志。
-
-## 12. 事件与消息设计
-
-```rust
-enum AppEvent {
-    Tick(Instant),
-    MouseMoved(Point),
-    MousePressed(MouseButton),
-    MouseReleased(MouseButton),
-    WindowMoved(Point),
-    ReminderDue,
-    FeedCompleted,
-    ShortcutSelected(Uuid),
-    ShortcutOperationFinished(Result<ShortcutItem, AppError>),
-    ConfigChanged,
-    TrayCommand(TrayCommand),
-}
-```
-
-事件处理建议采用“输入事件 -> 领域事件 -> 状态变化 -> UI 更新”的顺序。领域模块不依赖具体窗口控件，从而便于单元测试和未来更换 UI 实现。
-
-## 13. 错误处理与日志
-
-统一错误类型至少覆盖：
-
-- 配置读写错误。
-- 动画资源加载错误。
-- Windows API 调用错误。
-- 快捷方式解析错误。
-- 进程启动错误。
-- 无效用户输入。
-
-日志级别建议：
-
-- `error`：功能失败、配置损坏、系统 API 错误。
-- `warn`：快捷方式失效、资源缺失、自动修正位置。
-- `info`：启动、退出、提醒触发、快捷方式变更。
-- `debug`：状态切换、动画切换、鼠标距离计算。
-
-面向用户的错误提示应避免展示底层堆栈；详细信息写入日志用于诊断。
-
-## 14. 安全与隐私
-
-- 应用只读取用户主动选择的快捷方式和配置文件。
-- 不采集键盘输入、剪贴板内容或屏幕截图。
-- 鼠标距离检测仅在本地窗口交互范围内使用，不上传数据。
-- 启动外部程序时避免拼接未经校验的 shell 命令。
-- 配置文件按当前用户权限写入，不要求管理员权限。
-- 如果后续支持开机启动，应提供明确的设置开关和卸载清理逻辑。
-
-## 15. 性能指标与监控
-
-### 15.1 目标指标
-
-- 常驻后台 CPU 占用小于 3%（待机场景，具体结果受硬件和渲染后端影响）。
-- 常驻内存小于 200 MB。
-- 普通交互响应时间小于 100 ms。
-- 应用启动后 2 秒内显示宠物窗口，资源较慢时允许先显示占位帧。
-- 配置保存不阻塞 UI，不造成明显卡顿。
-
-### 15.2 测量场景
-
-1. 宠物静止待机 10 分钟。
-2. 连续播放动画 10 分钟。
-3. 打开快捷菜单并频繁切换项目。
-4. 多次触发提醒、投喂和返回动画。
-5. 单屏和双屏环境下拖动宠物。
-
-使用 Windows 任务管理器和项目内日志采集资源数据，发布前记录基准结果。
-
-## 16. 测试方案
-
-### 16.1 单元测试
-
-- 宠物状态转换合法性。
-- 待机动画随机选择和冷却逻辑。
-- 鼠标距离计算、方向判断和边缘阈值。
-- 提醒周期、暂停、恢复和启动补发策略。
-- 配置序列化、默认值和版本迁移。
-- 快捷方式排序和失效路径处理。
-
-### 16.2 集成测试
-
-- 配置文件原子保存和异常恢复。
-- 快捷方式添加、删除、启动流程。
-- 托盘命令与应用状态同步。
-- 多显示器工作区边界处理。
-
-### 16.3 手工验收
-
-- 宠物能否拖动且不会永久跑出屏幕。
-- 透明区域是否错误拦截鼠标操作。
-- 菜单在屏幕四边和四角是否完整可见。
-- 提醒过程中关闭、拖动、打开菜单时状态是否一致。
-- 重启应用后位置、排序和提醒设置是否保留。
-
-## 17. 发布与运维
-
-### 17.1 构建产物
-
-- Windows x64 发布包。
-- 安装包或便携版二选一，首期优先便携版降低安装复杂度。
-- 资源文件与可执行文件版本保持一致。
-
-### 17.2 发布检查
-
-- 使用 release 构建并启用优化。
-- 检查动画资源是否完整打包。
-- 检查无管理员权限运行。
-- 检查卸载或删除目录后配置是否符合预期。
-- 检查 Windows Defender 或企业环境下的启动行为。
-
-## 18. 分阶段实施计划
-
-### 阶段一：技术验证
-
-- 创建 Rust Windows 桌面窗口。
-- 验证透明、置顶、拖动和托盘能力。
-- 绘制单帧奶牛猫资源。
-- 建立基础事件循环和日志。
-
-### 阶段二：宠物核心能力
-
-- 实现宠物状态机。
-- 接入待机动画播放器。
-- 实现鼠标距离互动。
-- 实现边缘隐藏和探头行为。
-
-### 阶段三：提醒功能
-
-- 实现提醒调度器。
-- 实现移动到中心、提示文案和食物按钮。
-- 实现投喂完成和返回原位置。
-- 增加暂停提醒和启动恢复逻辑。
-
-### 阶段四：快捷访问
-
-- 实现快捷方式数据模型和配置存储。
-- 实现添加、删除、排序和启动。
-- 实现自适应径向菜单。
-- 增加失效快捷方式处理。
-
-### 阶段五：稳定性与发布（M5 · 已交付底线）
-
-- 完成配置迁移钩子（schema v2）与异常恢复路径。
-- 工作区位置钳制；隐藏时降帧；release 便携包 `dist/PawDesk`。
-- 设置内提醒开关/间隔；托盘完整菜单；资源路径相对 exe。
-- 性能基线手工长测与双屏热插拔可继续在 M6 补强。
-
-### 阶段六：质量迭代（M6 · 当前）
-
-优先级（与 `task.md` §13 一致）：
-
-1. **改 bug / 稳定性**（提醒窗跳变、设置回位、异步选文件回归等）
-2. **交互逻辑**（锚定、hover 态、状态优先级验收）
-3. **UI 修复**（启动坞/设置/提醒卡手感与对齐）
-4. **宠物动作与形象（最后）**：飞扑重开、clip 精修、形象重绘 —— 勿提前插入阻塞 1–3
-
-主呈现路径保持：CPU RGBA + `UpdateLayeredWindow`；宠物 HWND 不挂 DXGI/wgpu。
-
-## 19. 关键技术风险与应对
-
-| 风险 | 影响 | 应对方案 |
+| 模式 | 大致尺寸 | 说明 |
 | --- | --- | --- |
-| 透明窗口兼容性差异 | 宠物背景出现黑边或无法置顶 | 封装 Windows 窗口能力，建立不同系统版本的手工测试矩阵 |
-| 动画资源过大 | 内存和启动时间增加 | 使用精灵图、按需加载、纹理缓存和资源压缩 |
-| 鼠标穿透与点击冲突 | 宠物无法点击或阻塞桌面 | 将命中测试限定到非透明区域，并提供交互模式切换 |
-| 多显示器坐标复杂 | 宠物跑出可视区域 | 统一使用虚拟桌面坐标，移动后进行工作区约束 |
-| 快捷方式格式复杂 | 添加后无法正确启动 | 首期优先支持常见 `.lnk` 和可执行文件，解析失败时允许手动修正 |
-| 长时间运行状态漂移 | 提醒或动画异常 | 使用单调时钟驱动动画和计时，定期记录状态并处理系统休眠恢复 |
+| 宠物 | 128×128 逻辑 | 日常 |
+| 启动坞 | union(宠, 卡) | `place_launcher` |
+| 提醒 | 固定提醒窗 | 居中 |
+| 设置 | ~420×580 逻辑 | 居中 |
 
-## 20. 验收标准
+`overlay_origin`：进叠层前宠物 top-left；退出恢复；**禁止**把坞临时坐标写入配置。
 
-首期版本满足以下条件即可进入发布候选阶段：
+---
 
-1. 应用启动后可显示奶牛猫悬浮窗，支持拖动和托盘退出。
-2. 宠物可循环播放至少 5 类待机动画。
-3. 鼠标接近时能触发观察或扑近互动，互动结束后回到待机。
-4. 每小时提醒一次，能够完成展示、投喂和返回流程。
-5. 快捷菜单可根据宠物位置选择合理展开方向。
-6. 用户可以添加、删除、排序并启动 Windows 软件快捷方式。
-7. 重启应用后配置、位置和快捷方式顺序保持不变。
-8. 典型待机场景 CPU 小于 3%、内存小于 200 MB。
-9. 单元测试覆盖状态机、提醒调度和配置读写等核心逻辑。
+## 5. 快捷启动坞
+
+### 5.1 产品契约（对照 PRD）
+
+- 单击开坞；宠物为**屏幕锚点**。  
+- 卡片为玻璃浮层；**非**径向环。  
+- 任意 work area 位置：整卡可点、尽量不裁切。
+
+### 5.2 放置算法 `place_launcher`（物理像素）
+
+模块：`src/ui/launcher_place.rs`。
+
+```text
+输入：pet 屏矩形、card 宽高、gap、work、margin
+  1. Flip   水平优先右，不够则左（必要时上/下）
+  2. Shift  只动 card 进 work
+  3. Union  W = union(pet, card) + padding（padding 不挤出 work）
+  4. 仅当 content 仍越界 → 整体微移（记录 pet_screen_delta）
+输出：window / pet_local / card_local / dir
+```
+
+辅助：`logical_to_physical` / `physical_to_logical` / `snap_dpr`。
+
+### 5.3 接线与绘制
+
+| 步骤 | 位置 |
+| --- | --- |
+| 开坞 | `app::enter_menu_ui`：探头 snap → place → resize + 定位 |
+| 布局 | `layout_pinned`：条目在 **card** 内；宠在 **pet_local** |
+| 绘制 | `compose_menu_frame`：仅 card 区玻璃；宠精灵；hover/失效态 |
+| 动画 | `menu_open_t`：开 ~250ms snappy；关 ~180ms smooth；几何锁定 |
+| 关坞 | Closing 完 → `restore_overlay_origin`；280ms 防连点 |
+| 多屏 | `work_area_from_point(宠中心)` |
+
+卡片逻辑尺寸常量：`CARD_LOGICAL_W/H`（约 360×300）。  
+设置：失效项可 `settings_highlight_row` 高亮列表行。
+
+### 5.4 不做
+
+- 系统 Acrylic / 实时抓屏 blur（半透明色 + 高光拟态即可）。  
+- 双进程独立启动器窗口。
+
+---
+
+## 6. 健康提醒
+
+### 6.1 调度
+
+- 默认间隔 60 分钟（设置 15–180）。  
+- 单调时钟；暂停整周期不累计误触。  
+- 启动补发：**最多一次**，不连弹。  
+- `last_completed_at` 写配置。
+
+### 6.2 流程
+
+```text
+Due → 存原位 → 移中央 → Showing（文案+食物）
+    → 点食物 Feeding → 回原位 Returning → Idle
+```
+
+拖动中 due → pending；松手后再进。隐藏宠物时 due 可 pending，显示后再出。
+
+---
+
+## 7. 快捷方式与配置
+
+### 7.1 ShortcutItem
+
+字段：`id (Uuid)` · `name` · `target_path` · `arguments` · `working_directory` · `icon_path` · `sort_order` · `enabled`。
+
+- 启动前校验路径；失效保留 + UI 提示。  
+- 删除只删配置条目。  
+- 启动：安全 API，禁止危险 shell 拼接。
+
+### 7.2 配置
+
+路径：`%APPDATA%/PawDesk/config.json`（以 env 为准）。
+
+- `schema_version` + 迁移。  
+- 原子写 + `.bak`。  
+- 防抖：拖动位置、排序等。
+
+### 7.3 日志
+
+`%LOCALAPPDATA%/PawDesk/logs/` · `tracing`。
+
+---
+
+## 8. 性能、错误与发布
+
+### 8.1 性能策略
+
+| 状态 | 建议 |
+| --- | --- |
+| 待机 | 约 12–24 FPS 量级；隐藏可再降 |
+| 菜单/移动/提醒 | 临时提帧 |
+| 目标 | 待机 CPU &lt; 3%、内存 &lt; 200MB（PRD） |
+
+### 8.2 错误
+
+- 统一 `AppError`；用户可读 + 日志细节。  
+- 启动失败、选文件取消、配置损坏：不崩，可回退默认/备份。
+
+### 8.3 发布
+
+- `tools/package.ps1` → `dist/PawDesk/`（exe + assets）。  
+- 无管理员常规运行；资源相对 exe。
+
+### 8.4 测试
+
+- 单元：状态机、调度、配置、排序、**place_launcher**、菜单布局。  
+- 手工：四边四角开坞、探头开坞、提醒冲突、托盘、DPI 缩放。
+
+---
+
+## 9. 风险与技术验收
+
+### 9.1 风险
+
+| 风险 | 应对 |
+| --- | --- |
+| 透明窗黑边 / 兼容 | 真机验 layered；禁用错误色键 |
+| 命中与穿透 | 实体 alpha；叠层全捕获点击 |
+| 动画体积 | 分 clip、按需加载 |
+| 多屏坐标 | work area + 钳制 + 托盘找回 |
+| 长时间时钟 | 单调时钟；休眠后抽测 |
+
+### 9.2 技术验收（对照 PRD §7）
+
+1. 透明可拖宠物 + 配置恢复。  
+2. 多待机 / 30s 撒娇。  
+3. 边缘探头。  
+4. 鼠标观察（飞扑可选关）。  
+5. 提醒投喂闭环。  
+6. **钉宠启动坞** 四边四角整卡在 work 内。  
+7. 快捷方式 CRUD + 启动 + 失效提示。  
+8. 托盘完整。  
+9. 性能量级达标。  
+10. 核心单测通过。
+
+---
+
+## 10. 版本记录
+
+| 版本 | 日期 | 说明 |
+| --- | --- | --- |
+| v0.1 | 2026-08-01 | 初稿 |
+| v0.2 | 2026-08-04 | 钉宠 §7.3、呈现路径 |
+| **v0.3** | **2026-08-04** | **按模块重排**；阅读导航；与 PRD v0.4 / 钉宠实现同步 |
