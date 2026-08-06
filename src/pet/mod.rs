@@ -6,7 +6,7 @@ mod movement;
 mod state;
 
 pub use animation::{
-    AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE,
+    blend_rgba_premul, AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE,
     IDLE_ACTION_INTERVAL_SECS,
 };
 pub use interaction::{DistanceLevel, InteractionDetector};
@@ -25,6 +25,12 @@ use crate::platform::Rect;
 
 const INTERACTION_DURATION: Duration = Duration::from_millis(1500);
 const FEED_DURATION: Duration = Duration::from_millis(900);
+/// Soft blend when switching clips (reduces hard pose pops).
+const CLIP_CROSSFADE_SECS: f32 = 0.14;
+/// Extra hold on last frame of one-shot cute actions before returning to base.
+const ACTION_SETTLE_SECS: f32 = 0.22;
+/// One-shot cute actions play at least this long (readable on desktop).
+const ACTION_MIN_SECS: f32 = 2.8;
 
 /// Mouse pounce (`Approaching` → cursor) is deferred to a later polish pass.
 /// When `false`, near-range only keeps `Watching` (no leap / fly-to-cursor).
@@ -33,8 +39,15 @@ pub const ENABLE_MOUSE_POUNCE: bool = false;
 /// Reminder UI layout in logical pixels (96 DPI baseline).
 pub const REMINDER_WINDOW_W: u32 = 360;
 pub const REMINDER_WINDOW_H: u32 = 260;
+/// Design baseline pet window (logical px @ 96 DPI). Actual size = baseline × `pet.scale`.
 pub const PET_WINDOW_SIZE: u32 = 128;
 pub const FOOD_BUTTON_SIZE: f32 = 64.0;
+
+/// Logical pet window edge length from config scale (clamped).
+pub fn pet_logical_size(scale: f32) -> u32 {
+    let s = scale.clamp(0.5, 2.0);
+    ((PET_WINDOW_SIZE as f32) * s).round().clamp(64.0, 256.0) as u32
+}
 
 /// High-level pet controller used by the app loop.
 pub struct PetController {
@@ -68,10 +81,15 @@ pub struct PetController {
     pub menu_closing: bool,
     /// `menu_open_t` at the moment close started (for reverse lerp).
     menu_close_from_t: f32,
-    /// Horizontal facing while approaching: -1 = face left, 1 = face right.
+    /// Horizontal facing while approaching / watching: -1 = face left, 1 = face right.
     pub face_dir: f32,
     /// Continuous frame index for smooth 30fps sampling (`frame_rgba_smooth`).
     pub display_frame_f: f32,
+    /// Previous clip pixels while crossfading into the new clip.
+    crossfade_from: Option<Vec<u8>>,
+    crossfade_started: Option<Instant>,
+    /// 0 = full previous frame, 1 = full current clip.
+    crossfade_t: f32,
 }
 
 impl PetController {
@@ -115,12 +133,51 @@ impl PetController {
             menu_close_from_t: 1.0,
             face_dir: 1.0,
             display_frame_f: 0.0,
+            crossfade_from: None,
+            crossfade_started: None,
+            crossfade_t: 1.0,
         }
     }
 
-    /// RGBA for current display with sub-frame blending (smooth 30fps).
+    /// RGBA for current display with sub-frame blending + optional clip crossfade.
     pub fn display_rgba(&self) -> Vec<u8> {
-        self.active_clip().frame_rgba_smooth(self.display_frame_f)
+        let current = self.active_clip().frame_rgba_smooth(self.display_frame_f);
+        if let Some(from) = &self.crossfade_from {
+            if self.crossfade_t < 0.999 && from.len() == current.len() {
+                let t = crate::render::easing::ease_smooth(self.crossfade_t);
+                return blend_rgba_premul(from, &current, t);
+            }
+        }
+        current
+    }
+
+    /// True while a clip crossfade is still visible (caller should keep presenting).
+    pub fn is_crossfading(&self) -> bool {
+        self.crossfade_from.is_some() && self.crossfade_t < 1.0
+    }
+
+    /// Capture current pixels and start a soft transition into the next clip.
+    fn begin_crossfade(&mut self, now: Instant) {
+        // Sample without recursive crossfade so we freeze the outgoing pose cleanly.
+        let from = self.active_clip().frame_rgba_smooth(self.display_frame_f);
+        self.crossfade_from = Some(from);
+        self.crossfade_started = Some(now);
+        self.crossfade_t = 0.0;
+    }
+
+    fn tick_crossfade(&mut self, now: Instant) -> bool {
+        let Some(start) = self.crossfade_started else {
+            return false;
+        };
+        let u = (now.duration_since(start).as_secs_f32() / CLIP_CROSSFADE_SECS).clamp(0.0, 1.0);
+        let changed = (u - self.crossfade_t).abs() > 0.0005;
+        self.crossfade_t = u;
+        if u >= 1.0 {
+            self.crossfade_from = None;
+            self.crossfade_started = None;
+            self.crossfade_t = 1.0;
+        }
+        changed
     }
 
     pub fn active_clip(&self) -> &AnimationClip {
@@ -145,7 +202,7 @@ impl PetController {
         self.movement.cancel();
         if let Ok(s) = try_transition(&self.state, PetState::Dragging) {
             self.state = s;
-            self.drag_scale = 1.03;
+            self.drag_scale = 1.05;
             self.food_button_rect = None;
             self.switch_clip_for_state(now);
             debug!(at = ?now, "pet begin drag");
@@ -283,8 +340,22 @@ impl PetController {
     }
 
     pub fn tick(&mut self, now: Instant) -> bool {
+        let mut changed = self.tick_crossfade(now);
+
+        // Dragging: keep swing clip alive + subtle scale pulse (was frozen before).
         if matches!(self.state, PetState::Dragging) {
-            return false;
+            let prev_f = self.display_frame_f;
+            let (frame, _) = self.tick_continuous(now);
+            let elapsed = now
+                .duration_since(self.player.started_at_pub())
+                .as_secs_f32();
+            // Soft “held by scruff” bob — snappy but readable.
+            self.drag_scale = 1.045 + 0.028 * (elapsed * 7.0).sin();
+            if frame != self.current_frame || (self.display_frame_f - prev_f).abs() > 0.0005 {
+                changed = true;
+            }
+            self.current_frame = frame;
+            return changed;
         }
 
         let on_base = self.player.clip_name() == IDLE_BASE && self.state.is_idle();
@@ -306,11 +377,14 @@ impl PetController {
             self.tick_continuous(now)
         };
 
-        let mut changed = frame != self.current_frame
-            || (self.display_frame_f - frame as f32).abs() > 0.001;
+        if frame != self.current_frame
+            || (self.display_frame_f - frame as f32).abs() > 0.001
+        {
+            changed = true;
+        }
         self.current_frame = frame;
 
-        // One-shot idle action finished → back to sit+blink.
+        // One-shot idle action finished (includes settle hold) → back to sit+blink.
         if on_action && finished {
             self.picker.mark_action_done(now);
             self.go_idle(now);
@@ -327,17 +401,18 @@ impl PetController {
         // Watching no longer starves the timer (medium-range mouse is common).
         if on_base || matches!(self.state, PetState::Watching) {
             if let Some(action) = self.picker.maybe_start_action(now) {
-                if let Some(clip) = self.library.get(&action) {
-                    // Watching -> Idle(action) or Idle(base) -> Idle(action)
+                if self.library.get(&action).is_some() {
                     let ok = if self.state.is_idle() {
                         try_transition(&self.state, PetState::Idle(action.clone())).is_ok()
                     } else {
-                        // Watching -> Idle is legal
                         try_transition(&self.state, PetState::Idle(action.clone())).is_ok()
                     };
                     if ok {
                         self.state = PetState::Idle(action.clone());
-                        self.player = AnimationPlayer::start(clip, now);
+                        self.begin_crossfade(now);
+                        if let Some(clip) = self.library.get(&action) {
+                            self.player = AnimationPlayer::start(clip, now);
+                        }
                         self.current_frame = 0;
                         self.display_frame_f = 0.0;
                         changed = true;
@@ -420,15 +495,14 @@ impl PetController {
     fn tick_continuous(&mut self, now: Instant) -> (u32, bool) {
         let n = self.player.frame_count_pub().max(1) as f32;
         let mut fps = self.active_clip().fps.max(1.0);
-        // One-shot cute actions: stretch to at least ~3s so the motion is noticeable.
-        if self.state.is_idle()
+        // One-shot cute actions: stretch to at least ~ACTION_MIN_SECS so motion is readable.
+        let oneshot_action = self.state.is_idle()
             && self.player.clip_name() != IDLE_BASE
-            && !self.player.is_looping()
-        {
-            let min_secs = 3.0_f32;
+            && !self.player.is_looping();
+        if oneshot_action {
             let natural = n / fps;
-            if natural < min_secs {
-                fps = n / min_secs;
+            if natural < ACTION_MIN_SECS {
+                fps = n / ACTION_MIN_SECS;
             }
         }
         let elapsed = now
@@ -437,8 +511,10 @@ impl PetController {
         let frame_f = elapsed * fps;
         let finished = if self.player.is_looping() {
             false
+        } else if oneshot_action {
+            // Play through frames, then hold last pose briefly before settling to base.
+            frame_f >= n + ACTION_SETTLE_SECS * fps
         } else {
-            // Hold last frame briefly then finish.
             frame_f >= n
         };
         let f = if self.player.is_looping() {
@@ -498,7 +574,16 @@ impl PetController {
 
         let level = self.interaction.compute_level_stable(pet_center, cursor);
         let prev = self.state.clone();
+        let prev_face = self.face_dir;
         let dwell_ok = self.interaction.watch_dwell_ready(level, now);
+
+        // Face the cursor while interested (Watching / near) so the look feels alive.
+        if !matches!(level, DistanceLevel::Far) {
+            let dx = cursor.x - pet_center.x;
+            if dx.abs() > 10.0 {
+                self.face_dir = if dx < 0.0 { -1.0 } else { 1.0 };
+            }
+        }
 
         match level {
             DistanceLevel::Far => {
@@ -516,7 +601,7 @@ impl PetController {
                     if self.is_on_base_idle() || matches!(self.state, PetState::Watching) {
                         if let Some(until) = self.next_approach_at {
                             if now < until {
-                                return self.state != prev;
+                                return self.state != prev || (self.face_dir - prev_face).abs() > 0.0;
                             }
                         }
                         if can_interrupt(
@@ -536,7 +621,7 @@ impl PetController {
             }
         }
 
-        self.state != prev
+        self.state != prev || (self.face_dir - prev_face).abs() > 0.0
     }
 
     /// Sit+blink base only (not mid one-shot cute clip).
@@ -644,13 +729,21 @@ impl PetController {
         }
         let edge = InteractionDetector::detect_edge(pet_rect, work_area)?;
         let current_pos = Point::new(pet_rect.x as f64, pet_rect.y as f64);
-        self.begin_edge_hide(edge, current_pos, now);
+        let size = pet_rect.width.max(pet_rect.height).max(1) as u32;
+        self.begin_edge_hide(edge, current_pos, size, now);
         Some(edge)
     }
 
-    pub fn begin_edge_hide(&mut self, edge: Edge, current_pos: Point, now: Instant) {
+    pub fn begin_edge_hide(
+        &mut self,
+        edge: Edge,
+        current_pos: Point,
+        window_size: u32,
+        now: Instant,
+    ) {
         self.pre_edge_position = Some(current_pos);
-        let hidden = InteractionDetector::compute_hidden_position(current_pos, edge, 128);
+        let size = window_size.max(1);
+        let hidden = InteractionDetector::compute_hidden_position(current_pos, edge, size);
         self.hidden_position = Some(hidden);
         if let Ok(s) = try_transition(&self.state, PetState::HiddenAtEdge(edge)) {
             self.state = s;
@@ -682,9 +775,13 @@ impl PetController {
             self.pre_edge_position = None;
             self.hidden_position = None;
             self.picker.mark_base(now);
-            if let Some(clip) = self.library.get(&name) {
-                self.player = AnimationPlayer::start(clip, now);
+            if self.library.get(&name).is_some() {
+                self.begin_crossfade(now);
+                if let Some(clip) = self.library.get(&name) {
+                    self.player = AnimationPlayer::start(clip, now);
+                }
                 self.current_frame = 0;
+                self.display_frame_f = 0.0;
             }
         }
     }
@@ -703,6 +800,10 @@ impl PetController {
         if let Ok(s) = try_transition(&self.state, PetState::Idle(name.clone())) {
             self.state = s;
             self.picker.mark_base(now);
+            // Instant for launcher placement — skip crossfade so dock places cleanly.
+            self.crossfade_from = None;
+            self.crossfade_started = None;
+            self.crossfade_t = 1.0;
             if let Some(clip) = self.library.get(&name) {
                 self.player = AnimationPlayer::start(clip, now);
                 self.current_frame = 0;
@@ -912,12 +1013,22 @@ impl PetController {
 
     fn go_idle(&mut self, now: Instant) {
         let name = self.picker.pick_initial(now);
+        let target_name = if self.library.get(&name).is_some() {
+            name.clone()
+        } else {
+            IDLE_BASE.to_string()
+        };
+        let need_xfade = target_name != self.player.clip_name();
+
         // Allow Idle(any) -> Idle(base) by setting state directly when already idle.
         if self.state.is_idle() {
-            self.state = PetState::Idle(name.clone());
+            self.state = PetState::Idle(target_name.clone());
+            if need_xfade {
+                self.begin_crossfade(now);
+            }
             if let Some(clip) = self
                 .library
-                .get(&name)
+                .get(&target_name)
                 .or_else(|| self.library.get(IDLE_BASE))
             {
                 self.player = AnimationPlayer::start(clip, now);
@@ -925,14 +1036,18 @@ impl PetController {
                 self.display_frame_f = 0.0;
             }
             self.home_position = None;
-            debug!("pet -> idle base {name}");
+            self.drag_scale = 1.0;
+            debug!("pet -> idle base {target_name}");
             return;
         }
-        if let Ok(s) = try_transition(&self.state, PetState::Idle(name.clone())) {
+        if let Ok(s) = try_transition(&self.state, PetState::Idle(target_name.clone())) {
             self.state = s;
+            if need_xfade {
+                self.begin_crossfade(now);
+            }
             if let Some(clip) = self
                 .library
-                .get(&name)
+                .get(&target_name)
                 .or_else(|| self.library.get(IDLE_BASE))
             {
                 self.player = AnimationPlayer::start(clip, now);
@@ -940,7 +1055,8 @@ impl PetController {
                 self.display_frame_f = 0.0;
             }
             self.home_position = None;
-            debug!("pet -> idle base {name}");
+            self.drag_scale = 1.0;
+            debug!("pet -> idle base {target_name}");
         }
     }
 
@@ -960,13 +1076,16 @@ impl PetController {
         if clip_name == self.player.clip_name() {
             return;
         }
+        if self.library.get(&clip_name).is_none() {
+            warn!(clip = %clip_name, "clip not found");
+            return;
+        }
+        self.begin_crossfade(now);
         if let Some(clip) = self.library.get(&clip_name) {
             self.player = AnimationPlayer::start(clip, now);
             self.current_frame = 0;
             self.display_frame_f = 0.0;
             debug!(clip = %clip_name, "switched clip for state {}", self.state.name());
-        } else {
-            warn!(clip = %clip_name, "clip not found");
         }
     }
 }

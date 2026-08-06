@@ -644,12 +644,14 @@ fn draw_chevron(out: &mut [u8], w: u32, cx: i32, cy: i32, dpi: Dpi, c: [u8; 4]) 
 // ── Settings / Manager (M5: reminder + shortcuts) ─────────────────────────
 
 pub const SETTINGS_W: u32 = 420;
-pub const SETTINGS_H: u32 = 580;
+pub const SETTINGS_H: u32 = 640;
 pub const ROW_H: f32 = 48.0;
-/// Shortcut list starts below reminder card.
-pub const LIST_TOP: f32 = 214.0;
+/// Shortcut list starts below reminder + pet-size cards.
+pub const LIST_TOP: f32 = 300.0;
 const REMINDER_CARD_TOP: f32 = 72.0;
 const REMINDER_CARD_H: f32 = 120.0;
+const PET_CARD_TOP: f32 = 204.0;
+const PET_CARD_H: f32 = 72.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SettingsHit {
@@ -658,6 +660,8 @@ pub enum SettingsHit {
     IntervalDec,
     IntervalInc,
     TogglePause,
+    PetScaleDec,
+    PetScaleInc,
     Add,
     RowToggle(usize),
     RowUp(usize),
@@ -666,10 +670,12 @@ pub enum SettingsHit {
 }
 
 /// `reminder`: (enabled, interval_minutes, paused)
+/// `pet_scale`: relative size vs 128px baseline (e.g. 0.6)
 /// `highlight_row`: optional list index to emphasize (invalid shortcut from launcher).
 pub fn compose_settings_frame(
     names: &[(String, bool, bool)],
     reminder: (bool, u32, bool),
+    pet_scale: f32,
     dpr: f32,
     highlight_row: Option<usize>,
 ) -> (u32, u32, Vec<u8>) {
@@ -903,6 +909,106 @@ pub fn compose_settings_frame(
         dpi,
     );
 
+    // ── Pet size card ──
+    let pc_top = dpi.s(PET_CARD_TOP);
+    let pc_h = dpi.s(PET_CARD_H);
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(20.0),
+        pc_top,
+        wf - dpi.s(20.0),
+        pc_top + pc_h,
+        dpi.s(14.0),
+        GROUPED_BG,
+    );
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "宠物大小",
+        dpi.s(36.0),
+        dpi.s(PET_CARD_TOP + 12.0),
+        dpi.su(160),
+        dpi.px(13.0),
+        SECONDARY,
+    );
+    // [−]
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(36.0),
+        dpi.s(PET_CARD_TOP + 36.0),
+        dpi.s(68.0),
+        dpi.s(PET_CARD_TOP + 64.0),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "−",
+        dpi.s(36.0),
+        dpi.s(PET_CARD_TOP + 36.0),
+        dpi.s(32.0),
+        dpi.s(28.0),
+        dpi.px(18.0),
+        LABEL,
+        dpi,
+    );
+    let pct = ((pet_scale * 100.0).round() as i32).clamp(50, 150);
+    let scale_label = format!("{pct}%");
+    blit_text(
+        &mut out,
+        w,
+        h,
+        &scale_label,
+        dpi.s(88.0),
+        dpi.s(PET_CARD_TOP + 42.0),
+        dpi.su(72),
+        dpi.px(16.0),
+        LABEL,
+    );
+    // [+]
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(168.0),
+        dpi.s(PET_CARD_TOP + 36.0),
+        dpi.s(200.0),
+        dpi.s(PET_CARD_TOP + 64.0),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "+",
+        dpi.s(168.0),
+        dpi.s(PET_CARD_TOP + 36.0),
+        dpi.s(32.0),
+        dpi.s(28.0),
+        dpi.px(18.0),
+        LABEL,
+        dpi,
+    );
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "相对默认尺寸 · 托盘也可调",
+        dpi.s(220.0),
+        dpi.s(PET_CARD_TOP + 44.0),
+        dpi.su(180),
+        dpi.px(12.0),
+        TERTIARY,
+    );
+
     // ── Shortcut list ──
     blit_text(
         &mut out,
@@ -1058,6 +1164,18 @@ pub fn hit_settings(local_x: f32, local_y: f32, row_count: usize) -> Option<Sett
         && (REMINDER_CARD_TOP + 62.0..=REMINDER_CARD_TOP + 94.0).contains(&local_y)
     {
         return Some(SettingsHit::IntervalInc);
+    }
+    // Pet scale −
+    if (32.0..=72.0).contains(&local_x)
+        && (PET_CARD_TOP + 34.0..=PET_CARD_TOP + 66.0).contains(&local_y)
+    {
+        return Some(SettingsHit::PetScaleDec);
+    }
+    // Pet scale +
+    if (164.0..=204.0).contains(&local_x)
+        && (PET_CARD_TOP + 34.0..=PET_CARD_TOP + 66.0).contains(&local_y)
+    {
+        return Some(SettingsHit::PetScaleInc);
     }
     if (24.0..=w - 24.0).contains(&local_x) && (h - 72.0..=h - 24.0).contains(&local_y) {
         return Some(SettingsHit::Add);

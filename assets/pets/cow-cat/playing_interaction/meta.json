@@ -3,7 +3,7 @@
   "frame_width": 256,
   "frame_height": 256,
   "frames": 24,
-  "fps": 16.0,
+  "fps": 30.0,
   "loop": true,
   "anchor": {
     "x": 128,
@@ -35,5 +35,5 @@
     "22.png",
     "23.png"
   ],
-  "source": "video_extract"
+  "source": "coherent_warp"
 }

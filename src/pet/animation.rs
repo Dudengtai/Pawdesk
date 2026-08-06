@@ -103,7 +103,8 @@ impl AnimationClip {
 }
 
 /// Premultiplied-alpha lerp of two tightly packed RGBA buffers (same length).
-fn blend_rgba_premul(a: &[u8], b: &[u8], t: f32) -> Vec<u8> {
+/// Used for sub-frame sampling and clip crossfades.
+pub fn blend_rgba_premul(a: &[u8], b: &[u8], t: f32) -> Vec<u8> {
     let n = a.len().min(b.len());
     let mut out = vec![0u8; n];
     let t = t.clamp(0.0, 1.0);

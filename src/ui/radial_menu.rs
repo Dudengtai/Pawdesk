@@ -117,9 +117,9 @@ pub fn layout(entries: &[MenuEntry], dir: ExpandDir, open_t: f32) -> RadialLayou
     let ww = MENU_WINDOW_W as f32;
     let wh = MENU_WINDOW_H as f32;
 
-    // Avatar column — slightly taller plate, more air
-    let pet_w = 128.0;
-    let pet_h = 176.0;
+    // Avatar column — slightly taller plate, more air (matches default pet scale 0.6×128).
+    let pet_w = 77.0;
+    let pet_h = 108.0;
     let margin = 22.0;
     let gap_col = 20.0;
     let (pet_x, content_x, content_w) = match dir {

@@ -32,7 +32,11 @@ impl ConfigRepository {
     pub fn load(&self) -> AppConfig {
         match self.try_load(&self.config_path) {
             Ok(cfg) => {
-                info!(path = %self.config_path.display(), "config loaded");
+                info!(
+                    path = %self.config_path.display(),
+                    pet_scale = cfg.pet.scale,
+                    "config loaded"
+                );
                 return cfg;
             }
             Err(e) => warn!(
@@ -44,7 +48,15 @@ impl ConfigRepository {
 
         match self.try_load(&self.backup_path) {
             Ok(cfg) => {
-                warn!(path = %self.backup_path.display(), "loaded config from backup");
+                warn!(
+                    path = %self.backup_path.display(),
+                    pet_scale = cfg.pet.scale,
+                    "loaded config from backup; rewriting primary"
+                );
+                // Repair primary so next launch does not keep falling back to bak.
+                if let Err(e) = self.save(&cfg) {
+                    warn!(error = %e, "failed to rewrite primary config after backup load");
+                }
                 return cfg;
             }
             Err(e) => warn!(
@@ -54,15 +66,25 @@ impl ConfigRepository {
             ),
         }
 
-        AppConfig::default()
+        let cfg = AppConfig::default();
+        if let Err(e) = self.save(&cfg) {
+            warn!(error = %e, "failed to write default config");
+        }
+        cfg
     }
 
     fn try_load(&self, path: &Path) -> Result<AppConfig, AppError> {
-        let text = fs::read_to_string(path).map_err(|source| AppError::Io {
+        let bytes = fs::read(path).map_err(|source| AppError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let mut cfg: AppConfig = serde_json::from_str(&text)
+        // Strip UTF-8 BOM (PowerShell Set-Content often writes one and breaks serde).
+        let text = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            String::from_utf8_lossy(&bytes[3..]).into_owned()
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let mut cfg: AppConfig = serde_json::from_str(text.trim_start_matches('\u{feff}'))
             .map_err(|e| AppError::Config(format!("parse {}: {e}", path.display())))?;
         if cfg.schema_version > SCHEMA_VERSION {
             warn!(

@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.3** |
-| 依据 | `prd.md` v0.4 · `design.md` v0.4 |
+| 版本 | **v0.4**（2026-08-06：待机眨眼管线 + pet.scale UI） |
+| 依据 | `prd.md` v0.5 · `design.md` v0.5 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 
@@ -129,20 +129,24 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 
 路径：`assets/pets/cow-cat/<clip>/`（PNG + `meta.json`，常见 256 帧图）。
 
-| Clip | 用途 |
-| --- | --- |
-| `idle_blink` | 默认待机（循环） |
-| `idle_stretch` / `cute` / `tail_wag` / `sleep` | 30s 撒娇 one-shot |
-| `idle_watch` | Watching |
-| `approaching` / `playing_interaction` | 飞扑链路（**运行关闭**） |
-| `dragging` / `edge_peek` | 拖动 / 边缘 |
-| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 |
+| Clip | 用途 | 备注 |
+| --- | --- | --- |
+| `idle_blink` | 默认待机（循环） | **真眼皮替换**（虹膜 mask）；工具 `tools/build_idle_base.py` |
+| `idle_stretch` / `cute` / `tail_wag` / `sleep` | 30s 撒娇 one-shot | 身份一致 warp 序列见 `build_coherent_30fps.py` |
+| `idle_watch` | Watching | 无缝循环；进/出与坐姿对齐 |
+| `approaching` / `playing_interaction` | 飞扑链路（**运行关闭**） | |
+| `dragging` / `edge_peek` | 拖动 / 边缘 | 拖动态 **持续播帧** |
+| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | |
 
 **待机规则**
 
-- Base：`idle_blink`。  
+- Base：`idle_blink`（约 4s @30fps 循环；静坐 + 自然眨眼，忌身体大幅 morph 当第二层动画）。  
 - 墙钟约 30s 随机 one-shot；**Watching 不重置** 30s 计时。  
-- one-shot 需足够长（约 ≥3s 可感知）。  
+- one-shot 播放至少约 ≥2.8s 可感知；末帧短 hold 再回 base。  
+- clip 切换：`begin_crossfade` ≈ **140ms** 预乘 alpha 混合。  
+- 呈现：`display_frame_f` 亚帧混合 + 约 30fps 刷新密集 clip。  
+
+**下一步（工程）**：优化 one-shot 池资源与观感（`idle_stretch` / `cute` / `tail_wag` / `sleep`）— 任务 **PET-A07**（`task.md`）。优先 `tools/build_coherent_30fps.py` 分动作精修，保持单身份与脚底锚点。
 
 **飞扑**
 
@@ -153,6 +157,19 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 
 `movement`：去光标（抛物线，飞扑用）、回家、去屏幕中心、边缘 hide/restore。缓动见 design `ease.smooth`。
 
+### 3.4 显示缩放（`pet.scale`）
+
+| 项 | 说明 |
+| --- | --- |
+| 配置 | `config.pet.scale`（`AppConfig` / `%APPDATA%/PawDesk/config.json`） |
+| 基准 | `PET_WINDOW_SIZE = 128` 逻辑 px |
+| 实际边长 | `pet_logical_size(scale)` = round(128 × scale)，钳位约 64–256 |
+| 默认 | **0.6**（schema v3 迁移会把旧 `1.0` 拉到默认） |
+| 范围 / 步进 | **0.5–1.5** / **0.1**（`clamp_pet_scale` / `step_pet_scale`） |
+| 入口 | 设置页 `−`/`+`；托盘 `PetScaleUp` / `PetScaleDown` |
+| 生效 | 待机即时 `resize_pet_window`；设置内改配置，退出设置回宠窗时用新尺寸 |
+| 建窗 | `create_window` 用 `pet_size()`，并强制物理 resize（防 DPI 忽略 LogicalSize） |
+
 ---
 
 ## 4. 窗口与呈现
@@ -161,7 +178,8 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 
 - 无边框、置顶、不抢焦点。  
 - 关窗 ≠ 退出（退出走托盘）。  
-- 位置：工作区坐标；多屏用宠所在屏 `work_area`；显示器变化时钳制。
+- 位置：工作区坐标；多屏用宠所在屏 `work_area`；显示器变化时钳制。  
+- 宠窗逻辑边长随 `pet.scale` 变化（非写死 128）。
 
 ### 4.2 呈现路径（关键）
 
@@ -185,7 +203,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 
 | 模式 | 大致尺寸 | 说明 |
 | --- | --- | --- |
-| 宠物 | 128×128 逻辑 | 日常 |
+| 宠物 | 128×`pet.scale` 逻辑（默认 ~77） | 日常；用户可调 |
 | 启动坞 | union(宠, 卡) | `place_launcher` |
 | 提醒 | 固定提醒窗 | 居中 |
 | 设置 | ~420×580 逻辑 | 居中 |
@@ -272,13 +290,21 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 
 路径：`%APPDATA%/PawDesk/config.json`（以 env 为准）。
 
-- `schema_version` + 迁移。  
+- `schema_version` 当前 **3** + `migrate_config`。  
+  - v2→v3：将 `pet.scale` 置为产品默认 **0.6**（修正历史写死 1.0 过大）。  
+- 主要字段：`pet.scale` / `pet.opacity` / `pet.edge_hide_enabled` · `reminder.*` · `shortcuts[]` · `window.x/y`。  
+- 加载：去 UTF-8 BOM；主配置失败则读 `.bak` 并**回写主文件**；启动 load/migrate 后可立刻 save 固化迁移。  
 - 原子写 + `.bak`。  
-- 防抖：拖动位置、排序等。
+- 防抖：拖动位置、排序、scale 等。
 
-### 7.3 日志
+### 7.3 托盘命令
 
-`%LOCALAPPDATA%/PawDesk/logs/` · `tracing`。
+`TrayCommand`：`ShowPet` · `HidePet` · `PetScaleUp` · `PetScaleDown` · `ToggleReminderPause` · `OpenSettings` · `Exit`。
+
+### 7.4 日志
+
+`%LOCALAPPDATA%/PawDesk/logs/` · `tracing`。  
+启动应打：`pet_scale`、`pet_logical`、建窗 `logical`/`phys_w`（便于核对缩放是否生效）。
 
 ---
 
@@ -288,7 +314,7 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 
 | 状态 | 建议 |
 | --- | --- |
-| 待机 | 约 12–24 FPS 量级；隐藏可再降 |
+| 待机（密帧 blink） | 约 **30 FPS** 呈现亚帧混合；隐藏可再降 |
 | 菜单/移动/提醒 | 临时提帧 |
 | 目标 | 待机 CPU &lt; 3%、内存 &lt; 200MB（PRD） |
 
@@ -304,8 +330,8 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 
 ### 8.4 测试
 
-- 单元：状态机、调度、配置、排序、**place_launcher**、菜单布局。  
-- 手工：四边四角开坞、探头开坞、提醒冲突、托盘、DPI 缩放。
+- 单元：状态机、调度、配置、`clamp_pet_scale` / `step_pet_scale`、排序、**place_launcher**、菜单布局。  
+- 手工：四边四角开坞、探头开坞、提醒冲突、托盘、DPI 缩放、**宠物变大/变小与设置百分比**、待机眨眼观感。
 
 ---
 

@@ -6,10 +6,11 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.4**（2026-08-04：钉宠 Launcher 开发计划） |
-| 依据文档 | `prd.md` v0.4、`tech.md` v0.3、`design.md` v0.4 |
+| 当前版本 | **v0.5**（2026-08-06：待机真眨眼 + 宠物大小可调） |
+| 依据文档 | `prd.md` v0.5、`tech.md` v0.4、`design.md` v0.5 |
 | 环境参考 | `env.md` |
-| 状态 | **M0–M5 可日常使用**；**M6 进行中**；**M6-B 核心 = 钉宠 + Flip/Shift 启动坞**；形象/动作最后 |
+| 状态 | **M0–M5 可日常使用**；**M6 进行中** |
+| **下一步** | **优化 30s 随机撒娇 one-shot 动画效果**（`idle_stretch` / `cute` / `tail_wag` / `sleep`）→ 见 PET-A07 |
 
 ### 1.1 使用说明
 
@@ -27,6 +28,8 @@
 | v0.2 | 2026-08-04 | 记录 M0–M4 完成态 + 宠物/动画管线 + 快捷启动 Apple 风 UI 进度 |
 | v0.3 | 2026-08-04 | M5 交付同步；明确下阶段：修 bug / 交互 / UI，宠物形象动作最后 |
 | v0.4 | 2026-08-04 | 拍板启动坞 **钉宠 + Flip/Shift**；新增 §14 开发计划；对齐 design/tech §7 |
+| v0.5 | 2026-08-06 | 待机真眨眼资源 + clip 播放 polish；`pet.scale` 默认 0.6 + 设置/托盘手动调节；文档同步 prd/design/tech |
+| v0.5.1 | 2026-08-06 | 记录 **下一步 = 随机撒娇动画效果优化**（PET-A07）；release 便携包已打 |
 
 ---
 
@@ -178,7 +181,7 @@ foundation (工程/错误/日志/事件总线)
 | --- | --- | --- | --- | --- | --- | --- |
 | ASSET-01 | 资源目录与动画 JSON 元数据规范（帧尺寸、fps、loop、anchor） | M0 | P0 | FOUND-02 | tech §8.1, design §13 | [x] |
 | ASSET-02 | 奶牛猫占位单帧 / 占位精灵（可先程序员美术） | M0 | P0 | ASSET-01 | tech 阶段一 | [x] |
-| ASSET-03 | 待机：`idle_blink` + 30s 池（stretch/cute/tail/sleep）+ watch；视频抽帧 256 | M1 | P0 | ASSET-01 | prd F-AN-01, tech §6.1.1 | [x] |
+| ASSET-03 | 待机：`idle_blink`（真眨眼）+ 30s 池 + watch；256 帧图 | M1 | P0 | ASSET-01 | prd F-AN-01, tech §3.2 | [x] 2026-08-06 真眨眼重建 |
 | ASSET-04 | 互动 / 扑近 / 提醒 / 投喂相关帧 | M2–M3 | P0 | ASSET-03 | design §4.2, §6 | [x] |
 | ASSET-05 | 拖动、边缘探头状态视觉帧 | M2 | P1 | ASSET-03 | design §4.2, §5.2 | [x] |
 | ASSET-06 | 托盘图标 16/32 + 菜单固定入口图标 | M4 | P0 | ASSET-01 | design §9, §13 | [ ] |
@@ -305,10 +308,11 @@ foundation (工程/错误/日志/事件总线)
 | 任务 ID | 任务 | 里程碑 | 优先级 | 依赖 | 依据 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
 | TRAY-01 | 托盘图标创建（可先用占位图） | M0 | P0 | FOUND-06 | tech 阶段一, prd F-TR-01 | [x] |
-| TRAY-02 | 菜单：显示/隐藏宠物、暂停/恢复提醒、打开设置、退出 | M0 骨架 / M5 接齐 | P0 | TRAY-01 | prd F-TR-02, design §9 | [x] |
+| TRAY-02 | 菜单：显示/隐藏、变大/变小、暂停/恢复提醒、打开设置、退出 | M0 骨架 / M5 接齐 | P0 | TRAY-01 | prd F-TR-02, design §7.2 | [x] |
 | TRAY-03 | 退出：释放资源、刷配置、结束进程 | M0 | P0 | TRAY-02, CFG-04 | tech §7.1 | [x] |
 | TRAY-04 | 暂停/恢复提醒与 scheduler 同步 | M3 | P0 | RM-01, TRAY-02 | prd F-RM-04 | [x] |
 | TRAY-05 | 打开设置窗口 | M5 | P0 | SET-01 | prd F-ST-01 | [x] |
+| TRAY-07 | 宠物变大 / 变小（写 `pet.scale` + 待机即时改窗） | M6 | P0 | SET-04 | prd F-TR-02, F-UI-05 | [x] 2026-08-06 |
 | TRAY-06 | 替换为 design 规定的宠物头像托盘图 | M5 | P1 | ASSET-06 | design §9 | [x] |
 
 **完成标准**
@@ -325,7 +329,7 @@ foundation (工程/错误/日志/事件总线)
 | SET-01 | 独立设置窗口（建议 egui，与主窗渲染解耦） | M4 | P0 | FOUND-06 | tech §4.1, design §8 | [x] |
 | SET-02 | 快捷方式管理：列表、添加、删除确认、排序、启用开关 | M4 | P0 | SC-02, PLAT-06 | design §8.1, prd F-ST-01 | [x] |
 | SET-03 | 提醒设置：开关、间隔（默认 60，范围 15–180）、文案列表（若做） | M5 | P0 | CFG-07, RM-01 | design §8.1, prd Q1 | [x] |
-| SET-04 | 宠物设置：大小/透明度/边缘隐藏开关/主题跟随（按 design 首期能力裁剪） | M5 | P1 | CFG-01 | design §8.1 | [~] |
+| SET-04 | 宠物设置：大小（步进 UI）/透明度/边缘隐藏开关/主题跟随（按 design 首期能力裁剪） | M5 | P1 | CFG-01 | design §7.1, prd F-ST-03 | [x] 大小已交付 2026-08-06；透明度/主题仍可后置 |
 | SET-05 | 视觉换肤贴近 design token（非裸系统灰窗） | M5 | P1 | RND-06 | design §8.2 | [~] |
 | SET-06 | 关闭设置 ≠ 退出；配置变更防抖保存 | M5 | P0 | CFG-04 | prd §6.2 | [x] |
 | SET-07 | （P2）开机自启开关 | 后期 | P2 | SET-01 | prd Q2 | [ ] |
@@ -548,35 +552,69 @@ foundation (工程/错误/日志/事件总线)
 
 #### D. 宠物动作与形象（**最后**）
 
-| ID | 项 | 说明 |
-| --- | --- | --- |
-| PET-A01 | 待机 crossfade | 切换 clip 仍偏硬 |
-| PET-A02 | 飞扑重开与验收 | `ENABLE_MOUSE_POUNCE` |
-| PET-A03 | 新动作 / 视频抽帧补帧 | 工具链已有 |
-| PET-A04 | 形象重绘 / 瘦版统一 | 用户拍板后再做 |
-| PET-A05 | 提醒/投喂动作精修 | 依赖形象定稿 |
+| ID | 项 | 说明 | 状态 |
+| --- | --- | --- | --- |
+| PET-A01 | 待机 / 状态 clip crossfade | 切换约 140ms 预乘混合 | [x] 2026-08-06 |
+| PET-A01b | 待机真眨眼（非叠层黑斑） | `tools/build_idle_base.py` 虹膜 mask 眼皮 | [x] 2026-08-06 |
+| PET-A01c | 拖动态持续播帧 + scale 脉冲 | 曾错误 `tick` 直接 return | [x] 2026-08-06 |
+| PET-A02 | 飞扑重开与验收 | `ENABLE_MOUSE_POUNCE` | [ ] |
+| PET-A03 | 新动作 / 视频抽帧补帧 | 工具链已有 | [~] 并入 PET-A07 |
+| PET-A04 | 形象重绘 / 瘦版统一 | 用户拍板后再做 | [ ] |
+| PET-A05 | 提醒/投喂动作精修 | 依赖形象定稿 | [ ] |
+| PET-A06 | 宠物大小可调 | 设置 + 托盘；`pet.scale` 持久化 | [x] 2026-08-06 已测 |
+| **PET-A07** | **随机撒娇 one-shot 动画效果** | 见下节；**当前下一步** | **[ ] 待做** |
+
+#### PET-A07 — 随机播放动画效果（下一步 · 优先）
+
+**范围**：30s 池内 one-shot，非 base 眨眼、非 Watching。
+
+| Clip | 期望观感（产品） |
+| --- | --- |
+| `idle_stretch` | 伸懒腰可读、回坐姿自然 |
+| `idle_cute` | 卖萌/歪头，与 stretch 明显区分 |
+| `idle_tail_wag` | 轻摇/摆动节奏清晰，非单次歪头复制 |
+| `idle_sleep` | 打盹/闭眼沉一点，末段可 hold |
+
+**目标**
+
+1. 四套动作 **互异、可辨识**，同一身份（奶牛猫坐姿锚点稳定）。  
+2. 出/回坐姿顺滑；与 `idle_blink` 切换靠现有 crossfade，忌跳脚。  
+3. 时长可读（现状 runtime 会拉到约 ≥2.8s）；避免「闪一下」或全程像轻微 warp。  
+4. 可优先改资源（`build_coherent_30fps.py` 或分 clip 精修），播放器只在必要时调 timing/easing。  
+
+**不做（本项）**：飞扑重开、形象整只重绘、提醒/投喂大改。
+
+**验收（手工）**
+
+- 连续观察 ≥3 分钟：至少看到 2 种不同撒娇，且都能一眼认出种类。  
+- 回待机后无黑斑眼、无身体闪断。  
+- `dist` / release 资源与源 `assets` 一致。
 
 ### 11.3 实现备忘（长期有效）
 
-- 代码入口：`src/app.rs`、`src/pet/*`、`src/render/menu_ui.rs`、`src/render/text.rs`、`src/ui/radial_menu.rs`、`src/ui/tray.rs`、`src/platform/windows.rs`
-- **待机**：`idle_blink` + **30s** one-shot 池；中/近距 `Watching`（不扑）
-- **飞扑**：`ENABLE_MOUSE_POUNCE = false`；资源与进度同步代码保留
+- 代码入口：`src/app.rs`、`src/pet/*`、`src/render/menu_ui.rs`、`src/render/text.rs`、`src/ui/radial_menu.rs`、`src/ui/tray.rs`、`src/platform/windows.rs`、`src/config/*`
+- **待机**：`idle_blink`（真眨眼）+ **30s** one-shot 池；中/近距 `Watching`（不扑）；clip crossfade
+- **下一步动画**：优化随机 one-shot（PET-A07），工具 `tools/build_coherent_30fps.py`
+- **显示大小**：`config.pet.scale` 默认 **0.6**；`pet_logical_size`；设置 `PetScaleDec/Inc`；托盘变大/变小；schema **v3** 迁移
+- **飞扑**：`ENABLE_MOUSE_POUNCE = false`；资源与路径代码保留
 - **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `docs/mockups/launcher-pin-flip.*`
 - **呈现**：CPU RGBA → `UpdateLayeredWindow(ULW_ALPHA)` 预乘 BGRA；禁止宠物 HWND 挂 DXGI/wgpu
 - **色键**：仅品红；**禁止黑键**
-- **工具**：`tools/gen_pet_videos.py`、`extract_video_frames.py`、`set_pet_from_image.py`、`package.ps1`、`xai_video_i2v.py`
+- **工具**：`tools/build_idle_base.py`、`build_coherent_30fps.py`、`gen_pet_videos.py`、`extract_video_frames.py`、`set_pet_from_image.py`、`package.ps1`、`xai_video_i2v.py`
+- **配置坑**：勿用 PowerShell `Set-Content`/`ConvertTo-Json` 乱写 `config.json`（易 BOM/非法 JSON → 回退 bak 的旧 scale）
+- **便携包**：`tools/package.ps1` → `dist/PawDesk/`（不含 `_master` / `_video`）
 
-### 11.3.1 动作 clip 快照
+### 11.3.1 动作 clip 快照（2026-08-06）
 
 | 目录 | 用途 | 约规格 |
 | --- | --- | --- |
-| `idle_blink` | 默认待机 | 60f @20 loop |
-| `idle_stretch` / `idle_cute` / `idle_tail_wag` / `idle_sleep` | 30s 随机撒娇 | 24–30f one-shot |
-| `idle_watch` | 中距观察 | 40f @16 loop |
-| `approaching` | 飞扑（运行时关闭） | 30f @24 进度驱动 |
-| `playing_interaction` | 扑后互动 | 24f @16 |
-| `dragging` / `edge_peek` | 拖动 / 边缘 | 16f |
-| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | 20–24f |
+| `idle_blink` | 默认待机（真眨眼） | **120f @30 loop**（`idle_base_v2`） |
+| `idle_stretch` / `idle_cute` / `idle_tail_wag` / `idle_sleep` | 30s 随机撒娇 | ~36f one-shot @22–30 |
+| `idle_watch` | 中距观察 | 60f @30 loop |
+| `approaching` | 飞扑（运行时关闭） | 36f 进度驱动 |
+| `playing_interaction` | 扑后互动 | 24f loop |
+| `dragging` / `edge_peek` | 拖动 / 边缘 | 24f loop |
+| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | 24f |
 
 ### 11.4 透明底注意事项
 
@@ -585,7 +623,7 @@ foundation (工程/错误/日志/事件总线)
 
 ---
 
-## 12. 进度快照（2026-08-04 · 同步版）
+## 12. 进度快照（2026-08-06 · 同步版）
 
 ### 12.1 总体进度
 
@@ -599,17 +637,20 @@ foundation (工程/错误/日志/事件总线)
 | UI-P1 启动坞 | ✅ 初版 | Apple 风 + 中文 + HiDPI |
 | M5 日常化 | ✅ | 设置提醒、托盘、便携包、降帧 |
 | **M6 质量迭代** | 🔄 **进行中** | A bug → **B 钉宠 Launcher（§14）** → C 玻璃 UI → D 形象最后 |
+| **M6 动画/缩放增量** | ✅ 2026-08-06 | 真眨眼、crossfade、拖动动画、`pet.scale` UI |
 | 效果图 mockup | ✅ | `docs/mockups/launcher-preview.*` · `launcher-pin-flip.*` |
 
 ### 12.2 已交付能力摘要
 
 - 分层真透明桌宠 + 配置持久化 + 托盘完整菜单  
-- 待机眨眼 + 30s 撒娇；距离迟滞 / Watching 驻留  
+- **待机真眨眼** + 30s 撒娇；clip crossfade；距离迟滞 / Watching 驻留  
+- **宠物大小可调**（设置步进 + 托盘变大/变小；默认 0.6；schema v3）  
 - 提醒闭环 + 设置内开关/间隔/暂停  
 - 快捷启动坞（**固定侧栏卡初版**）+ 异步文件选择  
 - 隐藏不抢提醒；显示后 pending；工作区钳制  
-- 便携：`dist/PawDesk/`；单元测试 71 passed  
-- **待交付**：钉宠放置算法、开闭动画、半透明玻璃坞（§14）
+- 便携：`dist/PawDesk/`；单元测试 85 passed  
+- **下一步（拍板）**：**PET-A07 随机撒娇动画效果优化**  
+- **其后 / 并行**：钉宠 Launcher（§14）、飞扑、形象精修
 
 ### 12.3 本地路径
 

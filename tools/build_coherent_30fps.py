@@ -2,6 +2,8 @@
 
 All frames are warps / eyelid paint of the same base_sit pixels.
 No cross-identity AI hard cuts. Actions ease out-and-back to sit.
+
+Run:  python tools/build_coherent_30fps.py
 """
 
 from __future__ import annotations
@@ -17,20 +19,20 @@ OUT = ROOT / "assets" / "pets" / "cow-cat"
 MASTER = OUT / "_master" / "base_sit.png"
 SIZE = 256
 ANCHOR = {"x": 128, "y": 220}
-# Prefer 30 frames @ 30fps ≈ 1.0s one-shots; idle loop ~4s breathe+blink
-ACTION_FRAMES = 30
+# Idle ~4s breathe+blink; one-shots ~1.2s natural (runtime may stretch ≥3s)
+ACTION_FRAMES = 36
+IDLE_FRAMES = 120
 IDLE_FPS = 30.0
 ACTION_FPS = 30.0
 
 
 def load_base() -> Image.Image:
-    # Prefer current 256 master; fall back to 128 upscale
     if MASTER.is_file():
         im = Image.open(MASTER).convert("RGBA")
         if im.size != (SIZE, SIZE):
             im = im.resize((SIZE, SIZE), Image.Resampling.LANCZOS)
         return im
-    raise SystemExit(f"missing {MASTER} — run rebuild_quality_pet first or place base_sit.png")
+    raise SystemExit(f"missing {MASTER} — place base_sit.png under _master/")
 
 
 def write_set(name: str, frames: list[Image.Image], fps: float, loop: bool) -> None:
@@ -52,6 +54,7 @@ def write_set(name: str, frames: list[Image.Image], fps: float, loop: bool) -> N
         "loop": loop,
         "anchor": ANCHOR,
         "files": files,
+        "source": "coherent_warp",
     }
     (dest / "meta.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -65,10 +68,22 @@ def ease_in_out(t: float) -> float:
 
 
 def ease_out_back(t: float) -> float:
-    # 0..1 go out and return: triangle with smooth peak at 0.5
+    """0→1→0 with smooth peak at mid (go out and return)."""
     if t < 0.5:
         return ease_in_out(t * 2.0)
     return ease_in_out(2.0 - t * 2.0)
+
+
+def ease_out_back_hold(t: float, hold: float = 0.18) -> float:
+    """Out → hold near peak → back. hold is fraction of timeline at peak."""
+    hold = max(0.0, min(0.4, hold))
+    rise = (1.0 - hold) * 0.5
+    if t < rise:
+        return ease_in_out(t / max(1e-6, rise))
+    if t < rise + hold:
+        return 1.0
+    u = (t - rise - hold) / max(1e-6, rise)
+    return ease_in_out(1.0 - u)
 
 
 def warp(
@@ -90,7 +105,6 @@ def warp(
         nh = max(1, int(h * scale_y))
         scaled = im.resize((nw, nh), Image.Resampling.LANCZOS)
         canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        # keep pivot fixed
         ox = piv[0] - int(piv[0] * scale_x)
         oy = piv[1] - int(piv[1] * scale_y)
         canvas.paste(scaled, (ox, oy), scaled)
@@ -160,199 +174,269 @@ def paint_lids(base: Image.Image, amount: float) -> Image.Image:
             fb = sum(s[2] for s in samples) // len(samples)
         else:
             fr, fg, fb = 16, 16, 20
-        rx, ry = rad * 1.4, rad * (0.2 + 0.9 * amount)
+        rx, ry = rad * 1.45, rad * (0.18 + 0.95 * amount)
         draw.ellipse(
-            [cx - rx, cy - ry * 0.2, cx + rx, cy + ry],
-            fill=(fr, fg, fb, int(245 * amount)),
+            [cx - rx, cy - ry * 0.25, cx + rx, cy + ry],
+            fill=(fr, fg, fb, int(250 * amount)),
         )
-    ov = ov.filter(ImageFilter.GaussianBlur(0.7))
+    ov = ov.filter(ImageFilter.GaussianBlur(0.8))
     return Image.alpha_composite(img, ov)
 
 
-def sequence_out_and_back(n: int, peak_fn) -> list[Image.Image]:
-    """n frames, amplitude 0→1→0 via ease, peak_fn(amount)->Image."""
+def sequence_out_and_back(n: int, peak_fn, hold: float = 0.0) -> list[Image.Image]:
     frames = []
     for i in range(n):
         t = i / max(1, n - 1)
-        a = ease_out_back(t)
+        a = ease_out_back_hold(t, hold) if hold > 0 else ease_out_back(t)
         frames.append(peak_fn(a))
     return frames
 
 
 def main() -> None:
     base = load_base()
-    print(f"base {base.size} identity lock ON")
+    print(f"base {base.size} identity lock ON — regenerating coherent clips")
 
-    # ── Idle loop ~4s @ 30fps = 120 frames: breathe + rare blink ──
-    idle_n = 120
+    # ── Idle loop ~4s @ 30fps: breathe + two soft blinks (seamless loop) ──
     idle_frames: list[Image.Image] = []
-    for i in range(idle_n):
-        t = i / idle_n
-        # breathe: slow vertical squash/stretch around feet
-        breath = 1.0 + 0.018 * math.sin(t * math.tau * 2.0)  # 2 breaths per loop
+    for i in range(IDLE_FRAMES):
+        # phase in [0,1); sin(0)==sin(2π) ⇒ seamless seam
+        t = i / IDLE_FRAMES
+        breath = 1.0 + 0.022 * math.sin(t * math.tau * 2.0)  # 2 breaths / loop
         fr = warp(base, scale_y=breath, scale_x=2.0 - breath)
-        # blink near 70% and 92% of loop (two soft blinks)
         blink_amt = 0.0
-        for center in (0.70, 0.92):
+        for center in (0.38, 0.82):
             d = abs(t - center)
-            if d < 0.025:
-                # triangle blink 0→1→0 over ~0.05 of loop (~6 frames)
-                blink_amt = max(blink_amt, 1.0 - d / 0.025)
+            # ~5% of loop ≈ 6 frames soft blink
+            if d < 0.028:
+                blink_amt = max(blink_amt, 1.0 - d / 0.028)
         if blink_amt > 0:
             fr = paint_lids(fr, blink_amt)
         idle_frames.append(fr)
     write_set("idle_blink", idle_frames, fps=IDLE_FPS, loop=True)
 
-    # ── Actions: 30 frames, same identity warps ──
+    # ── Distinct one-shot actions ──
+    # Stretch: elongate body + slight lift (taller, not the same as sleep)
     write_set(
         "idle_stretch",
         sequence_out_and_back(
             ACTION_FRAMES,
             lambda a: warp(
                 base,
-                scale_y=1.0 + 0.10 * a,
-                scale_x=1.0 - 0.04 * a,
-                dy=-int(6 * a),
+                scale_y=1.0 + 0.14 * a,
+                scale_x=1.0 - 0.06 * a,
+                dy=-int(10 * a),
+                rot_deg=-2.0 * a,
             ),
+            hold=0.12,
         ),
         fps=ACTION_FPS,
         loop=False,
     )
+
+    # Cute: head tilt + soft lids + tiny lift
     write_set(
         "idle_cute",
         sequence_out_and_back(
             ACTION_FRAMES,
             lambda a: paint_lids(
-                warp(base, rot_deg=-8.0 * a, dy=-int(3 * a), scale_y=1.0 + 0.02 * a),
-                0.15 * a,
+                warp(
+                    base,
+                    rot_deg=-10.0 * a,
+                    dy=-int(4 * a),
+                    scale_y=1.0 + 0.03 * a,
+                    scale_x=1.0 + 0.01 * a,
+                ),
+                0.22 * a,
             ),
+            hold=0.14,
         ),
         fps=ACTION_FPS,
         loop=False,
     )
+
+    # Tail wag: multi-cycle sway (distinct from cute single tilt)
+    def tail_frame(a: float) -> Image.Image:
+        # a is envelope 0→1→0; inner oscil uses a as amplitude
+        wag = math.sin(a * math.pi * 4.0)  # two full wags while rising/falling
+        return warp(
+            base,
+            rot_deg=7.5 * wag * max(0.15, a),
+            dx=int(3 * wag * a),
+            dy=-int(1 * a),
+            scale_x=1.0 + 0.02 * abs(wag) * a,
+        )
+
     write_set(
         "idle_tail_wag",
-        sequence_out_and_back(
-            ACTION_FRAMES,
-            lambda a: warp(base, rot_deg=5.0 * math.sin(a * math.pi * 3.0), dy=-int(1 * a)),
-        ),
+        sequence_out_and_back(ACTION_FRAMES, tail_frame, hold=0.08),
         fps=ACTION_FPS,
         loop=False,
     )
+
+    # Sleep: crouch + fully closed eyes held longer
     write_set(
         "idle_sleep",
         sequence_out_and_back(
             ACTION_FRAMES,
             lambda a: paint_lids(
-                warp(base, scale_y=1.0 - 0.04 * a, dy=int(4 * a)),
-                min(1.0, a * 1.4),
+                warp(
+                    base,
+                    scale_y=1.0 - 0.07 * a,
+                    scale_x=1.0 + 0.04 * a,
+                    dy=int(8 * a),
+                    rot_deg=1.5 * a,
+                ),
+                min(1.0, a * 1.5),
             ),
+            hold=0.28,
         ),
-        fps=ACTION_FPS * 0.6,
+        fps=ACTION_FPS * 0.75,  # slower, sleepy
         loop=False,
     )
-    # Watching: gentle sway loop 60 frames
+
+    # Watching: gentle lean + head sway (loop seamless; frame 0 ≈ sit identity)
     watch = []
     for i in range(60):
-        t = i / 60
+        t = i / 60.0  # [0,1) so sin wraps cleanly 0→0
         s = math.sin(t * math.tau)
-        watch.append(warp(base, dx=int(3 * s), rot_deg=2.0 * s))
+        watch.append(
+            warp(
+                base,
+                dx=int(4 * s),
+                rot_deg=3.2 * s,
+                dy=-int(2 * abs(s)),
+                scale_y=1.0 + 0.012 * abs(s),
+            )
+        )
     write_set("idle_watch", watch, fps=IDLE_FPS, loop=True)
 
-    # ── Pounce: 30 frames identity warps (sit→crouch→air→land→sit) ──
+    # ── Pounce: crouch → air → land → sit ──
     pounce_frames: list[Image.Image] = []
     for i in range(ACTION_FRAMES):
         t = i / max(1, ACTION_FRAMES - 1)
         if t < 0.15:
-            # crouch
             u = ease_in_out(t / 0.15)
             pounce_frames.append(
-                warp(base, scale_y=1.0 - 0.12 * u, scale_x=1.0 + 0.06 * u, dy=int(8 * u))
+                warp(base, scale_y=1.0 - 0.14 * u, scale_x=1.0 + 0.08 * u, dy=int(10 * u))
             )
         elif t < 0.40:
-            # takeoff
             u = ease_in_out((t - 0.15) / 0.25)
             pounce_frames.append(
                 warp(
                     base,
-                    scale_y=1.0 + 0.08 * u,
-                    scale_x=1.0 - 0.05 * u,
-                    rot_deg=-12.0 * u,
-                    dy=-int(18 * u),
-                    dx=int(10 * u),
+                    scale_y=1.0 + 0.10 * u,
+                    scale_x=1.0 - 0.06 * u,
+                    rot_deg=-14.0 * u,
+                    dy=-int(22 * u),
+                    dx=int(12 * u),
                 )
             )
         elif t < 0.70:
-            # air hold with slight change
             u = (t - 0.40) / 0.30
             pounce_frames.append(
                 warp(
                     base,
-                    scale_y=1.06,
-                    scale_x=0.94,
-                    rot_deg=-14.0 + 4.0 * u,
-                    dy=-int(22 - 6 * u),
-                    dx=int(14 + 4 * u),
+                    scale_y=1.08,
+                    scale_x=0.93,
+                    rot_deg=-16.0 + 5.0 * u,
+                    dy=-int(26 - 8 * u),
+                    dx=int(16 + 4 * u),
                 )
             )
         elif t < 0.88:
-            # land
             u = ease_in_out((t - 0.70) / 0.18)
             pounce_frames.append(
                 warp(
                     base,
-                    scale_y=1.0 - 0.08 * u,
-                    scale_x=1.0 + 0.05 * u,
-                    rot_deg=-8.0 * (1.0 - u),
-                    dy=int(-8 + 14 * u),
-                    dx=int(10 * (1.0 - u)),
+                    scale_y=1.0 - 0.10 * u,
+                    scale_x=1.0 + 0.06 * u,
+                    rot_deg=-10.0 * (1.0 - u),
+                    dy=int(-10 + 16 * u),
+                    dx=int(12 * (1.0 - u)),
                 )
             )
         else:
-            # recover to sit
             u = ease_in_out((t - 0.88) / 0.12)
-            # from land pose back to identity
             pounce_frames.append(
                 warp(
                     base,
-                    scale_y=0.92 + 0.08 * u,
-                    scale_x=1.05 - 0.05 * u,
+                    scale_y=0.90 + 0.10 * u,
+                    scale_x=1.06 - 0.06 * u,
                     dy=int(6 * (1.0 - u)),
                 )
             )
     write_set("approaching", pounce_frames, fps=ACTION_FPS, loop=False)
 
-    # Interaction / drag / edge / reminder — still same base warps
-    play = sequence_out_and_back(
-        24,
-        lambda a: warp(base, rot_deg=-6.0 * math.sin(a * math.pi * 2), dy=-int(4 * a)),
-    )
+    # Play: happy bounce loop
+    play = []
+    for i in range(24):
+        t = i / 24.0
+        s = math.sin(t * math.tau * 2.0)
+        play.append(
+            warp(
+                base,
+                rot_deg=-5.0 * s,
+                dy=-int(5 * abs(s)),
+                scale_y=1.0 + 0.04 * abs(s),
+                scale_x=1.0 - 0.02 * abs(s),
+            )
+        )
     write_set("playing_interaction", play, fps=ACTION_FPS, loop=True)
 
+    # Dragging: swing like held by scruff (loop; lift is constant so 0→last is continuous)
     drag = []
     for i in range(24):
-        t = i / 24
-        drag.append(warp(base, rot_deg=8.0 * math.sin(t * math.tau), dy=-int(2)))
+        t = i / 24.0
+        s = math.sin(t * math.tau)
+        drag.append(
+            warp(
+                base,
+                rot_deg=11.0 * s,
+                dy=-int(5 + 2 * abs(s)),
+                scale_y=1.0 + 0.03 * abs(s),
+                scale_x=1.0 - 0.02 * abs(s),
+                pivot_y_ratio=0.22,  # pivot near head / scruff
+            )
+        )
     write_set("dragging", drag, fps=ACTION_FPS, loop=True)
 
+    # Edge peek: body lowered, head bob
     peek = []
     for i in range(24):
-        t = i / 24
-        peek.append(warp(base, dy=int(36 + 8 * math.sin(t * math.tau))))
-    write_set("edge_peek", peek, fps=12.0, loop=True)
+        t = i / 24.0
+        s = math.sin(t * math.tau)
+        peek.append(
+            warp(
+                base,
+                dy=int(40 + 6 * s),
+                rot_deg=2.0 * s,
+                scale_y=0.96,
+            )
+        )
+    write_set("edge_peek", peek, fps=14.0, loop=True)
 
-    wave = sequence_out_and_back(
-        24,
-        lambda a: warp(base, rot_deg=-10.0 * a, dy=-int(3 * a)),
-    )
+    # Reminder wave / feed
+    wave = []
+    for i in range(24):
+        t = i / 24.0
+        s = math.sin(t * math.tau * 2.0)
+        wave.append(warp(base, rot_deg=-12.0 * s, dy=-int(3 * abs(s)), dx=int(2 * s)))
     write_set("reminder_wave", wave, fps=ACTION_FPS, loop=True)
+
     feed = sequence_out_and_back(
         24,
-        lambda a: warp(base, scale_y=1.0 + 0.05 * a, dy=-int(4 * a)),
+        lambda a: warp(
+            base,
+            scale_y=1.0 + 0.06 * a,
+            scale_x=1.0 - 0.02 * a,
+            dy=-int(5 * a),
+            rot_deg=-3.0 * a,
+        ),
+        hold=0.2,
     )
     write_set("reminder_feed", feed, fps=ACTION_FPS, loop=True)
 
-    print("coherent 30fps sets written — single identity, warp-only motion")
+    print("done — single identity, distinct motions, seamless idle loop")
 
 
 if __name__ == "__main__":

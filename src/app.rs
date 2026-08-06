@@ -15,7 +15,7 @@ use crate::config::{AppConfig, ConfigRepository, DebouncedSaver};
 use crate::error::AppError;
 use crate::event::{AppEvent, Point, TrayCommand};
 use crate::pet::{
-    AnimationLibrary, PetController, PetState, ReminderStage, PET_WINDOW_SIZE, REMINDER_WINDOW_H,
+    pet_logical_size, AnimationLibrary, PetController, PetState, ReminderStage, REMINDER_WINDOW_H,
     REMINDER_WINDOW_W,
 };
 use crate::platform;
@@ -160,6 +160,17 @@ impl App {
         let repo = ConfigRepository::default_paths()?;
         info!(path = %repo.config_path().display(), "config path");
         let config = repo.load();
+        info!(
+            pet_scale = config.pet.scale,
+            pet_logical = pet_logical_size(config.pet.scale),
+            schema = config.schema_version,
+            "pet display size from config"
+        );
+        // Persist migrated fields (e.g. schema v3 scale) immediately so a crash
+        // or old process cannot leave disk on the pre-migration value.
+        if let Err(e) = repo.save(&config) {
+            warn!(error = %e, "failed to persist config after load/migrate");
+        }
         let saver = DebouncedSaver::new(repo);
 
         if let Ok(monitors) = platform::list_monitors_approx() {
@@ -187,8 +198,18 @@ impl App {
         Ok(())
     }
 
+    /// Pet window edge in logical px (design 128 × config scale).
+    fn pet_size(&self) -> u32 {
+        pet_logical_size(self.config.pet.scale)
+    }
+
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), AppError> {
-        let logical = platform::PET_WINDOW_LOGICAL_SIZE;
+        let logical = self.pet_size();
+        info!(
+            pet_scale = self.config.pet.scale,
+            logical,
+            "creating pet window"
+        );
         let attrs = Window::default_attributes()
             .with_title("PawDesk")
             .with_inner_size(LogicalSize::new(logical, logical))
@@ -206,7 +227,17 @@ impl App {
         );
 
         self.scale_factor = window.scale_factor();
-        info!(scale = self.scale_factor, "window DPI scale factor");
+        // Force physical size after create — some DPI paths ignore initial LogicalSize.
+        self.window = Some(window.clone());
+        self.resize_pet_window(logical, logical);
+        let inner = window.inner_size();
+        info!(
+            dpr = self.scale_factor,
+            logical,
+            phys_w = inner.width,
+            phys_h = inner.height,
+            "pet window size applied"
+        );
 
         // Critical on Windows: without DWM/layered setup the transparent pet window
         // composites as a solid white (or black) square even when textures have alpha.
@@ -266,14 +297,15 @@ impl App {
 
         info!(
             logical = logical,
-            scale = self.scale_factor,
+            pet_scale = self.config.pet.scale,
+            dpr = self.scale_factor,
             anim = %clip.name,
             "pet window + layered present + tray ready (M4)"
         );
 
         self.hit_rgba = first_frame;
         self.hit_size = (clip.frame_width, clip.frame_height);
-        self.window = Some(window);
+        // window already stored before resize
         self.tray = Some(tray);
         self.pet = Some(pet);
         self.last_frame = Instant::now();
@@ -305,8 +337,13 @@ impl App {
                 self.config.reminder.interval_minutes,
                 self.config.reminder.paused,
             );
-            let (w, h, composed) =
-                compose_settings_frame(&rows, reminder, dpr, self.settings_highlight_row);
+            let (w, h, composed) = compose_settings_frame(
+                &rows,
+                reminder,
+                self.config.pet.scale,
+                dpr,
+                self.settings_highlight_row,
+            );
             // Logical size for hit-mapping; physical pixels in hit_rgba.
             self.sprite_logical = (SETTINGS_W, SETTINGS_H);
             self.hit_rgba = composed;
@@ -346,8 +383,14 @@ impl App {
                         &entries,
                         lw,
                         lh,
-                        (0.0, 0.0, 128.0, 128.0),
-                        (128.0, 0.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+                        {
+                            let ps = self.pet_size() as f32;
+                            (0.0, 0.0, ps, ps)
+                        },
+                        {
+                            let ps = self.pet_size() as f32;
+                            (ps, 0.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32)
+                        },
                         radial_menu::ExpandDir::Right,
                         1.0,
                     )
@@ -448,7 +491,14 @@ impl App {
             .pet
             .as_ref()
             .map(|p| {
-                matches!(p.state, crate::pet::PetState::Approaching { .. }) && p.face_dir < 0.0
+                // Face left while watching the cursor / approaching / mid-play.
+                let may_mirror = matches!(
+                    p.state,
+                    crate::pet::PetState::Approaching { .. }
+                        | crate::pet::PetState::Watching
+                        | crate::pet::PetState::PlayingInteraction(_)
+                );
+                may_mirror && p.face_dir < 0.0
             })
             .unwrap_or(false);
 
@@ -569,7 +619,8 @@ impl App {
         if let Some(pet) = self.pet.as_mut() {
             pet.food_button_rect = None;
         }
-        self.resize_pet_window(PET_WINDOW_SIZE, PET_WINDOW_SIZE);
+        let s = self.pet_size();
+        self.resize_pet_window(s, s);
         if let Some(w) = &self.window {
             w.set_outer_position(PhysicalPosition::new(top_left.x as i32, top_left.y as i32));
         }
@@ -595,7 +646,8 @@ impl App {
         self.menu_ui_active = false;
         self.settings_ui_active = false;
         self.menu_layout = None;
-        self.resize_pet_window(PET_WINDOW_SIZE, PET_WINDOW_SIZE);
+        let s = self.pet_size();
+        self.resize_pet_window(s, s);
         if let Some(w) = &self.window {
             w.set_outer_position(PhysicalPosition::new(origin.x as i32, origin.y as i32));
         }
@@ -626,7 +678,7 @@ impl App {
 
         let dpr = snap_dpr(self.scale_factor);
         let origin = self.overlay_origin.unwrap_or(Point::new(100.0, 100.0));
-        let pet_phys = logical_to_physical(PET_WINDOW_SIZE, dpr);
+        let pet_phys = logical_to_physical(self.pet_size(), dpr);
         let pet_rect = platform::Rect {
             x: origin.x as i32,
             y: origin.y as i32,
@@ -989,6 +1041,12 @@ impl App {
                     info!(paused, "settings: reminder pause toggled");
                 }
             }
+            SettingsHit::PetScaleDec => {
+                self.nudge_pet_scale(-1);
+            }
+            SettingsHit::PetScaleInc => {
+                self.nudge_pet_scale(1);
+            }
             SettingsHit::Add => {
                 self.begin_pick_executable();
             }
@@ -1082,7 +1140,8 @@ impl App {
             .map(|p| Point::new(p.x as f64, p.y as f64))
             .unwrap_or(Point::new(100.0, 100.0));
 
-        let center = self.work_area_center_top_left(PET_WINDOW_SIZE as i32, PET_WINDOW_SIZE as i32);
+        let s = self.pet_size() as i32;
+        let center = self.work_area_center_top_left(s, s);
         let msg = pick_message(&self.config.reminder.custom_messages);
 
         if let Some(pet) = self.pet.as_mut() {
@@ -1193,7 +1252,53 @@ impl App {
                 }
                 self.enter_settings_ui();
             }
+            TrayCommand::PetScaleUp => {
+                info!("tray: PetScaleUp");
+                self.nudge_pet_scale(1);
+            }
+            TrayCommand::PetScaleDown => {
+                info!("tray: PetScaleDown");
+                self.nudge_pet_scale(-1);
+            }
         }
+    }
+
+    /// Adjust pet scale by N steps (±1 typical). Persists and resizes pet window when idle.
+    fn nudge_pet_scale(&mut self, delta_steps: i32) {
+        let next = crate::config::step_pet_scale(self.config.pet.scale, delta_steps);
+        if (next - self.config.pet.scale).abs() < 0.001 {
+            info!(
+                scale = self.config.pet.scale,
+                "pet scale already at limit"
+            );
+            return;
+        }
+        self.config.pet.scale = next;
+        if let Some(saver) = self.saver.as_mut() {
+            saver.mark_dirty();
+        }
+        // Apply live when not in an expanded overlay (settings/menu/reminder keep their size).
+        let overlay =
+            self.settings_ui_active || self.menu_ui_active || self.reminder_ui_active;
+        if !overlay {
+            let s = self.pet_size();
+            self.resize_pet_window(s, s);
+            self.texture_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        } else {
+            // Settings panel still open — just refresh the percentage label.
+            self.texture_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        info!(
+            scale = next,
+            logical = pet_logical_size(next),
+            "pet scale changed"
+        );
     }
 
     fn clamp_window_to_work_area(&mut self) {
@@ -1261,18 +1366,24 @@ impl App {
         let animating = self.pet.as_ref().map(|p| {
             p.movement.is_active()
                 || p.is_playing_cute_action()
+                || p.is_crossfading()
                 || matches!(
                     p.state,
                     PetState::Approaching { .. }
                         | PetState::PlayingInteraction(_)
                         | PetState::Reminder(_)
                         | PetState::MenuOpen
+                        | PetState::Watching
+                        | PetState::Dragging
+                        | PetState::HiddenAtEdge(_)
                 )
+                // Dense idle loops (breath + blink) need ~30fps for smooth sub-frame blend.
+                || p.state.is_idle()
         }).unwrap_or(false);
         if animating {
             Duration::from_millis(33)
         } else {
-            // RND-07: calmer idle cadence.
+            // RND-07: calmer cadence only when nothing is animating.
             Duration::from_millis(66)
         }
     }
@@ -1356,9 +1467,11 @@ impl ApplicationHandler<UserEvent> for App {
                         self.exit_reminder_ui_to_pet_size(pos);
                     } else if self.settings_ui_active {
                         self.settings_ui_active = false;
-                        self.resize_pet_window(PET_WINDOW_SIZE, PET_WINDOW_SIZE);
+                        let s = self.pet_size();
+                        self.resize_pet_window(s, s);
                     } else if self.overlay_origin.is_some() && !self.menu_ui_active {
-                        self.resize_pet_window(PET_WINDOW_SIZE, PET_WINDOW_SIZE);
+                        let s = self.pet_size();
+                        self.resize_pet_window(s, s);
                         if let Some(o) = self.overlay_origin {
                             if let Some(w) = &self.window {
                                 w.set_outer_position(PhysicalPosition::new(o.x as i32, o.y as i32));
@@ -1805,8 +1918,19 @@ impl ApplicationHandler<UserEvent> for App {
                         self.texture_dirty = true;
                     }
                 }
-                // Idle dense loop always advances — keep presenting at 30fps.
-                if pet.state.is_idle() || matches!(pet.state, PetState::Approaching { .. }) {
+                // Dense sprite loops always advance — keep presenting at ~30fps.
+                if pet.is_crossfading()
+                    || pet.state.is_idle()
+                    || matches!(
+                        pet.state,
+                        PetState::Approaching { .. }
+                            | PetState::Watching
+                            | PetState::Dragging
+                            | PetState::HiddenAtEdge(_)
+                            | PetState::PlayingInteraction(_)
+                            | PetState::Reminder(_)
+                    )
+                {
                     need_redraw = true;
                     self.texture_dirty = true;
                 }
@@ -1828,8 +1952,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handle_feed_completed(now);
                     self.feed_persist_pending = false;
                 }
-                let center_small =
-                    self.work_area_center_top_left(PET_WINDOW_SIZE as i32, PET_WINDOW_SIZE as i32);
+                let ps = self.pet_size() as i32;
+                let center_small = self.work_area_center_top_left(ps, ps);
                 self.exit_reminder_ui_to_pet_size(center_small);
                 if let Some(pet) = self.pet.as_mut() {
                     pet.start_reminder_return(center_small, now);

@@ -2,8 +2,8 @@
   "name": "reminder_feed",
   "frame_width": 256,
   "frame_height": 256,
-  "frames": 20,
-  "fps": 16.0,
+  "frames": 24,
+  "fps": 30.0,
   "loop": true,
   "anchor": {
     "x": 128,
@@ -29,7 +29,11 @@
     "16.png",
     "17.png",
     "18.png",
-    "19.png"
+    "19.png",
+    "20.png",
+    "21.png",
+    "22.png",
+    "23.png"
   ],
-  "source": "video_extract"
+  "source": "coherent_warp"
 }

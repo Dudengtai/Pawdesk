@@ -10,15 +10,47 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::shortcut::ShortcutItem;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Product range for reminder interval (minutes).
 pub const REMINDER_INTERVAL_MIN: u32 = 15;
 pub const REMINDER_INTERVAL_MAX: u32 = 180;
 
+/// Pet display scale relative to 128px design baseline.
+pub const PET_SCALE_MIN: f32 = 0.5;
+pub const PET_SCALE_MAX: f32 = 1.5;
+/// Step used by settings / tray size controls.
+pub const PET_SCALE_STEP: f32 = 0.1;
+
 /// Clamp reminder interval to the allowed product range.
 pub fn clamp_interval_minutes(v: u32) -> u32 {
     v.clamp(REMINDER_INTERVAL_MIN, REMINDER_INTERVAL_MAX)
+}
+
+/// Snap pet scale to step grid and clamp to product range.
+pub fn clamp_pet_scale(v: f32) -> f32 {
+    let stepped = (v / PET_SCALE_STEP).round() * PET_SCALE_STEP;
+    let cleaned = (stepped * 100.0).round() / 100.0; // kill f32 dust
+    cleaned.clamp(PET_SCALE_MIN, PET_SCALE_MAX)
+}
+
+/// Nudge scale by ±one step (for UI steppers).
+pub fn step_pet_scale(current: f32, delta_steps: i32) -> f32 {
+    clamp_pet_scale(current + delta_steps as f32 * PET_SCALE_STEP)
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    #[test]
+    fn scale_steps_and_clamps() {
+        assert!((step_pet_scale(0.6, 1) - 0.7).abs() < 0.001);
+        assert!((step_pet_scale(0.6, -1) - 0.5).abs() < 0.001);
+        assert!((step_pet_scale(0.5, -1) - 0.5).abs() < 0.001);
+        assert!((step_pet_scale(1.5, 1) - 1.5).abs() < 0.001);
+        assert!((clamp_pet_scale(0.63) - 0.6).abs() < 0.001);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +107,8 @@ pub struct PetConfig {
 }
 
 fn default_scale() -> f32 {
-    1.0
+    // Under design 128 baseline — compact desktop presence (~77 logical px).
+    0.6
 }
 fn default_opacity() -> f32 {
     1.0
@@ -84,7 +117,7 @@ fn default_opacity() -> f32 {
 impl Default for PetConfig {
     fn default() -> Self {
         Self {
-            scale: 1.0,
+            scale: default_scale(),
             opacity: 1.0,
             edge_hide_enabled: true,
         }
@@ -163,17 +196,18 @@ pub fn migrate_config(mut cfg: AppConfig) -> AppConfig {
     if cfg.schema_version == 0 {
         cfg.schema_version = 1;
     }
-    // v1 → v2: pet.edge_hide_enabled defaulted via serde; just bump version.
+    // v1 → v2: pet.edge_hide_enabled defaulted via serde.
+    // v2 → v3: product default pet size is 0.6× design baseline (was full 128).
+    // Force once on upgrade so stuck `scale: 1.0` configs actually shrink.
+    if cfg.schema_version < 3 {
+        cfg.pet.scale = default_scale();
+        cfg.schema_version = 3;
+    }
     if cfg.schema_version < SCHEMA_VERSION {
         cfg.schema_version = SCHEMA_VERSION;
     }
     cfg.reminder.sanitize();
-    if cfg.pet.scale < 0.5 {
-        cfg.pet.scale = 0.5;
-    }
-    if cfg.pet.scale > 2.0 {
-        cfg.pet.scale = 2.0;
-    }
+    cfg.pet.scale = clamp_pet_scale(cfg.pet.scale);
     cfg.pet.opacity = cfg.pet.opacity.clamp(0.2, 1.0);
     cfg
 }

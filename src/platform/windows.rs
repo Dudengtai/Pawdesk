@@ -363,7 +363,7 @@ pub fn clamp_top_left_to_work_area(
     }
 }
 
-/// Initial pet window size in logical pixels (design §4.1 baseline).
+/// Design baseline pet window in logical pixels (actual size = baseline × pet.scale).
 pub const PET_WINDOW_LOGICAL_SIZE: u32 = 128;
 
 /// Approximate solid-body hit radius in physical pixels (fallback circular hit test).

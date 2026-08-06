@@ -45,5 +45,9 @@ pub enum TrayCommand {
     HidePet,
     ToggleReminderPause,
     OpenSettings,
+    /// Increase pet display scale by one step.
+    PetScaleUp,
+    /// Decrease pet display scale by one step.
+    PetScaleDown,
     Exit,
 }
