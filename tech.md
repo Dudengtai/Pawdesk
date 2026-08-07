@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.4**（2026-08-06：待机眨眼管线 + pet.scale UI） |
-| 依据 | `prd.md` v0.5 · `design.md` v0.5 |
+| 版本 | **v0.6**（2026-08-07：GDI 文字 · 列表滚轮 · 主按钮扁平） |
+| 依据 | `prd.md` v0.5 · `design.md` v0.8 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 
@@ -27,7 +27,7 @@
 - 业务状态机集中在 `pet`；UI 不直改状态。  
 - 主线程不阻塞 I/O；配置防抖写盘。  
 - 宠物 HWND：**CPU RGBA + `UpdateLayeredWindow`**，不挂 DXGI/wgpu 交换链。  
-- 启动坞：**钉宠 + Flip/Shift**，单窗 union(宠, 卡)。
+- 启动坞：**钉宠 + Flip/Shift**，单窗 union(宠, 卡)；开合动画几何锁定；**卡层动画 / 宠不闪**。
 
 ---
 
@@ -49,7 +49,7 @@
 | 窗口 | `winit` | 事件循环、窗口 |
 | 平台 | `windows` crate | 工作区、分层窗、Shell 启动等 |
 | 呈现 | CPU 位图 + `UpdateLayeredWindow` | 宠物与叠层 UI 真透明 |
-| 自绘 UI | `fontdue` + 自写 compose | 启动坞 / 设置 / 提醒卡 |
+| 自绘 UI | CPU compose + **GDI 文字** | 启动坞 / 设置 / 提醒卡（字：`CreateFontW`/`DrawTextW`） |
 | 托盘 | `tray-icon` | 托盘与菜单 |
 | 序列化 | `serde` + JSON | 配置 |
 | 日志 | `tracing` | 文件日志 |
@@ -239,20 +239,47 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 
 | 步骤 | 位置 |
 | --- | --- |
-| 开坞 | `app::enter_menu_ui`：探头 snap → place → resize + 定位 |
-| 布局 | `layout_pinned`：条目在 **card** 内；宠在 **pet_local** |
-| 绘制 | `compose_menu_frame`：仅 card 区玻璃；宠精灵；hover/失效态 |
-| 动画 | `menu_open_t`：开 ~250ms snappy；关 ~180ms smooth；几何锁定 |
-| 关坞 | Closing 完 → `restore_overlay_origin`；280ms 防连点 |
+| 开坞 | `app::enter_menu_ui`：探头 snap → `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → `menu_present_pos` → resize → **立即 `redraw()`** |
+| 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + **视口内**快捷行；宠在 **pet_local** |
+| 列表数据 | `build_entries`：全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限 |
+| 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll` |
+| 绘制 | `compose_menu_frame`：Appica token；flat primary；卡层 fade/scale；宠全不透明；滚动提示文案 |
+| 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium） |
+| 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **线性** 0..1；开 **380ms** / 关 **240ms** |
+| 视觉曲线 | compose：`ease_out_quint` scale 0.90→1；`ease_out_cubic` fade 略领先；子项 `stagger_t` |
+| 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t }`；`app` 每帧 `approach` 插值 |
+| 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
 | 多屏 | `work_area_from_point(宠中心)` |
 
-卡片逻辑尺寸常量：`CARD_LOGICAL_W/H`（约 360×300）。  
-设置：失效项可 `settings_highlight_row` 高亮列表行。
+卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=4`；**禁止**把产品做成「最多 5 个就装不下」。  
+设置：失效项可 `settings_highlight_row` 高亮列表行；设置面板共用同一 token。
 
-### 5.4 不做
+### 5.4 呈现与防闪（重要）
+
+| 点 | 实现 |
+| --- | --- |
+| 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
+| 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
+| 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
+| 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
+| 帧率 | `menu_ui_active` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
+| 宠 clip | `MenuOpen` 尽量保持当前 `idle_*` clip，避免强制切 base 引发 crossfade 闪 |
+
+**根因备忘（已修）**
+
+1. 整缓冲全局 alpha 含宠 → 宠先消失。现仅卡/控件 per-layer alpha。  
+2. 先 resize 再延迟 paint → 空帧。现原子 present + 立即 redraw。  
+3. 30fps + `ease_out_back` → 顿 + 弹。现 60fps + out_quint/out_cubic。  
+4. Primary 顶 `INNER_HL` + 底阴影 → 「两道影 / 白条」。现 **flat solid** + 细描边。  
+5. fontdue 拉丁无 hinting → 波浪字。现 **GDI**（精致字体后期再优化）。  
+6. 卡高不够 / `break` 裁行 + `take(5)` → 只显示 2 个。现视口 4 行 + **滚轮** + 软上限 128。
+
+### 5.5 不做
 
 - 系统 Acrylic / 实时抓屏 blur（半透明色 + 高光拟态即可）。  
-- 双进程独立启动器窗口。
+- 双进程独立启动器窗口。  
+- 引入 React / WebView / 真实 Appica npm 包（仅视觉参考）。  
+- 现阶段不做更精致字体子系统（用户拍板后期再做）。
 
 ---
 
@@ -315,7 +342,8 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | 状态 | 建议 |
 | --- | --- |
 | 待机（密帧 blink） | 约 **30 FPS** 呈现亚帧混合；隐藏可再降 |
-| 菜单/移动/提醒 | 临时提帧 |
+| **启动坞打开中** | **~60 FPS**（16ms），保证 scale/fade 丝滑 |
+| 设置 / 提醒 / 拖动 | 临时约 30 FPS |
 | 目标 | 待机 CPU &lt; 3%、内存 &lt; 200MB（PRD） |
 
 ### 8.2 错误
@@ -355,10 +383,11 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 4. 鼠标观察（飞扑可选关）。  
 5. 提醒投喂闭环。  
 6. **钉宠启动坞** 四边四角整卡在 work 内。  
-7. 快捷方式 CRUD + 启动 + 失效提示。  
-8. 托盘完整。  
-9. 性能量级达标。  
-10. 核心单测通过。
+7. 开坞：宠不闪、卡从身边长出、~60fps 丝滑；关坞连续收回。  
+8. 快捷方式 CRUD + 启动 + 失效提示。  
+9. 托盘完整。  
+10. 性能量级达标。  
+11. 核心单测通过。
 
 ---
 
@@ -368,4 +397,7 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | --- | --- | --- |
 | v0.1 | 2026-08-01 | 初稿 |
 | v0.2 | 2026-08-04 | 钉宠 §7.3、呈现路径 |
-| **v0.3** | **2026-08-04** | **按模块重排**；阅读导航；与 PRD v0.4 / 钉宠实现同步 |
+| v0.3 | 2026-08-04 | 按模块重排；与 PRD / 钉宠实现同步 |
+| v0.4 | 2026-08-06 | 待机眨眼管线 + pet.scale UI |
+| v0.5 | 2026-08-07 | 启动坞 Appica + 丝滑动效；60fps；原子 present；防宠闪 |
+| **v0.6** | **2026-08-07** | **GDI 文字**；列表 **滚轮滚动**（`LIST_VISIBLE_ROWS`/`menu_list_scroll`）；flat primary；对齐 design **v0.8** |

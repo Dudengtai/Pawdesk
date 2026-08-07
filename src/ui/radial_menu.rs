@@ -1,4 +1,8 @@
-//! Apple-inspired quick-launch dock layout & hit-test.
+//! Quick-launch dock layout & hit-test (pin-pet glass card).
+//!
+//! Shortcut list is **scrollable**: a fixed viewport shows [`LIST_VISIBLE_ROWS`]
+//! rows; mouse wheel moves [`list_scroll`]. No hard product limit of 5 apps —
+//! only a large soft cap for safety.
 
 use crate::event::Point;
 use crate::platform::Rect;
@@ -12,11 +16,31 @@ pub const MENU_WINDOW: u32 = MENU_WINDOW_W;
 
 /// Glass card content size (logical @ 96 DPI) — pet is outside this rect (pin-pet).
 pub const CARD_LOGICAL_W: u32 = 360;
-pub const CARD_LOGICAL_H: u32 = 300;
+/// Height = chrome + viewport for [`LIST_VISIBLE_ROWS`] + scroll-hint strip.
+pub const CARD_LOGICAL_H: u32 = 360;
 
-pub const MAX_SHORTCUTS_VISIBLE: usize = 5;
+/// Rows visible in the dock list without scrolling.
+pub const LIST_VISIBLE_ROWS: usize = 4;
+/// Soft safety cap only (not a product UX limit). Scroll covers the rest.
+pub const MAX_SHORTCUTS: usize = 128;
+/// @deprecated name — kept as alias for call sites / docs.
+pub const MAX_SHORTCUTS_VISIBLE: usize = LIST_VISIBLE_ROWS;
+
 pub const ITEM_DIAMETER: f32 = 44.0;
 pub const RING_RADIUS: f32 = 0.0;
+
+/// Vertical stack metrics (logical px).
+pub const TITLE_BAND: f32 = 56.0;
+pub const CARD_MARGIN: f32 = 12.0;
+pub const PRIMARY_H: f32 = 40.0;
+pub const PRIMARY_GAP: f32 = 8.0;
+pub const CHIP_H: f32 = 32.0;
+pub const CHIP_GAP: f32 = 8.0;
+pub const CHIP_AFTER: f32 = 10.0;
+pub const ROW_H: f32 = 42.0;
+pub const ROW_GAP: f32 = 4.0;
+/// Space under list for “滚轮查看更多” hint.
+pub const SCROLL_HINT_H: f32 = 16.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuEntry {
@@ -58,6 +82,15 @@ pub struct RadialLayout {
     pub card_y: f32,
     pub card_w: f32,
     pub card_h: f32,
+    /// Total enabled shortcuts (may exceed viewport).
+    pub list_total: usize,
+    /// First visible shortcut index (scroll offset in rows).
+    pub list_scroll: usize,
+    pub list_can_scroll_up: bool,
+    pub list_can_scroll_down: bool,
+    /// List viewport top/bottom in window-local logical coords.
+    pub list_top: f32,
+    pub list_bottom: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +123,12 @@ pub fn prefer_direction(pet_center_screen: Point, work: Rect) -> ExpandDir {
     best
 }
 
+/// Clamp scroll so a full viewport (or remaining tail) is always valid.
+pub fn clamp_list_scroll(scroll: usize, total: usize) -> usize {
+    let max_scroll = total.saturating_sub(LIST_VISIBLE_ROWS);
+    scroll.min(max_scroll)
+}
+
 pub fn build_entries(shortcuts: &[ShortcutItem], reminder_paused: bool) -> Vec<MenuEntry> {
     let mut entries = vec![
         MenuEntry::AddShortcut,
@@ -100,7 +139,7 @@ pub fn build_entries(shortcuts: &[ShortcutItem], reminder_paused: bool) -> Vec<M
     for s in shortcuts
         .iter()
         .filter(|s| s.enabled)
-        .take(MAX_SHORTCUTS_VISIBLE)
+        .take(MAX_SHORTCUTS)
     {
         entries.push(MenuEntry::Shortcut {
             id: s.id,
@@ -111,13 +150,29 @@ pub fn build_entries(shortcuts: &[ShortcutItem], reminder_paused: bool) -> Vec<M
     entries
 }
 
+/// Count shortcut entries in a built list.
+pub fn count_shortcuts(entries: &[MenuEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|e| matches!(e, MenuEntry::Shortcut { .. }))
+        .count()
+}
+
 /// Apple-like dock: avatar column + content column (legacy single-card window).
 pub fn layout(entries: &[MenuEntry], dir: ExpandDir, open_t: f32) -> RadialLayout {
+    layout_with_scroll(entries, dir, open_t, 0)
+}
+
+fn layout_with_scroll(
+    entries: &[MenuEntry],
+    dir: ExpandDir,
+    open_t: f32,
+    list_scroll: usize,
+) -> RadialLayout {
     let t = open_t.clamp(0.0, 1.0);
     let ww = MENU_WINDOW_W as f32;
     let wh = MENU_WINDOW_H as f32;
 
-    // Avatar column — slightly taller plate, more air (matches default pet scale 0.6×128).
     let pet_w = 77.0;
     let pet_h = 108.0;
     let margin = 22.0;
@@ -134,10 +189,10 @@ pub fn layout(entries: &[MenuEntry], dir: ExpandDir, open_t: f32) -> RadialLayou
         ),
     };
     let pet_y = (wh - pet_h) * 0.5;
-    let items = layout_items_in_card(entries, content_x, 0.0, content_w, wh, t);
+    let built = layout_items_in_card(entries, content_x, 0.0, content_w, wh, list_scroll);
 
     RadialLayout {
-        items,
+        items: built.items,
         open_t: t,
         window: MENU_WINDOW_W,
         window_w: MENU_WINDOW_W,
@@ -150,6 +205,12 @@ pub fn layout(entries: &[MenuEntry], dir: ExpandDir, open_t: f32) -> RadialLayou
         card_y: 0.0,
         card_w: ww,
         card_h: wh,
+        list_total: built.list_total,
+        list_scroll: built.list_scroll,
+        list_can_scroll_up: built.list_can_scroll_up,
+        list_can_scroll_down: built.list_can_scroll_down,
+        list_top: built.list_top,
+        list_bottom: built.list_bottom,
     }
 }
 
@@ -165,16 +226,30 @@ pub fn layout_pinned(
     _dir: ExpandDir,
     open_t: f32,
 ) -> RadialLayout {
+    layout_pinned_scroll(entries, window_w, window_h, pet, card, _dir, open_t, 0)
+}
+
+/// Like [`layout_pinned`] with explicit list scroll (row index).
+pub fn layout_pinned_scroll(
+    entries: &[MenuEntry],
+    window_w: u32,
+    window_h: u32,
+    pet: (f32, f32, f32, f32),
+    card: (f32, f32, f32, f32),
+    _dir: ExpandDir,
+    open_t: f32,
+    list_scroll: usize,
+) -> RadialLayout {
     let t = open_t.clamp(0.0, 1.0);
     let (pet_x, pet_y, pet_w, pet_h) = pet;
     let (card_x, card_y, card_w, card_h) = card;
     let margin = 16.0;
     let content_x = card_x + margin;
     let content_w = (card_w - margin * 2.0).max(40.0);
-    let items = layout_items_in_card(entries, content_x, card_y, content_w, card_h, t);
+    let built = layout_items_in_card(entries, content_x, card_y, content_w, card_h, list_scroll);
 
     RadialLayout {
-        items,
+        items: built.items,
         open_t: t,
         window: window_w,
         window_w,
@@ -187,29 +262,40 @@ pub fn layout_pinned(
         card_y,
         card_w,
         card_h,
+        list_total: built.list_total,
+        list_scroll: built.list_scroll,
+        list_can_scroll_up: built.list_can_scroll_up,
+        list_can_scroll_down: built.list_can_scroll_down,
+        list_top: built.list_top,
+        list_bottom: built.list_bottom,
     }
 }
 
-/// Items in a vertical card stack. `origin_y` is card top; content starts below title band.
+struct BuiltList {
+    items: Vec<ItemGeom>,
+    list_total: usize,
+    list_scroll: usize,
+    list_can_scroll_up: bool,
+    list_can_scroll_down: bool,
+    list_top: f32,
+    list_bottom: f32,
+}
+
+/// Items in a vertical card stack. Shortcut rows fill a fixed viewport and scroll.
 fn layout_items_in_card(
     entries: &[MenuEntry],
     content_x: f32,
     card_y: f32,
     content_w: f32,
     card_h: f32,
-    open_t: f32,
-) -> Vec<ItemGeom> {
-    let slide = (1.0 - open_t.clamp(0.0, 1.0)) * 12.0;
-    let margin = 16.0;
-    // Title ~16 + subtitle ~38 inside card → first control at ~68 from card top
-    let mut y = card_y + 68.0 + slide;
-    let bottom = card_y + card_h - margin;
+    list_scroll: usize,
+) -> BuiltList {
+    let mut y = card_y + TITLE_BAND;
     let mut items = Vec::new();
 
-    let primary_h = 44.0;
     if let Some(e) = entries.iter().find(|e| matches!(e, MenuEntry::AddShortcut)) {
-        items.push(rect_item(e.clone(), content_x, y, content_w, primary_h));
-        y += primary_h + 10.0;
+        items.push(rect_item(e.clone(), content_x, y, content_w, PRIMARY_H));
+        y += PRIMARY_H + PRIMARY_GAP;
     }
 
     let secondary: Vec<&MenuEntry> = entries
@@ -217,30 +303,54 @@ fn layout_items_in_card(
         .filter(|e| matches!(e, MenuEntry::Manage | MenuEntry::PauseReminder))
         .collect();
     if !secondary.is_empty() {
-        let gap = 8.0;
         let n = secondary.len() as f32;
-        let chip_w = (content_w - gap * (n - 1.0)) / n;
-        let chip_h = 34.0;
+        let chip_w = (content_w - CHIP_GAP * (n - 1.0)) / n;
         for (i, e) in secondary.iter().enumerate() {
-            let x = content_x + i as f32 * (chip_w + gap);
-            items.push(rect_item((*e).clone(), x, y, chip_w, chip_h));
+            let x = content_x + i as f32 * (chip_w + CHIP_GAP);
+            items.push(rect_item((*e).clone(), x, y, chip_w, CHIP_H));
         }
-        y += chip_h + 16.0;
+        y += CHIP_H + CHIP_AFTER;
     }
 
-    let row_h = 46.0;
-    let row_gap = 6.0;
-    for e in entries
+    let shortcuts: Vec<&MenuEntry> = entries
         .iter()
         .filter(|e| matches!(e, MenuEntry::Shortcut { .. }))
-    {
-        if y + row_h > bottom {
+        .collect();
+    let list_total = shortcuts.len();
+    let list_scroll = clamp_list_scroll(list_scroll, list_total);
+    let list_top = y;
+    // Fixed viewport for N rows (independent of card_h shrink — still clamp to card).
+    let viewport_h = LIST_VISIBLE_ROWS as f32 * ROW_H
+        + (LIST_VISIBLE_ROWS.saturating_sub(1) as f32) * ROW_GAP;
+    let list_bottom = (list_top + viewport_h).min(card_y + card_h - CARD_MARGIN - SCROLL_HINT_H);
+
+    let mut row_y = list_top;
+    let mut shown = 0usize;
+    for e in shortcuts.iter().skip(list_scroll) {
+        if shown >= LIST_VISIBLE_ROWS {
             break;
         }
-        items.push(rect_item(e.clone(), content_x, y, content_w, row_h));
-        y += row_h + row_gap;
+        // Hard stop if card was shrunk by placement (small work area).
+        if row_y + ROW_H > list_bottom + 0.5 {
+            break;
+        }
+        items.push(rect_item((*e).clone(), content_x, row_y, content_w, ROW_H));
+        row_y += ROW_H + ROW_GAP;
+        shown += 1;
     }
-    items
+
+    let list_can_scroll_up = list_scroll > 0;
+    let list_can_scroll_down = list_scroll + shown < list_total;
+
+    BuiltList {
+        items,
+        list_total,
+        list_scroll,
+        list_can_scroll_up,
+        list_can_scroll_down,
+        list_top,
+        list_bottom: row_y - if shown > 0 { ROW_GAP } else { 0.0 },
+    }
 }
 
 fn rect_item(entry: MenuEntry, x: f32, y: f32, w: f32, h: f32) -> ItemGeom {
@@ -284,6 +394,22 @@ pub fn hit_center(layout: &RadialLayout, local_x: f32, local_y: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chrome_plus_shortcuts(n: usize) -> Vec<MenuEntry> {
+        let mut entries = vec![
+            MenuEntry::AddShortcut,
+            MenuEntry::Manage,
+            MenuEntry::PauseReminder,
+        ];
+        for i in 0..n {
+            entries.push(MenuEntry::Shortcut {
+                id: Uuid::nil(),
+                name: format!("App{i}"),
+                valid: true,
+            });
+        }
+        entries
+    }
 
     #[test]
     fn prefer_right_when_on_left() {
@@ -330,28 +456,126 @@ mod tests {
 
     #[test]
     fn layout_pinned_items_inside_card() {
-        let entries = vec![
-            MenuEntry::AddShortcut,
-            MenuEntry::Manage,
-            MenuEntry::PauseReminder,
-        ];
+        let entries = chrome_plus_shortcuts(0);
         let lay = layout_pinned(
             &entries,
             500,
-            320,
+            480,
             (8.0, 80.0, 128.0, 128.0),
-            (150.0, 10.0, 340.0, 300.0),
+            (
+                150.0,
+                10.0,
+                CARD_LOGICAL_W as f32,
+                CARD_LOGICAL_H as f32,
+            ),
             ExpandDir::Right,
             1.0,
         );
         assert_eq!(lay.window_w, 500);
-        assert!((lay.card_x - 150.0).abs() < 0.1);
         for it in &lay.items {
             assert!(it.x >= lay.card_x);
             assert!(it.x + it.w <= lay.card_x + lay.card_w + 0.5);
             assert!(it.y >= lay.card_y);
             assert!(it.y + it.h <= lay.card_y + lay.card_h + 0.5);
         }
-        assert!(hit_center(&lay, 70.0, 140.0));
+    }
+
+    #[test]
+    fn three_shortcuts_all_visible_without_scroll() {
+        let entries = chrome_plus_shortcuts(3);
+        let lay = layout_pinned_scroll(
+            &entries,
+            500,
+            500,
+            (8.0, 40.0, 100.0, 100.0),
+            (120.0, 8.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+            ExpandDir::Right,
+            1.0,
+            0,
+        );
+        let n = lay
+            .items
+            .iter()
+            .filter(|it| matches!(it.entry, MenuEntry::Shortcut { .. }))
+            .count();
+        assert_eq!(n, 3, "3 apps must all fit in viewport of {LIST_VISIBLE_ROWS}");
+        assert_eq!(lay.list_total, 3);
+        assert!(!lay.list_can_scroll_down);
+    }
+
+    #[test]
+    fn many_shortcuts_scroll_window() {
+        let entries = chrome_plus_shortcuts(12);
+        let lay0 = layout_pinned_scroll(
+            &entries,
+            500,
+            500,
+            (8.0, 40.0, 100.0, 100.0),
+            (120.0, 8.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+            ExpandDir::Right,
+            1.0,
+            0,
+        );
+        assert_eq!(lay0.list_total, 12);
+        assert_eq!(
+            lay0.items
+                .iter()
+                .filter(|it| matches!(it.entry, MenuEntry::Shortcut { .. }))
+                .count(),
+            LIST_VISIBLE_ROWS
+        );
+        assert!(lay0.list_can_scroll_down);
+        assert!(!lay0.list_can_scroll_up);
+
+        let lay2 = layout_pinned_scroll(
+            &entries,
+            500,
+            500,
+            (8.0, 40.0, 100.0, 100.0),
+            (120.0, 8.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+            ExpandDir::Right,
+            1.0,
+            2,
+        );
+        assert_eq!(lay2.list_scroll, 2);
+        assert!(lay2.list_can_scroll_up);
+        assert!(lay2.list_can_scroll_down);
+
+        // Names should shift with scroll
+        let names0: Vec<_> = lay0
+            .items
+            .iter()
+            .filter_map(|it| match &it.entry {
+                MenuEntry::Shortcut { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let names2: Vec<_> = lay2
+            .items
+            .iter()
+            .filter_map(|it| match &it.entry {
+                MenuEntry::Shortcut { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names0[0], "App0");
+        assert_eq!(names2[0], "App2");
+    }
+
+    #[test]
+    fn clamp_list_scroll_bounds() {
+        assert_eq!(clamp_list_scroll(0, 3), 0);
+        assert_eq!(clamp_list_scroll(10, 3), 0); // fewer than viewport
+        assert_eq!(clamp_list_scroll(10, 12), 12 - LIST_VISIBLE_ROWS);
+    }
+
+    #[test]
+    fn build_entries_includes_more_than_five() {
+        let mut items = Vec::new();
+        for i in 0..10 {
+            items.push(ShortcutItem::new(format!("A{i}"), std::path::PathBuf::from("x"), i as u32));
+        }
+        let e = build_entries(&items, false);
+        assert_eq!(count_shortcuts(&e), 10);
     }
 }

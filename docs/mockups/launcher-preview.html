@@ -6,19 +6,25 @@
   <title>PawDesk Launcher 效果图 · design §7</title>
   <style>
     :root {
+      /* Appica-warm tokens · design §2 v0.6 */
       --accent: #ff9ec4;
       --accent-deep: #ff7aaf;
-      --blue: #007aff;
-      --blue-press: #0064d6;
-      --label: #1c1c1e;
-      --secondary: rgba(60, 60, 67, 0.68);
-      --tertiary: rgba(60, 60, 67, 0.42);
-      --grouped: rgba(242, 242, 247, 0.72);
-      --glass: rgba(255, 255, 255, 0.72);
-      --glass-warm: rgba(255, 248, 242, 0.78);
+      --primary: #1e293b;
+      --primary-hover: #334155;
+      --primary-press: #0f172b;
+      --blue: #2563eb;
+      --label: #0f172b;
+      --secondary: rgba(71, 85, 105, 0.78);
+      --tertiary: rgba(100, 116, 139, 0.62);
+      --grouped: rgba(244, 242, 240, 0.82);
+      --soft: rgba(241, 239, 237, 0.92);
+      --glass: rgba(255, 255, 255, 0.88);
+      --glass-warm: rgba(255, 251, 250, 0.92);
+      --border: rgba(15, 23, 43, 0.10);
       --hairline: rgba(255, 255, 255, 0.55);
-      --shadow: 0 18px 50px rgba(0, 0, 0, 0.18), 0 4px 14px rgba(0, 0, 0, 0.08);
-      --radius: 22px;
+      --shadow: 0 22px 48px rgba(15, 23, 43, 0.14), 0 8px 18px rgba(15, 23, 43, 0.08), 0 2px 4px rgba(15, 23, 43, 0.05);
+      --radius: 18px;
+      --radius-ctl: 11px;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -160,11 +166,11 @@
       display: flex;
       overflow: hidden;
       box-shadow: var(--shadow);
-      border: 1px solid var(--hairline);
+      border: 1px solid var(--border);
       background: var(--glass-warm);
-      backdrop-filter: blur(28px) saturate(1.35);
-      -webkit-backdrop-filter: blur(28px) saturate(1.35);
-      animation: grow-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+      backdrop-filter: blur(28px) saturate(1.25);
+      -webkit-backdrop-filter: blur(28px) saturate(1.25);
+      animation: grow-in 0.42s cubic-bezier(0.175, 0.885, 0.32, 1.35) both;
     }
     .launcher.right-of-pet {
       left: 18%;
@@ -179,11 +185,11 @@
     @keyframes grow-in {
       from {
         opacity: 0;
-        transform: scale(0.88);
+        transform: scale(0.95) translateY(6px);
       }
       to {
         opacity: 1;
-        transform: scale(1);
+        transform: scale(1) translateY(0);
       }
     }
     .launcher.above-pet {
@@ -192,11 +198,11 @@
     @keyframes grow-in-center {
       from {
         opacity: 0;
-        transform: translateX(-50%) scale(0.88);
+        transform: translateX(-50%) scale(0.95) translateY(6px);
       }
       to {
         opacity: 1;
-        transform: translateX(-50%) scale(1);
+        transform: translateX(-50%) scale(1) translateY(0);
       }
     }
 
@@ -271,15 +277,23 @@
 
     .btn-primary {
       height: 40px;
-      border-radius: 12px;
+      border-radius: var(--radius-ctl);
       border: none;
-      background: linear-gradient(180deg, #1a86ff 0%, var(--blue) 100%);
+      background: var(--primary);
       color: #fff;
       font-size: 14px;
       font-weight: 600;
       font-family: inherit;
-      box-shadow: 0 1px 0 rgba(255,255,255,0.25) inset, 0 4px 12px rgba(0,122,255,0.28);
+      box-shadow: 0 1px 0 rgba(255,255,255,0.22) inset, 0 4px 14px rgba(15, 23, 43, 0.22);
       cursor: default;
+      transition: background 0.1s ease, transform 0.08s ease, box-shadow 0.1s ease;
+      animation: cascade-in 0.38s cubic-bezier(0.22, 0.61, 0.36, 1) 0.04s both;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-primary:active {
+      background: var(--primary-press);
+      transform: scale(0.97) translateY(1px);
+      box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset, 0 2px 6px rgba(15, 23, 43, 0.18);
     }
     .btn-row {
       display: flex;
@@ -291,15 +305,26 @@
       flex: 1;
       height: 32px;
       border-radius: 10px;
-      border: none;
-      background: rgba(229, 229, 234, 0.85);
+      border: 1px solid var(--border);
+      background: var(--soft);
       color: var(--label);
       font-size: 13px;
       font-weight: 600;
       font-family: inherit;
-      cursor: default;
+      transition: background 0.1s ease, transform 0.08s ease;
+      animation: cascade-in 0.38s cubic-bezier(0.22, 0.61, 0.36, 1) 0.08s both;
     }
-    .btn-chip.blue { color: var(--blue); }
+    .btn-chip:hover { background: #fff; }
+    .btn-chip:active {
+      transform: scale(0.97) translateY(1px);
+      background: rgba(238, 232, 240, 0.95);
+    }
+    .btn-chip.blue { color: var(--label); }
+
+    @keyframes cascade-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
 
     .list {
       display: flex;
@@ -309,19 +334,26 @@
     }
     .row {
       height: 44px;
-      border-radius: 12px;
+      border-radius: var(--radius-ctl);
       background: var(--grouped);
+      border: 1px solid var(--border);
       display: flex;
       align-items: center;
       padding: 0 10px 0 10px;
       gap: 10px;
-      transition: transform 0.15s ease, box-shadow 0.15s ease;
+      transition: transform 0.1s ease, box-shadow 0.1s ease, background 0.1s ease;
+      animation: cascade-in 0.38s cubic-bezier(0.22, 0.61, 0.36, 1) both;
     }
+    .row:nth-child(1) { animation-delay: 0.12s; }
+    .row:nth-child(2) { animation-delay: 0.15s; }
+    .row:nth-child(3) { animation-delay: 0.18s; }
+    .row:nth-child(4) { animation-delay: 0.21s; }
     .row.hover {
-      transform: scale(1.02);
-      box-shadow: 0 6px 16px rgba(0,0,0,0.1);
-      background: rgba(255,255,255,0.88);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(15, 23, 43, 0.10);
+      background: rgba(255,255,255,0.94);
     }
+    .row:active { transform: scale(0.97) translateY(1px); }
     .row.invalid {
       background: rgba(255, 176, 32, 0.12);
     }

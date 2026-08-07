@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.5**（2026-08-06：待机眨眼 + 宠物大小可调） |
-| 依据 | `prd.md` v0.5 · `tech.md` v0.4 |
+| 版本 | **v0.8**（2026-08-07：主按钮扁平 · GDI 文字 · 列表滚轮无限扩展） |
+| 依据 | `prd.md` v0.5 · `tech.md` v0.6 |
 | 效果图 | `docs/mockups/launcher-preview.*` · `launcher-pin-flip.*` |
 
 ---
@@ -24,9 +24,13 @@
 
 **当前拍板（实现向）**
 
-- 启动坞 = **钉宠锚点 + 半透明玻璃卡片**（非径向环、非系统 Acrylic）。  
-- 菜单 / 设置 / 提醒叠层：CPU 自绘 + HiDPI 物理像素。  
-- 形象与飞扑精修放后期（见 `task.md` M6-D）。
+- 启动坞 = **钉宠锚点 + Appica 暖玻璃卡片**（非径向环、非系统 Acrylic）。  
+- 菜单 / 设置 / 提醒叠层：CPU 自绘 + HiDPI 物理像素；开合 scale+fade + 子项 stagger + hover/press 插值。  
+- **观感目标**：点宠 → **卡片从身边长出**；宠不闪、不跳、不弹（宠始终全不透明；托盘渐入）。  
+- 开坞期呈现 **~60fps**；几何开局锁定；开坞同帧原子 present（防空帧闪）。  
+- 列表：**视口约 4 行 + 滚轮滚动**（软上限 128，**不是**封顶 5 个）。  
+- 文字：Windows **GDI 栅格**（hinted）；更精致字体渲染 **后期再做**。  
+- 形象与飞扑精修放后期（见 `task.md` M6-D / PET-A07）。
 
 ---
 
@@ -46,7 +50,8 @@
 
 - 画风：日系治愈 Q 版，圆润、大眼；奶牛猫黑白斑作桌面锚点。  
 - 氛围：软萌、慵懒、偶发傲娇。  
-- 面板：高明度暖色半透明；宠物本体高对比黑白。
+- 面板：**Appica 级精致暖玻璃** — 近白暖 tint、soft 控件、深 slate 主按钮、粉 accent 点缀；宠物本体高对比黑白。  
+- 参考气质：Appica UI（干净 token、分层阴影、scale+fade 微交互），**不**引入 Web 组件库。
 
 ### 2.2 色板（Tokens）
 
@@ -55,17 +60,21 @@
 | `pet.fur.base` | `#FFFFFF` | 身体白 |
 | `pet.fur.spot` | `#2B2B2E` | 斑纹 |
 | `pet.nose` | `#FFB6C1` | 鼻 / 肉垫 |
-| `accent.primary` | `#FF9EC4` | 食物钮、列表高亮、强调 |
+| `accent.pink` | `#FF9EC4` | 列表高亮、空状态点缀、选中条 |
 | `accent.secondary` | `#8ED1D6` | 次强调 |
-| `accent.system` | `#007AFF` | 启动坞主按钮（可保留系统蓝） |
-| `surface.panel` | `#FFF8F2` @ ~78–88% | 玻璃面板底 |
-| `surface.row` | 浅暖灰半透明 | 列表行 |
-| `text.primary` | `#3A3540` | 正文 |
-| `text.secondary` | 灰 60–70% | 说明 |
-| `text.onAccent` | `#FFFFFF` | 强调钮字 |
-| `state.warning` | `#FFB020` / 深橙字 | 失效 |
-| `state.danger` | `#FF5C5C` | 删除 |
-| `shadow.soft` | 黑 8–16% | 多层软阴影 |
+| `primary` | `#1E293B` | 启动坞主按钮（Appica 深 slate） |
+| `primary.hover` | `#334155` | 主按钮悬停 |
+| `primary.press` | `#0F172B` | 主按钮按下 |
+| `surface.panel` | `#FFFBFA` @ ~92% | 玻璃面板底 |
+| `surface.muted` | 浅暖灰半透明 | soft 行 / chip |
+| `surface.hover` | 更亮半透明白 | hover 升亮 |
+| `text.intense` | `#0F172B` | 标题 / 正文 |
+| `text.muted` | slate 60–70% | 说明 |
+| `text.onPrimary` | `#FFFFFF` | 主按钮字 |
+| `border.subtle` | slate @ ~10% | 产品感描边 |
+| `state.warning` | 橙底 + 深橙字 | 失效 |
+| `state.danger` | `#E11D48` | 删除 |
+| `shadow.elevated` | slate 低 alpha 多层 | 卡片 / 主按钮 |
 
 深色主题：面板 `#2A2730` @ 类似透明度（首期可读系统主题一次；运行中可不实时跟随）。
 
@@ -73,26 +82,31 @@
 
 | 用途 | 值（96 DPI） |
 | --- | --- |
-| 大面板 / 坞 | 20–24px |
+| 大面板 / 坞 | 18–20px |
 | 按钮 / 行 | 10–12px |
-| 小芯片 | 8px |
+| 小芯片 | 8–10px |
 | 间距基准 | 8px；内边距 16px |
-| 玻璃描边 | 1px 半透明白内描边 + 顶部高光带 |
+| 玻璃描边 | 1px subtle border + 内白 hairline + 顶部高光带 |
 
 ### 2.4 字体
 
-- 系统：微软雅黑 / Segoe UI。  
-- 档位：提醒 20 · 标题 16–17 · 正文 14–15 · 辅助 11–12。  
-- 行高约 1.4×。
+- 实现：Windows **GDI** `CreateFontW` + `DrawTextW`（优先 **Microsoft YaHei UI**，Medium 字重，灰阶 AA + 对比度曲线）。  
+- **不用** fontdue 画 UI 字（无 hinting → 拉丁波浪/大小不一）。  
+- 档位：提醒 20 · 标题 17 · 正文 14–15 · 辅助 11–12。  
+- 已知：整体略偏「发虚」可接受；**更精致字体（ClearType/子像素等）后期再改**。
 
 ### 2.5 缓动
 
 | 名 | 曲线 | 用途 |
 | --- | --- | --- |
-| `ease.snappy` | 微回弹 | 开坞、按下、投喂成功 |
-| `ease.smooth` | 减速 | 移动、边缘、关坞淡出 |
+| `ease.out_quint` | 五次缓出、**无 overshoot** | 开坞卡 scale 主曲线 |
+| `ease.out_cubic` | 三次缓出 | 开坞卡 fade（略领先 scale） |
+| `ease.snappy` | 微回弹 | 按下回弹、投喂成功 |
+| `ease.smooth` | 减速 | 移动、边缘、stagger 子项 |
+| `ease.out_back` | 轻回弹（保留） | 可选强调；**开坞已不用**（易弹跳感） |
+| `approach` | 指数逼近 | hover / press 插值 |
 
-实现：`src/render/easing.rs`。
+实现：`src/render/easing.rs`（另含 `stagger_t` / `lerp`）。
 
 ---
 
@@ -177,11 +191,12 @@
 ### 5.2 形态
 
 - **玻璃卡片** + 宠物钉在屏幕原位附近。  
-- 无系统标题栏；半透明暖白 + 软阴影 + 内高光。  
+- 无系统标题栏；近白暖 tint 半透明 + 多层 soft 阴影 + subtle border + 顶高光。  
 - **假磨砂即可**，不要系统 Acrylic / 抓屏模糊。  
-- 卡片逻辑尺寸约 **360×300**；整窗 = 宠矩形 ∪ 卡片。
+- 卡片逻辑尺寸约 **360×360**；列表视口固定约 **4** 行，**滚轮滚动**查看更多（软上限 128，非产品封顶 5）。整窗 = 宠矩形 ∪ 卡片。  
+- 宠物区：开坞第 0 帧为**自由剪影**（与待机一致）；托盘 /「轻点关闭」随卡片 fade 渐入，避免「突然套托盘」闪变。
 
-参考：`docs/mockups/launcher-pin-flip.png`。
+参考：`docs/mockups/launcher-preview.html` · `launcher-pin-flip.*`。
 
 ### 5.3 空间布局（钉宠）
 
@@ -201,10 +216,11 @@
 | 区域 | 内容 |
 | --- | --- |
 | 标题 | 「快捷启动」+ 短说明 |
-| 主按钮 | 添加应用 |
-| 次按钮 | 管理 · 暂停/恢复提醒 |
-| 列表 | 常用应用行（图标圆点 + 名 + chevron） |
-| 宠物区 | 钉死锚点；「轻点关闭」 |
+| 主按钮 | 添加应用（**纯色实心** slate，无顶高光条、无底外阴影） |
+| 次按钮 | 管理 · 暂停/恢复提醒（soft chip） |
+| 列表 | 常用应用行（图标圆点 + 名 + chevron）；**固定视口 + 滚轮** |
+| 滚动提示 | 有更多时底部：「↓ 滚轮查看更多 · 共 N 个」 |
+| 宠物区 | 钉死锚点；「轻点关闭」随卡 fade |
 
 空列表：引导去点「添加应用」。
 
@@ -217,14 +233,38 @@
 | 按下 | 略深或粉感填充 |
 | 失效 | 警告底；`!`；文案「无法找到程序 · 点此修复」 |
 | 点失效 | 进设置并 **高亮该行** |
+| 数量 | 启用项全部进入列表（软上限 128）；视口约 **4** 行；`menu_list_scroll` + 滚轮 |
+| 禁止 | 硬编码「最多 5 个就不能加」——产品上必须可扩展 |
 
-### 5.6 开闭动画
+### 5.6 开闭动画与微交互（Appica · 丝滑）
 
 | 阶段 | 参数 |
 | --- | --- |
-| 打开 | ~250ms snappy；opacity 0→1；scale 0.92→1（绕宠心） |
-| 关闭 | ~180ms smooth；收回后缩回宠物窗 |
-| 布局 | **开局锁定 placement**，中途不二次 flip |
+| 时钟 | `menu_open_t` 为 **0..1 线性时间**（开 ~**380ms** / 关 ~**240ms**）；视觉曲线在 compose 内计算 |
+| 打开 scale | `ease.out_quint`：**0.90→1.0**，绕**宠心**生长，**无 overshoot** |
+| 打开 fade | `ease.out_cubic`，时钟 ×1.22 封顶，**略领先** scale（先见材质再定形） |
+| 阴影 | 随 fade 的平方渐入，避免首帧硬阴影 |
+| 宠物 | **始终全不透明**；不参与全局 alpha；托盘 alpha = 卡 fade |
+| 子项 stagger | 卡显形后再 cascade（时钟约 10% 延迟）；opacity + 轻 y **5px** |
+| 关闭 | 线性收回；同一 scale/fade 映射，连续反转 |
+| Hover | ~100ms `approach` 插值底色 / 阴影 |
+| Press | scale **0.97** + translateY +1px；~80ms 入、松开回弹 |
+| 布局 | **开局锁定 placement**，中途不二次 flip；hit-test 用**最终几何**（视觉偏移不改 hit） |
+| 帧率 | 坞打开期间呈现 **~60fps**（见 tech §5 / §8） |
+
+控件配方：
+
+- **Primary**：深 slate 实心「添加应用」+ 细描边（**禁止**厚顶高光 / 底阴影，否则像「两道影」）  
+- **Soft chip**：muted 底 + subtle border（管理 / 暂停）  
+- **List row**：avatar 首字母 / `!`、hover 轻抬升、chevron  
+
+**禁止（已踩过的坑）**
+
+- 整窗（含宠）统一 `apply_rgba_alpha` → 宠先消失再淡入 = 闪。  
+- 开坞用 `ease.out_back` → 弹跳割裂。  
+- 先 resize 再等下一帧 redraw → 空帧闪。  
+- 卡片高度不够 + `break` 裁行 → 只显示 2 个应用。  
+- fontdue 小字拉丁 → 波浪/大小不一。
 
 业务：
 
@@ -293,10 +333,11 @@
 
 | 交互 | 反馈 | 曲线 |
 | --- | --- | --- |
-| 单击开坞 | 卡从宠侧 scale+fade 入 | snappy ~250ms |
-| 关坞 | fade+scale 出再缩窗 | smooth ~180ms |
-| 列表 hover | 行底变亮 | 即时 |
-| 主按钮按下 | 蓝色加深 | 即时 |
+| 单击开坞 | 卡 scale 0.90→1 + fade（宠钉住不闪）+ 轻 cascade；**~60fps** | out_quint ~380ms |
+| 关坞 | 卡连续收回；宠保持 | linear clock ~240ms |
+| 开坞首帧 | 原子 present（尺寸+坐标+像素同帧）；托盘未显、剪影连续 | tech §5.4 |
+| 列表 / 按钮 hover | 色与阴影插值 | approach ~100ms |
+| 主按钮按下 | 0.97 下压 + 色加深 | approach ~80ms |
 | 拖动 | 拎起 clip + 轻微 scale 脉冲 | — |
 | 边缘 hide/show | 滑入滑出 | smooth |
 | 提醒到位 | 文案与食物出现 | smooth / snappy |
@@ -331,12 +372,18 @@ assets/tray/icon.png
 | 设计概念 | 技术落点 |
 | --- | --- |
 | 钉宠 / Flip/Shift | `ui/launcher_place.rs` |
-| 玻璃坞绘制 | `render/menu_ui.rs` |
-| open_t 动画 | `pet` menu_open_t + compose |
-| 状态视觉 | `pet` clip 映射 |
+| Appica 玻璃坞 / 控件 | `render/menu_ui.rs`（token、flat primary、soft/row、stagger） |
+| UI 文字 | `render/text.rs` → **GDI** YaHei UI（后期可再精致化） |
+| 缓动 / stagger / approach | `render/easing.rs` |
+| open_t 线性时钟 | `pet::tick_menu_anim`（开 380ms / 关 240ms） |
+| 视觉曲线 + 宠不闪 | `compose_menu_frame`（per-layer fade；宠全不透明；托盘渐入） |
+| hover/press 插值 | `app` `menu_hover_t` / `menu_press_t` + `MenuChromeState` |
+| 列表滚动 | `menu_list_scroll` + `layout_pinned_scroll` + `MouseWheel`；视口 `LIST_VISIBLE_ROWS=4` |
+| 60fps 坞时钟 | `app::frame_interval` → 16ms when `menu_ui_active` |
+| 开坞无空帧 | `enter_menu_ui` 立即 `redraw`；`update_layered_rgba_ex(pos)` 原子 present |
 | 宠物大小 | `config.pet.scale` · `pet_logical_size` · 设置/托盘 |
 | 真眨眼待机 | `assets/.../idle_blink` · `build_idle_base.py` |
-| 呈现 | `UpdateLayeredWindow` |
+| 呈现 | `UpdateLayeredWindow` + 预乘 BGRA |
 
 ---
 
@@ -346,4 +393,8 @@ assets/tray/icon.png
 | --- | --- | --- |
 | v0.1 | 2026-08-01 | 初稿 |
 | v0.2–0.3 | 2026-08-04 | 同步启动坞卡片、钉宠 |
-| **v0.4** | **2026-08-04** | **按模块重排**；阅读导航；与 PRD v0.4 / 钉宠+玻璃实现对齐；去掉过时「径向环默认」表述 |
+| v0.4 | 2026-08-04 | 按模块重排；钉宠+玻璃；去掉过时「径向环默认」 |
+| v0.5 | 2026-08-06 | 待机真眨眼 + 宠物大小可调 |
+| v0.6 | 2026-08-07 | Appica token / 精致控件 / 开合动效初版 |
+| v0.7 | 2026-08-07 | 丝滑开合：宠不闪、60fps、原子 present |
+| **v0.8** | **2026-08-07** | 主按钮扁平实心；**GDI 文字**；列表 **滚轮滚动**（非封顶 5）；tech v0.6 |

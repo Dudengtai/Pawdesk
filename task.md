@@ -6,10 +6,10 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.5**（2026-08-06：待机真眨眼 + 宠物大小可调） |
-| 依据文档 | `prd.md` v0.5、`tech.md` v0.4、`design.md` v0.5 |
+| 当前版本 | **v0.7**（2026-08-07：坞 polish 收口 — GDI 字 · 滚轮列表 · flat 主按钮） |
+| 依据文档 | `prd.md` v0.5、`tech.md` v0.6、`design.md` v0.8 |
 | 环境参考 | `env.md` |
-| 状态 | **M0–M5 可日常使用**；**M6 进行中** |
+| 状态 | **M0–M5 可日常使用**；**M6 坞精致化主路径已落地**；字体更精致化后期 |
 | **下一步** | **优化 30s 随机撒娇 one-shot 动画效果**（`idle_stretch` / `cute` / `tail_wag` / `sleep`）→ 见 PET-A07 |
 
 ### 1.1 使用说明
@@ -30,6 +30,8 @@
 | v0.4 | 2026-08-04 | 拍板启动坞 **钉宠 + Flip/Shift**；新增 §14 开发计划；对齐 design/tech §7 |
 | v0.5 | 2026-08-06 | 待机真眨眼资源 + clip 播放 polish；`pet.scale` 默认 0.6 + 设置/托盘手动调节；文档同步 prd/design/tech |
 | v0.5.1 | 2026-08-06 | 记录 **下一步 = 随机撒娇动画效果优化**（PET-A07）；release 便携包已打 |
+| v0.6 | 2026-08-07 | 启动坞 Appica 精致 UI + 丝滑开合；MENU-09~13 / L6；design v0.7 · tech v0.5 |
+| **v0.7** | **2026-08-07** | **坞 bug 收口**：flat 主按钮；GDI 文字（fontdue 弃用于 UI）；列表滚轮可扩展（非封顶 5）；design **v0.8** · tech **v0.6**；L7 |
 
 ---
 
@@ -286,12 +288,13 @@ foundation (工程/错误/日志/事件总线)
 | MENU-01 | 单击宠物 -> `MenuOpen`；空白/再点关闭 | M4 | P0 | PET-10, WIN-02 | prd F-SC-01 | [x] |
 | MENU-02 | 径向布局：圆心=宠物、项尺寸/半径按 design | M4 | P0 | RND-02 | design §7.1 | [x] |
 | MENU-03 | 展开方向自适应（左/右/上/下/角） | M4 | P0 | PLAT-01 | tech §7.3, design §7.2, prd F-SC-03 | [x] |
-| MENU-09 | **钉宠 place_launcher**（Flip/Shift/Union） | M6-B | P0 | MENU-03 | design §7.5, tech §7.3, task §14 | [ ] |
-| MENU-10 | 动态 union 窗 + compose 分画宠/卡 | M6-B | P0 | MENU-09 | task §14 L1 | [ ] |
-| MENU-11 | Opening/Closing 动画（最终 placement 锁定） | M6-B | P0 | MENU-10 | design §7.6 | [ ] |
-| MENU-12 | 半透明玻璃拟态（非 Acrylic） | M6-C | P0 | MENU-10 | design §7.4 | [ ] |
-| MENU-04 | 固定入口 + 动态快捷项（按 sort_order） | M4 | P0 | SC-02 | design §7.1, prd F-SC-08 | [x] |
-| MENU-05 | 展开/收起动效（snappy）与 100ms 内反馈 | M4 | P0 | RND-04 | design §2, §7, prd 体验 | [x] |
+| MENU-09 | **钉宠 place_launcher**（Flip/Shift/Union） | M6-B | P0 | MENU-03 | design §5.3, tech §5.2, task §14 | [x] |
+| MENU-10 | 动态 union 窗 + compose 分画宠/卡 | M6-B | P0 | MENU-09 | task §14 L1 · tech §5.3 | [x] |
+| MENU-11 | Opening/Closing 丝滑动效（最终 placement 锁定；宠不闪；~60fps） | M6-B | P0 | MENU-10 | design §5.6 · tech §5.3–5.4 | [x] |
+| MENU-12 | Appica 暖玻璃 + primary/soft/row 精致控件（非 Acrylic） | M6-C | P0 | MENU-10 | design §2 · §5.2–5.6 | [x] |
+| MENU-13 | hover/press 插值 + 子项 stagger + 原子 present 防空帧 | M6-B | P1 | MENU-11 | design §5.6 · tech §5.4 | [x] |
+| MENU-04 | 固定入口 + 动态快捷项（按 sort_order） | M4 | P0 | SC-02 | design §5.4, prd F-SC-08 | [x] |
+| MENU-05 | 展开/收起动效与 100ms 内反馈（已升级丝滑 60fps） | M4 | P0 | RND-04 | design §2.5, §5.6 | [x] |
 | MENU-06 | 点击项 -> `ShortcutSelected` -> 启动 | M4 | P0 | SC-04 | prd F-SC-05 | [x] |
 | MENU-07 | 失效项警告态（不直接隐藏） | M4 | P1 | SC-05 | design §7.3, §12 | [x] |
 | MENU-08 | 项过多时分页或滚动降级 | M4 | P1 | MENU-02 | tech §7.3 | [ ] |
@@ -508,10 +511,10 @@ foundation (工程/错误/日志/事件总线)
 | --- | --- | --- |
 | M0–M5 功能闭环 | ✅ 可日常使用 | 维护 |
 | 交互逻辑 v1 | ✅ 迟滞/驻留/保护 cute | **M6-A 继续打磨** |
-| 启动坞 / 设置 UI | 🟡 可用，仍有粗糙点 | **M6-B UI 修复** |
-| 提醒面板视觉 | 🟡 功能有，视觉粗 | **M6-B** |
-| 已知 bug 清单 | 见 §11.2 / §13 | **M6-A 优先** |
-| 宠物动作 / 形象 / 飞扑 | 可用底线；精修延后 | **M6-C 最后** |
+| 启动坞 / 设置 UI | ✅ **Appica 精致坞 + 丝滑开合**（2026-08-07） | 微调 / 回归 |
+| 提醒面板视觉 | 🟡 功能有，视觉粗 | **M6 后续** |
+| 已知 bug 清单 | 见 §11.2 / §13 | 按优先级 |
+| 宠物动作 / 形象 / 飞扑 | 可用底线；精修延后 | **下一步 PET-A07** |
 
 ### 11.2 已知问题 backlog（按类）
 
@@ -530,11 +533,11 @@ foundation (工程/错误/日志/事件总线)
 
 | ID | 期望 | 现状 |
 | --- | --- | --- |
-| IX-01 | **钉宠**：开坞后宠物屏幕锚点尽量不动；卡 flip/shift | 整窗扩卡 + 弱方向；贴边会裁切/拖宠 |
-| IX-01b | 四边四角 work area 内整卡可点 | 未做 fully-inside 放置算法 |
-| IX-01c | `HiddenAtEdge` 先回可见再开坞 | 未做 |
-| IX-01d | Opening/Closing 动画（scale+opacity） | 仅 content slide；关闭瞬时 |
-| IX-02 | 列表 hover / 按压反馈（逻辑态） | 无 hover 态 |
+| IX-01 | **钉宠**：开坞后宠物屏幕锚点尽量不动；卡 flip/shift | ✅ `place_launcher` |
+| IX-01b | 四边四角 work area 内整卡可点 | ✅ 放置算法 + 单测 |
+| IX-01c | `HiddenAtEdge` 先回可见再开坞 | ✅ snap restore |
+| IX-01d | Opening/Closing 丝滑（scale+fade；宠不闪；~60fps） | ✅ design §5.6 · tech §5.4 |
+| IX-02 | 列表 hover / 按压反馈（逻辑态） | ✅ hover_t / press_t 插值 |
 | IX-03 | 提醒中拖动 / 点食物 / 开菜单优先级清晰 | 有规则，需手工再验 |
 | IX-04 | 隐藏时提醒 pending → 显示后弹出 | M5 已做，需回归 |
 | IX-05 | 点击-拖动阈值 / 关坞防抖 | 10px / 280ms 已做，可按手感微调 |
@@ -542,13 +545,13 @@ foundation (工程/错误/日志/事件总线)
 
 #### C. UI 修复（次优先，交互之后）
 
-| ID | 项 |
-| --- | --- |
-| UI-01 | 启动坞：悬停/按压绘制、空状态与按钮节奏 |
-| UI-02 | 设置页：与启动坞同一套间距/字号层级 |
-| UI-03 | 提醒卡 / 食物按钮：对齐 design 或至少更清晰 |
-| UI-04 | 窗体切换动画（可选淡入，忌大改） |
-| UI-05 | 快捷行图标（系统提取 ico 可选） |
+| ID | 项 | 状态 |
+| --- | --- | --- |
+| UI-01 | 启动坞：悬停/按压绘制、空状态与按钮节奏 | ✅ Appica primary/soft/row + chrome 动画 |
+| UI-02 | 设置页：与启动坞同一套间距/字号层级 | [~] 共用 token；可再精修 |
+| UI-03 | 提醒卡 / 食物按钮：对齐 design 或至少更清晰 | [ ] |
+| UI-04 | 窗体切换动画（可选淡入，忌大改） | [~] 坞开合已做；提醒窗切换另议 |
+| UI-05 | 快捷行图标（系统提取 ico 可选） | [ ] |
 
 #### D. 宠物动作与形象（**最后**）
 
@@ -736,12 +739,13 @@ M6-D   宠物动作与形象（最后再开）
 
 ## 14. 钉宠 Launcher 开发计划（M6-B/C 主交付）
 
-> **产品拍板（2026-08-04）**  
+> **产品拍板（2026-08-04 · 精致化 2026-08-07）**  
 > - 形态：方案 A 玻璃卡片坞（非径向、非强制竖向列表独占）  
 > - 交互：**宠物屏幕锚点尽量钉死**；卡片 **Flip → Shift → Size**  
-> - 视觉：半透明玻璃拟态（用户可接受）；禁止真桌面 Acrylic  
+> - 视觉：**Appica 暖玻璃** + primary/soft/row；禁止真桌面 Acrylic / Web 组件库  
+> - 动效：卡从身边长出；**宠不闪**；~**60fps**；线性 open_t + out_quint/out_cubic  
 > - 单 HWND：`W = union(pet_screen_rect, card_rect)`，层内分画宠与卡  
-> - 依据：`design.md` §7、`tech.md` §7.3；效果图 `docs/mockups/launcher-pin-flip.*`
+> - 依据：`design.md` §5（v0.7）、`tech.md` §5（v0.5）；效果图 `docs/mockups/launcher-preview.*`
 
 ### 14.1 目标与非目标
 
@@ -827,9 +831,9 @@ close → restore origin（禁 persist 临时坐标）
 
 | ID | 任务 | 优先级 | 状态 |
 | --- | --- | --- | --- |
-| L3-01 | Opening：`open_t` 驱动 card opacity + scale(0.92→1)，~250ms `ease_snappy` | P0 | [x] |
+| L3-01 | Opening：`open_t` 驱动 card opacity + scale | P0 | [x] → 见 **L6** 升级 |
 | L3-02 | 布局在 Opening 开始即用最终 placement（中途不二次 flip） | P0 | [x] |
-| L3-03 | Closing 状态：反向 150–220ms 后再缩窗回宠 | P0 | [x] |
+| L3-03 | Closing 状态：反向后再缩窗回宠 | P0 | [x] → 见 **L6** |
 | L3-04 | 启动成功 → 走 Closing 再 Idle（一步启动） | P0 | [x] |
 | L3-05 | 关坞 280ms 防抖保持 | P0 | [x] |
 
@@ -839,22 +843,48 @@ close → restore origin（禁 persist 临时坐标）
 
 | ID | 任务 | 优先级 | 状态 |
 | --- | --- | --- | --- |
-| L4-01 | 卡片底：暖白/冷白 **半透明** alpha（约 0.78–0.88）+ 内高光 | P0 | [x] |
-| L4-02 | 多层软阴影（已有可调参）对齐 mockup | P1 | [x] |
-| L4-03 | 色板与 design §3 或 §7 统一（粉强调可选，系统蓝主按钮可保留） | P1 | [x] |
+| L4-01 | 卡片底：暖白 **半透明** + 内高光 | P0 | [x] → 见 **L6** Appica token |
+| L4-02 | 多层软阴影对齐 mockup | P1 | [x] |
+| L4-03 | 色板与 design §2 统一（深 slate primary + 粉 accent） | P1 | [x] |
 | L4-04 | 禁止接入系统 Acrylic / 抓屏 blur | P0 | [x] 约束 |
 
-**完成标准**：静态观感接近 `launcher-pin-flip` / `launcher-preview` 方案 A
+**完成标准**：静态观感接近 `launcher-pin-flip` / `launcher-preview`
 
 #### L5 — 手感与异常
 
 | ID | 任务 | 优先级 | 状态 |
 | --- | --- | --- | --- |
-| L5-01 | 行 Hover / 按压填充态（MenuOpen 跟 cursor） | P1 | [x] |
-| L5-02 | 失效行文案对齐 design §7.10；点击进设置并高亮 | P1 | [x] |
+| L5-01 | 行 Hover / 按压填充态（MenuOpen 跟 cursor） | P1 | [x] → 见 **L6** 插值 |
+| L5-02 | 失效行文案对齐 design；点击进设置并高亮 | P1 | [x] |
 | L5-03 | 空列表引导（已有可微调） | P1 | [x] |
 | L5-04 | Size 降级：极小 work 时缩卡高/宽（可选） | P2 | [ ] |
-| L5-05 | 气泡反馈 §7.11（启动失败优先） | P2 | [ ] |
+| L5-05 | 气泡反馈（启动失败优先） | P2 | [ ] |
+
+#### L6 — Appica 精致化 + 丝滑防闪（2026-08-07）
+
+| ID | 任务 | 优先级 | 状态 |
+| --- | --- | --- | --- |
+| L6-01 | Appica 暖色 token + primary/soft/list 控件绘制 | P0 | [x] |
+| L6-02 | `menu_open_t` 线性时钟；开 380ms / 关 240ms；compose 内 out_quint/out_cubic | P0 | [x] |
+| L6-03 | 宠全不透明；卡层 per-layer fade；托盘 plate 随 fade 渐入 | P0 | [x] |
+| L6-04 | 子项 stagger + hover/press `approach` 插值 + press scale 0.97 | P0 | [x] |
+| L6-05 | 坞打开 **60fps**（16ms）；动画 tick 内直接 `redraw` | P0 | [x] |
+| L6-06 | `update_layered_rgba_ex` 原子 present；`enter_menu_ui` 立即首帧 | P0 | [x] |
+| L6-07 | design v0.7 / tech v0.5 / mockup 同步 | P0 | [x] |
+
+**完成标准**：点宠 → 卡从身边长出；宠不闪不跳不弹；动画跟手丝滑
+
+#### L7 — 坞可用性收口（2026-08-07 晚）
+
+| ID | 任务 | 优先级 | 状态 |
+| --- | --- | --- | --- |
+| L7-01 | Primary 去顶高光/底阴影（flat solid，无「两道影」） | P0 | [x] |
+| L7-02 | UI 文字改 **GDI**（YaHei UI）；弃 fontdue 画启动坞字 | P0 | [x] |
+| L7-03 | 列表视口 + **滚轮滚动**；软上限 128；修「只显示 2 个」 | P0 | [x] |
+| L7-04 | 文档 design v0.8 / tech v0.6 / task 同步 | P0 | [x] |
+| L7-05 | 更精致字体（ClearType/子像素/字重体系） | P2 | [ ] **后期** |
+
+**完成标准**：3+ 应用可全见（≤4 直接见，更多滚轮）；主按钮无白条；拉丁/中文基线齐
 
 ### 14.4 建议迭代切片（单人 / AI 辅助）
 
@@ -889,6 +919,11 @@ close → restore origin（禁 persist 临时坐标）
 - [ ] **启动项**：启动后坞关闭  
 - [ ] **125% / 150% DPI**：无裁切、字清晰  
 - [ ] **副屏**（若有）：在宠所在屏 work 内  
+- [ ] **丝滑开坞**：宠不闪；卡从身边长出（无弹跳/空帧）  
+- [ ] **60fps 观感**：开合与 hover 无明显跳帧  
+- [ ] **控件**：flat primary（无白条）/ soft / 列表 hover·press  
+- [ ] **列表**：≥3 应用全可见；多应用可滚轮；提示「共 N 个」  
+- [ ] **文字**：GDI 基线齐（精致化后期）  
 
 ### 14.7 进度表
 
@@ -898,3 +933,5 @@ close → restore origin（禁 persist 临时坐标）
 | S2 L1+L2 接线 | [x] | 2026-08-04 |
 | S3 L3 动画 | [x] | 2026-08-04 |
 | S4 L4+L5 UI | [x] | 2026-08-04 |
+| S5 L6 精致化+丝滑防闪 | [x] | 2026-08-07 |
+| **S6 L7 可用性收口（字/列表/主按钮）** | **[x]** | **2026-08-07** |

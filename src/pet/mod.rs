@@ -283,17 +283,19 @@ impl PetController {
         if !matches!(self.state, PetState::MenuOpen) {
             return (false, false);
         }
-        const OPEN_DUR: f32 = 0.25;
-        const CLOSE_DUR: f32 = 0.18;
+        // Silk open: longer settle, no overshoot. Linear clock in pet; compose multi-curves.
+        // Close slightly shorter with ease-in feel via compose.
+        const OPEN_DUR: f32 = 0.38;
+        const CLOSE_DUR: f32 = 0.24;
 
         if self.menu_closing {
             let Some(start) = self.menu_anim_started else {
                 self.close_menu(now);
                 return (true, true);
             };
+            // Linear 1→0 clock; visual ease applied in compose for smooth reverse.
             let u = (now.duration_since(start).as_secs_f32() / CLOSE_DUR).clamp(0.0, 1.0);
-            let e = crate::render::easing::ease_smooth(u);
-            self.menu_open_t = self.menu_close_from_t * (1.0 - e);
+            self.menu_open_t = self.menu_close_from_t * (1.0 - u);
             if u >= 1.0 {
                 self.menu_open_t = 0.0;
                 self.menu_anim_started = None;
@@ -306,10 +308,10 @@ impl PetController {
             return (true, false);
         }
 
-        // Opening
+        // Opening — store **linear** 0→1; compose applies ease_out_quint / fade lead.
         if let Some(start) = self.menu_anim_started {
-            let u = now.duration_since(start).as_secs_f32() / OPEN_DUR;
-            self.menu_open_t = crate::render::easing::ease_snappy(u.min(1.0));
+            let u = (now.duration_since(start).as_secs_f32() / OPEN_DUR).clamp(0.0, 1.0);
+            self.menu_open_t = u;
             if u >= 1.0 {
                 self.menu_open_t = 1.0;
                 self.menu_anim_started = None;
@@ -1070,7 +1072,19 @@ impl PetController {
             PetState::HiddenAtEdge(_) => "edge_peek".to_string(),
             PetState::Reminder(ReminderStage::Feeding) => "reminder_feed".to_string(),
             PetState::Reminder(_) => "reminder_wave".to_string(),
-            PetState::MenuOpen => IDLE_BASE.to_string(),
+            // Keep the current clip when possible so open doesn't crossfade-flash.
+            PetState::MenuOpen => {
+                let cur = self.player.clip_name().to_string();
+                if cur.starts_with("idle_") || cur.is_empty() {
+                    if cur.is_empty() {
+                        IDLE_BASE.to_string()
+                    } else {
+                        cur
+                    }
+                } else {
+                    IDLE_BASE.to_string()
+                }
+            }
         };
 
         if clip_name == self.player.clip_name() {

@@ -1,43 +1,58 @@
-//! Apple HIG–inspired quick-launch dock + manager UI.
+//! Appica-inspired quick-launch dock + manager UI (warm glass · pin-pet).
 //!
 //! Drawn at **device pixel ratio** so text/edges stay sharp on HiDPI
-//! (no low-res compose → bilinear upscale blur).
+//! (no low-res compose → bilinear upscale blur). No system Acrylic.
 
+use crate::render::easing::{ease_out_cubic, ease_out_quint, lerp, stagger_t};
 use crate::render::text::{center_in_rect, rasterize_text};
 use crate::ui::radial_menu::{MenuEntry, RadialLayout};
 
-// ── Palette (warm glass · design §3 / §7 · no system Acrylic) ─────────────
-/// Warm panel ~88% alpha (L4 glass 拟态).
-const CARD: [u8; 4] = [0xFF, 0xF8, 0xF2, 0xE0];
-/// Soft frosted rows.
-const GROUPED_BG: [u8; 4] = [0xF5, 0xF0, 0xEB, 0xC8];
-const GROUPED_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xD8];
-const GROUPED_PRESS: [u8; 4] = [0xFF, 0xEE, 0xF5, 0xE8];
-const INVALID_BG: [u8; 4] = [0xFF, 0xB0, 0x20, 0x38];
-const INVALID_BG_HOVER: [u8; 4] = [0xFF, 0xB0, 0x20, 0x55];
-const HIGHLIGHT_ROW: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x40];
-const SEPARATOR: [u8; 4] = [0xC6, 0xC6, 0xC8, 0x70];
-const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x55];
-const INNER_HL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x48];
-const LABEL: [u8; 4] = [0x3A, 0x35, 0x40, 0xFF];
-const SECONDARY: [u8; 4] = [0x3C, 0x3C, 0x43, 0xB0];
-const TERTIARY: [u8; 4] = [0x3C, 0x3C, 0x43, 0x70];
-const BLUE: [u8; 4] = [0x00, 0x7A, 0xFF, 0xFF];
-const BLUE_PRESS: [u8; 4] = [0x00, 0x64, 0xD6, 0xFF];
-const FILL_OPAQUE: [u8; 4] = [0xE8, 0xE4, 0xE0, 0xE0];
-const FILL_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xE8];
-const ORANGE: [u8; 4] = [0xC4, 0x7A, 0x00, 0xFF];
-const RED: [u8; 4] = [0xFF, 0x3B, 0x30, 0xFF];
+// ── Palette (Appica-warm · design §2 · no system Acrylic) ─────────────────
+/// Near-white card ~92% alpha with warm tint.
+const CARD: [u8; 4] = [0xFF, 0xFB, 0xFA, 0xEB];
+/// Soft muted surfaces (rows / chips).
+const GROUPED_BG: [u8; 4] = [0xF4, 0xF2, 0xF0, 0xD0];
+const GROUPED_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xE8];
+const GROUPED_PRESS: [u8; 4] = [0xEE, 0xE8, 0xF0, 0xF0];
+const INVALID_BG: [u8; 4] = [0xFF, 0xB0, 0x20, 0x30];
+const INVALID_BG_HOVER: [u8; 4] = [0xFF, 0xB0, 0x20, 0x48];
+const HIGHLIGHT_ROW: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x38];
+const SEPARATOR: [u8; 4] = [0xE2, 0xE0, 0xDE, 0x90];
+const BORDER: [u8; 4] = [0x1E, 0x1B, 0x2E, 0x18];
+const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x70];
+const INNER_HL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x55];
+/// text.intense
+const LABEL: [u8; 4] = [0x0F, 0x17, 0x2B, 0xFF];
+const SECONDARY: [u8; 4] = [0x47, 0x55, 0x69, 0xC8];
+const TERTIARY: [u8; 4] = [0x64, 0x74, 0x8B, 0xA0];
+/// Appica-like deep primary (slate).
+const PRIMARY: [u8; 4] = [0x1E, 0x29, 0x3B, 0xFF];
+const PRIMARY_HOVER: [u8; 4] = [0x33, 0x41, 0x55, 0xFF];
+const PRIMARY_PRESS: [u8; 4] = [0x0F, 0x17, 0x2B, 0xFF];
+/// Kept for settings status / links that still read as “system”.
+const BLUE: [u8; 4] = [0x25, 0x63, 0xEB, 0xFF];
+const BLUE_PRESS: [u8; 4] = [0x1D, 0x4E, 0xD8, 0xFF];
+const FILL_OPAQUE: [u8; 4] = [0xF1, 0xEF, 0xED, 0xE8];
+const FILL_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xF0];
+const SOFT_BORDER: [u8; 4] = [0x1E, 0x1B, 0x2E, 0x14];
+const ORANGE: [u8; 4] = [0xC2, 0x71, 0x0A, 0xFF];
+const RED: [u8; 4] = [0xE1, 0x1D, 0x48, 0xFF];
 const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
-const SHADOW_A: [u8; 4] = [0x00, 0x00, 0x00, 0x0E];
-const SHADOW_B: [u8; 4] = [0x00, 0x00, 0x00, 0x18];
-const SHADOW_C: [u8; 4] = [0x00, 0x00, 0x00, 0x28];
+const ACCENT_PINK: [u8; 4] = [0xFF, 0x9E, 0xC4, 0xFF];
+const SHADOW_A: [u8; 4] = [0x0F, 0x17, 0x2B, 0x0A];
+const SHADOW_B: [u8; 4] = [0x0F, 0x17, 0x2B, 0x12];
+const SHADOW_C: [u8; 4] = [0x0F, 0x17, 0x2B, 0x1C];
+const SHADOW_BTN: [u8; 4] = [0x0F, 0x17, 0x2B, 0x28];
 
-/// Hover / press indices into `layout.items`.
+/// Hover / press indices into `layout.items` + animated blends (0..1).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MenuChromeState {
     pub hover: Option<usize>,
     pub press: Option<usize>,
+    /// Animated intensity for current hover target.
+    pub hover_t: f32,
+    /// Animated intensity while press is held.
+    pub press_t: f32,
 }
 
 /// Device-pixel scale helper. Layout is logical; drawing is physical.
@@ -87,105 +102,144 @@ pub fn compose_menu_frame(
     let h = dpi.su(layout.window_h);
     let mut out = vec![0u8; (w * h * 4) as usize];
 
-    // L3: scale card from pet center; opacity from open_t (0.92→1 visual scale).
-    let t = layout.open_t.clamp(0.0, 1.0);
-    let scale = 0.92 + 0.08 * t;
+    // ── Silk motion (card only; pet stays pinned at full opacity) ──────────
+    // open_t is a **linear** 0..1 clock from pet::tick_menu_anim.
+    // Scale/fade curves are continuous for any path of t (open or close).
+    let t_clock = layout.open_t.clamp(0.0, 1.0);
+    let t_scale = ease_out_quint(t_clock);
+    // Fade leads scale slightly so glass materializes before full size.
+    let t_fade = ease_out_cubic((t_clock * 1.22).min(1.0));
+    // Shadow softens in with a longer tail (no harsh blob on first frames).
+    let t_shadow = (t_fade * t_fade).clamp(0.0, 1.0);
+
+    // Grow from pet center — gentle start scale (0.90→1), no overshoot, no extra y.
+    let scale = 0.90 + 0.10 * t_scale;
     let pivot_x = layout.pet_x + layout.pet_w * 0.5;
     let pivot_y = layout.pet_y + layout.pet_h * 0.5;
     let layout = scale_layout_from_pivot(layout, pivot_x, pivot_y, scale);
 
-    // Glass card only (rest of union window stays transparent for pin-pet).
+    // Elevated glass card (rest of union window stays transparent for pin-pet).
     let cx0 = dpi.s(layout.card_x);
     let cy0 = dpi.s(layout.card_y);
     let cx1 = dpi.s(layout.card_x + layout.card_w);
     let cy1 = dpi.s(layout.card_y + layout.card_h);
-    let crad = dpi.s(22.0);
+    let crad = dpi.s(18.0);
 
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        cx0 + dpi.s(8.0),
-        cy0 + dpi.s(10.0),
-        cx1 + dpi.s(6.0),
-        cy1 + dpi.s(8.0),
-        crad,
-        SHADOW_A,
-    );
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        cx0 + dpi.s(4.0),
-        cy0 + dpi.s(5.0),
-        cx1 + dpi.s(3.0),
-        cy1 + dpi.s(4.0),
-        crad,
-        SHADOW_B,
-    );
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        cx0 + dpi.s(1.5),
-        cy0 + dpi.s(2.0),
-        cx1 + dpi.s(1.5),
-        cy1 + dpi.s(1.5),
-        crad,
-        SHADOW_C,
-    );
-    fill_rrect_aa(&mut out, w, h, cx0, cy0, cx1, cy1, crad, CARD);
-    // Inner top glass highlight (L4)
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        cx0 + dpi.s(2.0),
-        cy0 + dpi.s(2.0),
-        cx1 - dpi.s(2.0),
-        cy0 + dpi.s(18.0),
-        dpi.s(12.0),
-        INNER_HL,
-    );
-    stroke_rrect_aa(
-        &mut out,
-        w,
-        h,
-        cx0 + 0.5,
-        cy0 + 0.5,
-        cx1 - 0.5,
-        cy1 - 0.5,
-        crad,
-        HAIRLINE,
-        1.0,
-    );
+    if t_fade > 0.01 {
+        fill_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0 + dpi.s(10.0),
+            cy0 + dpi.s(14.0),
+            cx1 + dpi.s(8.0),
+            cy1 + dpi.s(12.0),
+            crad,
+            with_alpha(SHADOW_A, t_shadow),
+        );
+        fill_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0 + dpi.s(5.0),
+            cy0 + dpi.s(7.0),
+            cx1 + dpi.s(4.0),
+            cy1 + dpi.s(6.0),
+            crad,
+            with_alpha(SHADOW_B, t_shadow),
+        );
+        fill_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0 + dpi.s(1.5),
+            cy0 + dpi.s(2.5),
+            cx1 + dpi.s(1.5),
+            cy1 + dpi.s(2.0),
+            crad,
+            with_alpha(SHADOW_C, t_shadow * 0.9),
+        );
+        fill_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0,
+            cy0,
+            cx1,
+            cy1,
+            crad,
+            with_alpha(CARD, t_fade),
+        );
+        // Top sheen
+        fill_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0 + dpi.s(1.5),
+            cy0 + dpi.s(1.5),
+            cx1 - dpi.s(1.5),
+            cy0 + dpi.s(20.0),
+            dpi.s(14.0),
+            with_alpha(INNER_HL, t_fade),
+        );
+        stroke_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0 + 0.5,
+            cy0 + 0.5,
+            cx1 - 0.5,
+            cy1 - 0.5,
+            crad,
+            with_alpha(BORDER, t_fade),
+            1.0,
+        );
+        stroke_rrect_aa(
+            &mut out,
+            w,
+            h,
+            cx0 + 1.0,
+            cy0 + 1.0,
+            cx1 - 1.0,
+            cy1 - 1.0,
+            crad - 0.5,
+            with_alpha(HAIRLINE, t_fade),
+            1.0,
+        );
+    }
 
     let content_x = dpi.s(content_x_from(&layout));
     let content_w = dpi.s(content_w_from(&layout));
 
-    blit_text(
-        &mut out,
-        w,
-        h,
-        "快捷启动",
-        content_x,
-        dpi.s(layout.card_y + 16.0),
-        dpi.su(220),
-        dpi.px(17.0),
-        LABEL,
-    );
-    blit_text(
-        &mut out,
-        w,
-        h,
-        "打开常用应用",
-        content_x,
-        dpi.s(layout.card_y + 38.0),
-        dpi.su(220),
-        dpi.px(12.0),
-        SECONDARY,
-    );
+    // Title: soft fade with card (no extra vertical jump).
+    let title_a = t_fade;
+    if title_a > 0.02 {
+        blit_text(
+            &mut out,
+            w,
+            h,
+            "快捷启动",
+            content_x,
+            dpi.s(layout.card_y + 15.0),
+            dpi.su(220),
+            dpi.px(17.0),
+            with_alpha(LABEL, title_a),
+        );
+        blit_text(
+            &mut out,
+            w,
+            h,
+            "打开常用应用",
+            content_x,
+            dpi.s(layout.card_y + 36.0),
+            dpi.su(220),
+            dpi.px(12.0),
+            with_alpha(SECONDARY, title_a),
+        );
+    }
 
+    // Pet always full opacity. Plate / "轻点关闭" fades in with the card so the
+    // silhouette does not flash into a glass tray on frame 0.
     draw_avatar(
         &mut out,
         w,
@@ -198,173 +252,429 @@ pub fn compose_menu_frame(
         pet_rgba,
         pet_w,
         pet_h,
+        t_fade,
     );
 
+    // Controls cascade after card materializes (~12% delay), soft dy.
+    let content_clock = ((t_clock - 0.10) / 0.90).clamp(0.0, 1.0);
     let mut saw_shortcut = false;
     for (i, item) in layout.items.iter().enumerate() {
-        let x = dpi.s(item.x);
-        let y = dpi.s(item.y);
-        let bw = dpi.s(item.w);
-        let bh = dpi.s(item.h);
-        let radius = dpi.s(12.0);
-        let pressed = chrome.press == Some(i);
-        let hovered = chrome.hover == Some(i);
+        let reveal = stagger_t(content_clock, i, 0.028, 0.78) * t_fade;
+        if reveal <= 0.01 {
+            continue;
+        }
+        let item_dy = (1.0 - stagger_t(content_clock, i, 0.028, 0.78)) * dpi.s(5.0);
+        let hover_w = if chrome.hover == Some(i) {
+            chrome.hover_t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let press_w = if chrome.press == Some(i) {
+            chrome.press_t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // Press: scale 0.97 + +1px y (Appica active)
+        let pscale = 1.0 - 0.03 * press_w;
+        let mut x = dpi.s(item.x);
+        let mut y = dpi.s(item.y) + item_dy + dpi.s(1.0) * press_w;
+        let mut bw = dpi.s(item.w);
+        let mut bh = dpi.s(item.h);
+        let cx = x + bw * 0.5;
+        let cy = y + bh * 0.5;
+        bw *= pscale;
+        bh *= pscale;
+        x = cx - bw * 0.5;
+        y = cy - bh * 0.5;
+        let radius = dpi.s(11.0);
 
         match &item.entry {
             MenuEntry::AddShortcut => {
-                let btn = if pressed { BLUE_PRESS } else { BLUE };
-                fill_rrect_aa(
+                draw_primary_btn(
                     &mut out,
                     w,
                     h,
+                    dpi,
                     x,
-                    y + dpi.s(1.5),
-                    x + bw,
-                    y + bh + dpi.s(1.5),
+                    y,
+                    bw,
+                    bh,
                     radius,
-                    SHADOW_A,
-                );
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, btn);
-                fill_rrect_aa(
-                    &mut out,
-                    w,
-                    h,
-                    x + dpi.s(2.0),
-                    y + dpi.s(1.0),
-                    x + bw - dpi.s(2.0),
-                    y + dpi.s(5.0),
-                    dpi.s(3.0),
-                    INNER_HL,
-                );
-                blit_text_centered(
-                    &mut out, w, h, "添加应用", x, y, bw, bh, dpi.px(15.0), WHITE, dpi,
+                    "添加应用",
+                    hover_w,
+                    press_w,
+                    reveal,
                 );
             }
             MenuEntry::Manage => {
-                let bg = if pressed {
-                    GROUPED_PRESS
-                } else if hovered {
-                    FILL_HOVER
-                } else {
-                    FILL_OPAQUE
-                };
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, bg);
-                blit_text_centered(&mut out, w, h, "管理", x, y, bw, bh, dpi.px(14.0), BLUE, dpi);
+                draw_soft_btn(
+                    &mut out,
+                    w,
+                    h,
+                    dpi,
+                    x,
+                    y,
+                    bw,
+                    bh,
+                    radius,
+                    "管理",
+                    LABEL,
+                    hover_w,
+                    press_w,
+                    reveal,
+                );
             }
             MenuEntry::PauseReminder => {
-                let bg = if pressed {
-                    GROUPED_PRESS
-                } else if hovered {
-                    FILL_HOVER
-                } else {
-                    FILL_OPAQUE
-                };
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, bg);
                 let label = if reminder_paused {
                     "恢复提醒"
                 } else {
                     "暂停提醒"
                 };
-                blit_text_centered(&mut out, w, h, label, x, y, bw, bh, dpi.px(14.0), LABEL, dpi);
-            }
-            MenuEntry::Shortcut { name, valid, .. } => {
-                saw_shortcut = true;
-                let bg = if !*valid {
-                    if hovered || pressed {
-                        INVALID_BG_HOVER
-                    } else {
-                        INVALID_BG
-                    }
-                } else if pressed {
-                    GROUPED_PRESS
-                } else if hovered {
-                    GROUPED_HOVER
-                } else {
-                    GROUPED_BG
-                };
-                fill_rrect_aa(&mut out, w, h, x, y, x + bw, y + bh, radius, bg);
-
-                let icx = (x + dpi.s(22.0)) as i32;
-                let icy = (y + bh * 0.5) as i32;
-                let disc_r = dpi.s(13.0).round() as i32;
-                let disc = if *valid { BLUE } else { ORANGE };
-                let disc_d = if *valid { BLUE_PRESS } else { ORANGE };
-                fill_soft_disc(
+                draw_soft_btn(
                     &mut out,
                     w,
                     h,
-                    icx,
-                    icy,
-                    disc_r,
-                    0.7,
-                    disc,
-                    disc_d,
+                    dpi,
+                    x,
+                    y,
+                    bw,
+                    bh,
+                    radius,
+                    label,
+                    LABEL,
+                    hover_w,
+                    press_w,
+                    reveal,
                 );
-
-                let ch = if *valid {
-                    name.chars().next().unwrap_or('A').to_string()
-                } else {
-                    "!".to_string()
-                };
-                if let Some((tw, th, tbuf)) = rasterize_text(&ch, dpi.su(24), dpi.px(12.0), WHITE) {
-                    let (tx, ty) = center_in_rect(
-                        icx as f32 - disc_r as f32,
-                        icy as f32 - disc_r as f32,
-                        disc_r as f32 * 2.0,
-                        disc_r as f32 * 2.0,
-                        tw,
-                        th,
-                        dpi.s(0.5),
-                    );
-                    blit(&mut out, w, h, &tbuf, tw, th, tx, ty);
-                }
-
-                let max_tw = (bw - dpi.s(88.0)).max(8.0) as u32;
-                if *valid {
-                    if let Some((tw, th, tbuf)) =
-                        rasterize_text(name, max_tw, dpi.px(15.0), LABEL)
-                    {
-                        let ty = (y + (bh - th as f32) * 0.5 + dpi.s(0.5))
-                            .round()
-                            .max(0.0) as u32;
-                        blit(&mut out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
-                    }
-                } else {
-                    // design §7.10: ⚠ name + 无法找到程序
-                    if let Some((tw, th, tbuf)) =
-                        rasterize_text(name, max_tw, dpi.px(14.0), ORANGE)
-                    {
-                        let ty = (y + dpi.s(8.0)).round().max(0.0) as u32;
-                        blit(&mut out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
-                    }
-                    if let Some((tw, th, tbuf)) =
-                        rasterize_text("无法找到程序 · 点此修复", max_tw, dpi.px(11.0), ORANGE)
-                    {
-                        let ty = (y + dpi.s(26.0)).round().max(0.0) as u32;
-                        blit(&mut out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
-                    }
-                }
-
-                draw_chevron(
+            }
+            MenuEntry::Shortcut { name, valid, .. } => {
+                saw_shortcut = true;
+                draw_list_row(
                     &mut out,
                     w,
-                    (x + bw - dpi.s(16.0)) as i32,
-                    (y + bh * 0.5) as i32,
+                    h,
                     dpi,
-                    TERTIARY,
+                    x,
+                    y,
+                    bw,
+                    bh,
+                    radius,
+                    name,
+                    *valid,
+                    hover_w,
+                    press_w,
+                    reveal,
                 );
             }
         }
     }
 
     if !saw_shortcut {
-        draw_empty_state(&mut out, w, h, content_x, content_w, &layout, dpi);
+        draw_empty_state(
+            &mut out,
+            w,
+            h,
+            content_x,
+            content_w,
+            &layout,
+            dpi,
+            t_fade * ease_out_cubic(content_clock),
+        );
     }
 
-    // Fade whole overlay with open_t (card + labels already scaled; pet stays put).
-    apply_rgba_alpha(&mut out, t);
+    // Scroll affordance when more apps exist than the viewport.
+    if t_fade > 0.5 && (layout.list_can_scroll_up || layout.list_can_scroll_down) {
+        let more = layout.list_total.saturating_sub(
+            crate::ui::radial_menu::LIST_VISIBLE_ROWS.min(layout.list_total),
+        );
+        let hint = if layout.list_can_scroll_up && layout.list_can_scroll_down {
+            format!("滚轮查看 · 共 {} 个", layout.list_total)
+        } else if layout.list_can_scroll_down {
+            format!("↓ 滚轮查看更多 · 共 {} 个", layout.list_total)
+        } else {
+            format!("↑ 滚轮回到顶部 · 共 {} 个", layout.list_total)
+        };
+        let _ = more;
+        let hy = dpi.s(layout.list_bottom + 4.0).max(dpi.s(layout.card_y + layout.card_h - 20.0));
+        blit_text(
+            &mut out,
+            w,
+            h,
+            &hint,
+            content_x,
+            hy,
+            dpi.su(280),
+            dpi.px(11.0),
+            with_alpha(TERTIARY, t_fade * 0.95),
+        );
+    }
+
+    // No global alpha — pet stays solid; card/controls already use per-layer fade.
 
     (w, h, out)
+}
+
+fn with_alpha(c: [u8; 4], a: f32) -> [u8; 4] {
+    let mut o = c;
+    o[3] = ((c[3] as f32) * a.clamp(0.0, 1.0)).round().clamp(0.0, 255.0) as u8;
+    o
+}
+
+fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        lerp(a[0] as f32, b[0] as f32, t).round() as u8,
+        lerp(a[1] as f32, b[1] as f32, t).round() as u8,
+        lerp(a[2] as f32, b[2] as f32, t).round() as u8,
+        lerp(a[3] as f32, b[3] as f32, t).round() as u8,
+    ]
+}
+
+fn draw_primary_btn(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    x: f32,
+    y: f32,
+    bw: f32,
+    bh: f32,
+    radius: f32,
+    label: &str,
+    hover_w: f32,
+    press_w: f32,
+    reveal: f32,
+) {
+    // Flat solid primary — no drop-shadow underlay, no top sheen.
+    // Those layered fills read as "two shadow bars" on slate buttons.
+    let _ = dpi;
+    let base = lerp_rgba(PRIMARY, PRIMARY_HOVER, hover_w);
+    let btn = lerp_rgba(base, PRIMARY_PRESS, press_w);
+    let btn = with_alpha(btn, reveal);
+    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, radius, btn);
+    // Hairline border slightly darker than fill for edge definition only.
+    let border = with_alpha(PRIMARY_PRESS, reveal * 0.55);
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        x + 0.5,
+        y + 0.5,
+        x + bw - 0.5,
+        y + bh - 0.5,
+        radius,
+        border,
+        1.0,
+    );
+    blit_text_centered(
+        out,
+        w,
+        h,
+        label,
+        x,
+        y,
+        bw,
+        bh,
+        dpi.px(14.5),
+        with_alpha(WHITE, reveal),
+        dpi,
+    );
+}
+
+fn draw_soft_btn(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    x: f32,
+    y: f32,
+    bw: f32,
+    bh: f32,
+    radius: f32,
+    label: &str,
+    text: [u8; 4],
+    hover_w: f32,
+    press_w: f32,
+    reveal: f32,
+) {
+    let bg0 = FILL_OPAQUE;
+    let bg1 = FILL_HOVER;
+    let bg2 = GROUPED_PRESS;
+    let bg = with_alpha(
+        lerp_rgba(lerp_rgba(bg0, bg1, hover_w), bg2, press_w),
+        reveal,
+    );
+    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, radius, bg);
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        x + 0.5,
+        y + 0.5,
+        x + bw - 0.5,
+        y + bh - 0.5,
+        radius,
+        with_alpha(SOFT_BORDER, reveal),
+        1.0,
+    );
+    // Soft top highlight on hover
+    if hover_w > 0.05 {
+        fill_rrect_aa(
+            out,
+            w,
+            h,
+            x + dpi.s(2.0),
+            y + dpi.s(1.0),
+            x + bw - dpi.s(2.0),
+            y + dpi.s(4.0),
+            dpi.s(3.0),
+            with_alpha(INNER_HL, reveal * hover_w * 0.7),
+        );
+    }
+    blit_text_centered(
+        out,
+        w,
+        h,
+        label,
+        x,
+        y,
+        bw,
+        bh,
+        dpi.px(13.5),
+        with_alpha(text, reveal),
+        dpi,
+    );
+}
+
+fn draw_list_row(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    x: f32,
+    y: f32,
+    bw: f32,
+    bh: f32,
+    radius: f32,
+    name: &str,
+    valid: bool,
+    hover_w: f32,
+    press_w: f32,
+    reveal: f32,
+) {
+    let bg = if !valid {
+        lerp_rgba(INVALID_BG, INVALID_BG_HOVER, (hover_w + press_w).min(1.0))
+    } else {
+        lerp_rgba(
+            lerp_rgba(GROUPED_BG, GROUPED_HOVER, hover_w),
+            GROUPED_PRESS,
+            press_w,
+        )
+    };
+    let bg = with_alpha(bg, reveal);
+    // Hover elevation
+    if hover_w > 0.02 && valid {
+        fill_rrect_aa(
+            out,
+            w,
+            h,
+            x,
+            y + dpi.s(1.5),
+            x + bw,
+            y + bh + dpi.s(2.0),
+            radius,
+            with_alpha(SHADOW_A, reveal * hover_w),
+        );
+    }
+    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, radius, bg);
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        x + 0.5,
+        y + 0.5,
+        x + bw - 0.5,
+        y + bh - 0.5,
+        radius,
+        with_alpha(SOFT_BORDER, reveal * 0.85),
+        1.0,
+    );
+
+    let icx = (x + dpi.s(22.0)) as i32;
+    let icy = (y + bh * 0.5) as i32;
+    let disc_r = dpi.s(13.0).round() as i32;
+    let (disc, disc_d) = if valid {
+        (PRIMARY, PRIMARY_HOVER)
+    } else {
+        (ORANGE, ORANGE)
+    };
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        icx,
+        icy,
+        disc_r,
+        0.7,
+        with_alpha(disc, reveal),
+        with_alpha(disc_d, reveal),
+    );
+
+    let ch = if valid {
+        name.chars().next().unwrap_or('A').to_string()
+    } else {
+        "!".to_string()
+    };
+    if let Some((tw, th, tbuf)) =
+        rasterize_text(&ch, dpi.su(24), dpi.px(12.0), with_alpha(WHITE, reveal))
+    {
+        let (tx, ty) = center_in_rect(
+            icx as f32 - disc_r as f32,
+            icy as f32 - disc_r as f32,
+            disc_r as f32 * 2.0,
+            disc_r as f32 * 2.0,
+            tw,
+            th,
+            dpi.s(0.5),
+        );
+        blit(out, w, h, &tbuf, tw, th, tx, ty);
+    }
+
+    let max_tw = (bw - dpi.s(88.0)).max(8.0) as u32;
+    // 15pt logical · dual-font + 2× SS (text.rs) for clean Latin names.
+    if valid {
+        if let Some((tw, th, tbuf)) =
+            rasterize_text(name, max_tw, dpi.px(15.0), with_alpha(LABEL, reveal))
+        {
+            let ty = (y + (bh - th as f32) * 0.5).round().max(0.0) as u32;
+            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+        }
+    } else {
+        if let Some((tw, th, tbuf)) =
+            rasterize_text(name, max_tw, dpi.px(14.0), with_alpha(ORANGE, reveal))
+        {
+            let ty = (y + dpi.s(8.0)).round().max(0.0) as u32;
+            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+        }
+        if let Some((tw, th, tbuf)) = rasterize_text(
+            "无法找到程序 · 点此修复",
+            max_tw,
+            dpi.px(11.0),
+            with_alpha(ORANGE, reveal * 0.9),
+        ) {
+            let ty = (y + dpi.s(26.0)).round().max(0.0) as u32;
+            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+        }
+    }
+
+    draw_chevron(
+        out,
+        w,
+        (x + bw - dpi.s(16.0)) as i32,
+        (y + bh * 0.5) as i32,
+        dpi,
+        with_alpha(TERTIARY, reveal),
+    );
 }
 
 /// Scale card + items around pivot; pet rect stays fixed (pin-pet).
@@ -412,6 +722,9 @@ fn scale_layout_from_pivot(
 
     let _ = cx;
     let _ = cy;
+    let (list_top_x, list_top_y) = map(layout.card_x, layout.list_top);
+    let (_, list_bot_y) = map(layout.card_x, layout.list_bottom);
+    let _ = list_top_x;
     RadialLayout {
         items,
         open_t: layout.open_t,
@@ -426,16 +739,12 @@ fn scale_layout_from_pivot(
         card_y,
         card_w,
         card_h,
-    }
-}
-
-fn apply_rgba_alpha(buf: &mut [u8], a: f32) {
-    let a = a.clamp(0.0, 1.0);
-    if (a - 1.0).abs() < 0.001 {
-        return;
-    }
-    for px in buf.chunks_exact_mut(4) {
-        px[3] = ((px[3] as f32) * a).round().clamp(0.0, 255.0) as u8;
+        list_total: layout.list_total,
+        list_scroll: layout.list_scroll,
+        list_can_scroll_up: layout.list_can_scroll_up,
+        list_can_scroll_down: layout.list_can_scroll_down,
+        list_top: list_top_y,
+        list_bottom: list_bot_y,
     }
 }
 
@@ -492,13 +801,41 @@ fn draw_empty_state(
     content_w: f32,
     layout: &RadialLayout,
     dpi: Dpi,
+    reveal: f32,
 ) {
-    let ey = dpi.s(empty_y(layout) as f32);
+    let reveal = reveal.clamp(0.0, 1.0);
+    if reveal < 0.05 {
+        return;
+    }
+    let ey = dpi.s(empty_y(layout) as f32) + (1.0 - reveal) * dpi.s(6.0);
     let gx = (content_x + content_w * 0.5) as i32;
-    let gy = (ey + dpi.s(12.0)) as i32;
-    let r = dpi.s(18.0).round() as i32;
+    let gy = (ey + dpi.s(14.0)) as i32;
+    let r = dpi.s(20.0).round() as i32;
 
-    fill_soft_disc(out, w, h, gx, gy, r, 0.8, FILL_OPAQUE, GROUPED_BG);
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        gx,
+        gy,
+        r,
+        0.9,
+        with_alpha(FILL_OPAQUE, reveal),
+        with_alpha(GROUPED_BG, reveal),
+    );
+    // Soft pink ring accent
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        gx as f32 - r as f32,
+        gy as f32 - r as f32,
+        gx as f32 + r as f32,
+        gy as f32 + r as f32,
+        r as f32,
+        with_alpha(ACCENT_PINK, reveal * 0.45),
+        1.5,
+    );
     let t = dpi.s(1.5).max(1.0);
     let arm = dpi.s(6.0);
     fill_rect_f(
@@ -509,7 +846,7 @@ fn draw_empty_state(
         gy as f32 - arm,
         t,
         arm * 2.0,
-        SECONDARY,
+        with_alpha(SECONDARY, reveal),
     );
     fill_rect_f(
         out,
@@ -519,19 +856,23 @@ fn draw_empty_state(
         gy as f32 - t * 0.5,
         arm * 2.0,
         t,
-        SECONDARY,
+        with_alpha(SECONDARY, reveal),
     );
 
-    if let Some((tw, th, tbuf)) = rasterize_text("还没有常用应用", dpi.su(220), dpi.px(14.0), LABEL)
-    {
-        let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
-        blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(40.0)) as u32);
-    }
     if let Some((tw, th, tbuf)) =
-        rasterize_text("点「添加应用」选 exe / 快捷方式", dpi.su(300), dpi.px(12.0), SECONDARY)
+        rasterize_text("还没有常用应用", dpi.su(220), dpi.px(14.0), with_alpha(LABEL, reveal))
     {
         let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
-        blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(60.0)) as u32);
+        blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(44.0)) as u32);
+    }
+    if let Some((tw, th, tbuf)) = rasterize_text(
+        "点「添加应用」选 exe / 快捷方式",
+        dpi.su(300),
+        dpi.px(12.0),
+        with_alpha(SECONDARY, reveal),
+    ) {
+        let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
+        blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(64.0)) as u32);
     }
 }
 
@@ -573,61 +914,85 @@ fn draw_avatar(
     pet_rgba: &[u8],
     src_w: u32,
     src_h: u32,
+    // 0 = free silhouette (idle look); 1 = full glass plate + hint.
+    plate_a: f32,
 ) {
+    let plate_a = plate_a.clamp(0.0, 1.0);
     let px = dpi.s(pet_x);
     let py = dpi.s(pet_y);
     let pw = dpi.s(pet_w);
     let ph = dpi.s(pet_h);
     let rad = dpi.s(18.0);
 
-    fill_rrect_aa(
-        out,
-        w,
-        h,
-        px + dpi.s(2.0),
-        py + dpi.s(4.0),
-        px + pw + dpi.s(2.0),
-        py + ph + dpi.s(4.0),
-        rad,
-        SHADOW_B,
-    );
-    fill_rrect_aa(out, w, h, px, py, px + pw, py + ph, rad, GROUPED_BG);
-    stroke_rrect_aa(
-        out,
-        w,
-        h,
-        px + 0.5,
-        py + 0.5,
-        px + pw - 0.5,
-        py + ph - 0.5,
-        rad,
-        SEPARATOR,
-        1.0,
-    );
+    if plate_a > 0.02 {
+        fill_rrect_aa(
+            out,
+            w,
+            h,
+            px + dpi.s(3.0),
+            py + dpi.s(5.0),
+            px + pw + dpi.s(3.0),
+            py + ph + dpi.s(5.0),
+            rad,
+            with_alpha(SHADOW_B, plate_a),
+        );
+        fill_rrect_aa(
+            out,
+            w,
+            h,
+            px,
+            py,
+            px + pw,
+            py + ph,
+            rad,
+            with_alpha(CARD, plate_a),
+        );
+        stroke_rrect_aa(
+            out,
+            w,
+            h,
+            px + 0.5,
+            py + 0.5,
+            px + pw - 0.5,
+            py + ph - 0.5,
+            rad,
+            with_alpha(SEPARATOR, plate_a),
+            1.0,
+        );
+    }
 
-    let max = (pw.min(ph) - dpi.s(40.0)).max(dpi.s(48.0)) as u32;
+    // Idle: fill almost the whole pin rect. Menu settled: leave room for label.
+    let inset = lerp(dpi.s(4.0), dpi.s(40.0), plate_a);
+    let max = (pw.min(ph) - inset).max(dpi.s(48.0)) as u32;
     let (sw, sh, pet) = scale_rgba_fit(pet_rgba, src_w, src_h, max, max);
+    let label_pad = lerp(0.0, dpi.s(28.0), plate_a);
     let ox = (px + (pw - sw as f32) * 0.5).round() as u32;
-    let oy = (py + (ph - dpi.s(28.0) - sh as f32) * 0.45 + dpi.s(10.0))
+    let oy = (py + (ph - label_pad - sh as f32) * 0.5 + dpi.s(2.0))
         .round()
-        .max(py + dpi.s(10.0)) as u32;
+        .max(py + dpi.s(2.0)) as u32;
 
-    fill_soft_ellipse(
-        out,
-        w,
-        h,
-        (px + pw * 0.5) as i32,
-        (py + ph - dpi.s(34.0)) as i32,
-        dpi.s(30.0) as i32,
-        dpi.s(8.0) as i32,
-        SHADOW_B,
-    );
+    if plate_a > 0.02 {
+        fill_soft_ellipse(
+            out,
+            w,
+            h,
+            (px + pw * 0.5) as i32,
+            (py + ph - dpi.s(34.0)) as i32,
+            dpi.s(30.0) as i32,
+            dpi.s(8.0) as i32,
+            with_alpha(SHADOW_B, plate_a),
+        );
+    }
     blit(out, w, h, &pet, sw, sh, ox, oy);
 
-    if let Some((tw, th, t)) = rasterize_text("轻点关闭", dpi.su(110), dpi.px(11.0), TERTIARY) {
-        let tx = (px + (pw - tw as f32) * 0.5).round() as u32;
-        let ty = (py + ph - dpi.s(18.0) - th as f32 * 0.5).round() as u32;
-        blit(out, w, h, &t, tw, th, tx, ty);
+    if plate_a > 0.05 {
+        if let Some((tw, th, t)) =
+            rasterize_text("轻点关闭", dpi.su(110), dpi.px(11.0), with_alpha(TERTIARY, plate_a))
+        {
+            let tx = (px + (pw - tw as f32) * 0.5).round() as u32;
+            let ty = (py + ph - dpi.s(18.0) - th as f32 * 0.5).round() as u32;
+            blit(out, w, h, &t, tw, th, tx, ty);
+        }
     }
 }
 
@@ -698,7 +1063,18 @@ pub fn compose_settings_frame(
         dpi.s(26.0),
         SHADOW_B,
     );
-    fill_rrect_aa(&mut out, w, h, 0.0, 0.0, wf, hf, dpi.s(22.0), CARD);
+    fill_rrect_aa(&mut out, w, h, 0.0, 0.0, wf, hf, dpi.s(18.0), CARD);
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(1.5),
+        dpi.s(1.5),
+        wf - dpi.s(1.5),
+        dpi.s(22.0),
+        dpi.s(14.0),
+        INNER_HL,
+    );
     stroke_rrect_aa(
         &mut out,
         w,
@@ -707,8 +1083,8 @@ pub fn compose_settings_frame(
         0.5,
         wf - 0.5,
         hf - 0.5,
-        dpi.s(22.0),
-        HAIRLINE,
+        dpi.s(18.0),
+        BORDER,
         1.0,
     );
 
@@ -759,8 +1135,20 @@ pub fn compose_settings_frame(
         rc_top,
         wf - dpi.s(20.0),
         rc_top + rc_h,
-        dpi.s(14.0),
+        dpi.s(12.0),
         GROUPED_BG,
+    );
+    stroke_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(20.0) + 0.5,
+        rc_top + 0.5,
+        wf - dpi.s(20.0) - 0.5,
+        rc_top + rc_h - 0.5,
+        dpi.s(12.0),
+        SOFT_BORDER,
+        1.0,
     );
     blit_text(
         &mut out,
@@ -920,8 +1308,20 @@ pub fn compose_settings_frame(
         pc_top,
         wf - dpi.s(20.0),
         pc_top + pc_h,
-        dpi.s(14.0),
+        dpi.s(12.0),
         GROUPED_BG,
+    );
+    stroke_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(20.0) + 0.5,
+        pc_top + 0.5,
+        wf - dpi.s(20.0) - 0.5,
+        pc_top + pc_h - 0.5,
+        dpi.s(12.0),
+        SOFT_BORDER,
+        1.0,
     );
     blit_text(
         &mut out,
@@ -1032,8 +1432,20 @@ pub fn compose_settings_frame(
         list_top,
         wf - dpi.s(20.0),
         list_bottom,
-        dpi.s(14.0),
+        dpi.s(12.0),
         GROUPED_BG,
+    );
+    stroke_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(20.0) + 0.5,
+        list_top + 0.5,
+        wf - dpi.s(20.0) - 0.5,
+        list_bottom - 0.5,
+        dpi.s(12.0),
+        SOFT_BORDER,
+        1.0,
     );
 
     if names.is_empty() {
@@ -1111,11 +1523,33 @@ pub fn compose_settings_frame(
         w,
         h,
         dpi.s(24.0),
+        hf - dpi.s(70.0),
+        wf - dpi.s(24.0),
+        hf - dpi.s(22.0),
+        dpi.s(12.0),
+        SHADOW_BTN,
+    );
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(24.0),
         hf - dpi.s(72.0),
         wf - dpi.s(24.0),
         hf - dpi.s(24.0),
-        dpi.s(14.0),
-        BLUE,
+        dpi.s(12.0),
+        PRIMARY,
+    );
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(28.0),
+        hf - dpi.s(70.0),
+        wf - dpi.s(28.0),
+        hf - dpi.s(62.0),
+        dpi.s(4.0),
+        INNER_HL,
     );
     blit_text_centered(
         &mut out,
@@ -1126,7 +1560,7 @@ pub fn compose_settings_frame(
         hf - dpi.s(72.0),
         wf - dpi.s(48.0),
         dpi.s(48.0),
-        dpi.px(16.0),
+        dpi.px(15.0),
         WHITE,
         dpi,
     );

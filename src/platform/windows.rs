@@ -140,11 +140,26 @@ pub fn enable_transparent_window(window: &impl HasWindowHandle) -> Result<(), Ap
 ///
 /// `rgba` is tightly packed top-to-bottom, 4 bytes/pixel, length >= w*h*4.
 /// Transparent pixels (a≈0) show the desktop; only the pet silhouette is visible.
+///
+/// When `screen_pos` is `Some((x,y))`, size **and** position are applied in the
+/// same `UpdateLayeredWindow` call (avoids empty-frame flash on menu open).
 pub fn update_layered_rgba(
     window: &impl HasWindowHandle,
     width: u32,
     height: u32,
     rgba: &[u8],
+) -> Result<(), AppError> {
+    update_layered_rgba_ex(window, width, height, rgba, None)
+}
+
+/// Like [`update_layered_rgba`], optionally setting the layered window's
+/// top-left screen position atomically with the bitmap.
+pub fn update_layered_rgba_ex(
+    window: &impl HasWindowHandle,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    screen_pos: Option<(i32, i32)>,
 ) -> Result<(), AppError> {
     if width == 0 || height == 0 {
         return Ok(());
@@ -230,12 +245,14 @@ pub fn update_layered_rgba(
         }
 
         let old = SelectObject(hdc_mem, hbmp.into());
-        // pptDst = None keeps current screen position (do NOT pass 0,0).
         let mut size = windows::Win32::Foundation::SIZE {
             cx: width as i32,
             cy: height as i32,
         };
         let mut pt_src = POINT { x: 0, y: 0 };
+        let mut pt_dst = screen_pos
+            .map(|(x, y)| POINT { x, y })
+            .unwrap_or(POINT { x: 0, y: 0 });
         let mut blend = windows::Win32::Graphics::Gdi::BLENDFUNCTION {
             BlendOp: 0, // AC_SRC_OVER
             BlendFlags: 0,
@@ -250,10 +267,15 @@ pub fn update_layered_rgba(
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
         }
 
+        // pptDst: None keeps current screen position; Some moves atomically with size.
         let ok = UpdateLayeredWindow(
             hwnd,
             Some(hdc_screen),
-            None,
+            if screen_pos.is_some() {
+                Some(&mut pt_dst)
+            } else {
+                None
+            },
             Some(&mut size),
             Some(hdc_mem),
             Some(&mut pt_src),

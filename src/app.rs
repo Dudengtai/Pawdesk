@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton as WinitMouseButton, StartCause, WindowEvent};
+use winit::event::{
+    ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, StartCause, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
 
@@ -34,8 +36,9 @@ use crate::ui::launcher_place::{
 };
 use crate::ui::pet_window::DragState;
 use crate::ui::radial_menu::{
-    self, build_entries, hit_center, hit_test_index, layout_pinned, MenuEntry, RadialLayout,
-    CARD_LOGICAL_H, CARD_LOGICAL_W, MENU_WINDOW_H, MENU_WINDOW_W,
+    self, build_entries, clamp_list_scroll, count_shortcuts, hit_center, hit_test_index,
+    layout_pinned_scroll, MenuEntry, RadialLayout, CARD_LOGICAL_H, CARD_LOGICAL_W, MENU_WINDOW_H,
+    MENU_WINDOW_W,
 };
 use crate::ui::tray::TrayHandle;
 
@@ -83,6 +86,13 @@ pub struct App {
     /// Menu item hover / press (layout.items index).
     menu_hover: Option<usize>,
     menu_press: Option<usize>,
+    /// Animated 0..1 blends for Appica-style hover/press microinteractions.
+    menu_hover_t: f32,
+    menu_press_t: f32,
+    /// Overlay window top-left (physical) for atomic layered present during menu open.
+    menu_present_pos: Option<(i32, i32)>,
+    /// Shortcut list scroll (first visible row index). Supports many apps via wheel.
+    menu_list_scroll: usize,
     /// Settings list row to emphasize (from invalid launcher item).
     settings_highlight_row: Option<usize>,
     /// Pet position before menu/settings expand (window top-left, physical).
@@ -140,6 +150,10 @@ impl App {
             menu_logical_size: (MENU_WINDOW_W, MENU_WINDOW_H),
             menu_hover: None,
             menu_press: None,
+            menu_hover_t: 0.0,
+            menu_press_t: 0.0,
+            menu_present_pos: None,
+            menu_list_scroll: 0,
             settings_highlight_row: None,
             overlay_origin: None,
             hit_rgba: Vec::new(),
@@ -362,13 +376,16 @@ impl App {
                 .map(|s| s.is_paused())
                 .unwrap_or(false);
             let entries = build_entries(self.shortcuts.list_enabled_sorted().as_slice(), paused);
+            let total = count_shortcuts(&entries);
+            self.menu_list_scroll = clamp_list_scroll(self.menu_list_scroll, total);
             let (lw, lh) = self.menu_logical_size;
             // L3-02: geometry locked at open (open_t=1.0 for layout); visual uses menu_open_t.
+            // Always re-layout shortcuts with current scroll so all apps are reachable.
             let mut layout = self
                 .menu_layout
                 .as_ref()
                 .map(|prev| {
-                    layout_pinned(
+                    layout_pinned_scroll(
                         &entries,
                         lw,
                         lh,
@@ -376,10 +393,11 @@ impl App {
                         (prev.card_x, prev.card_y, prev.card_w, prev.card_h),
                         radial_menu::ExpandDir::Right,
                         1.0,
+                        self.menu_list_scroll,
                     )
                 })
                 .unwrap_or_else(|| {
-                    layout_pinned(
+                    layout_pinned_scroll(
                         &entries,
                         lw,
                         lh,
@@ -393,6 +411,7 @@ impl App {
                         },
                         radial_menu::ExpandDir::Right,
                         1.0,
+                        self.menu_list_scroll,
                     )
                 });
             layout.open_t = pet.menu_open_t;
@@ -400,6 +419,8 @@ impl App {
             let chrome = MenuChromeState {
                 hover: self.menu_hover,
                 press: self.menu_press,
+                hover_t: self.menu_hover_t,
+                press_t: self.menu_press_t,
             };
             let (w, h, composed) = compose_menu_frame(
                 &pet_rgba,
@@ -469,9 +490,6 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        let win = window.inner_size();
-        let win_w = win.width.max(1);
-        let win_h = win.height.max(1);
 
         if self.hit_rgba.is_empty() {
             return;
@@ -502,15 +520,20 @@ impl App {
             })
             .unwrap_or(false);
 
-        // HiDPI overlays are already composed at device pixels — present 1:1.
-        // Bilinear upscale is what made text/outlines look soft.
-        let present = if overlay && sw == win_w && sh == win_h && !mirror_x {
-            self.hit_rgba.clone()
-        } else if overlay && !mirror_x {
-            // Prefer nearest-ish path when only a few px off (window snap).
-            scale_rgba_centered_crisp(&self.hit_rgba, sw, sh, win_w, win_h)
+        // Overlays: present at composed device-pixel size (1:1). Do not wait for
+        // winit's async resize — that empty intermediate frame is the pet "flash".
+        let (win_w, win_h, present, screen_pos) = if overlay && !mirror_x {
+            let pos = if self.menu_ui_active {
+                self.menu_present_pos
+            } else {
+                None
+            };
+            (sw.max(1), sh.max(1), self.hit_rgba.clone(), pos)
         } else {
-            scale_rgba_centered(
+            let win = window.inner_size();
+            let win_w = win.width.max(1);
+            let win_h = win.height.max(1);
+            let present = scale_rgba_centered(
                 &self.hit_rgba,
                 sw,
                 sh,
@@ -518,10 +541,13 @@ impl App {
                 win_h,
                 drag_scale,
                 mirror_x,
-            )
+            );
+            (win_w, win_h, present, None)
         };
 
-        if let Err(e) = platform::update_layered_rgba(window.as_ref(), win_w, win_h, &present) {
+        if let Err(e) =
+            platform::update_layered_rgba_ex(window.as_ref(), win_w, win_h, &present, screen_pos)
+        {
             error!("update_layered_rgba: {e}");
         }
     }
@@ -739,7 +765,8 @@ impl App {
             .map(|s| s.is_paused())
             .unwrap_or(false);
         let entries = build_entries(self.shortcuts.list_enabled_sorted().as_slice(), paused);
-        self.menu_layout = Some(layout_pinned(
+        self.menu_list_scroll = 0;
+        self.menu_layout = Some(layout_pinned_scroll(
             &entries,
             win_log_w,
             win_log_h,
@@ -747,19 +774,29 @@ impl App {
             card_local,
             place.dir,
             0.0,
+            0,
         ));
 
         self.menu_ui_active = true;
         self.menu_hover = None;
         self.menu_press = None;
+        self.menu_hover_t = 0.0;
+        self.menu_press_t = 0.0;
+        // Atomic layered present target (physical). Avoids empty frames during resize.
+        self.menu_present_pos = Some((place.window.x, place.window.y));
+
+        // Keep winit geometry in sync for hit-testing / outer_position queries.
         self.resize_pet_window(win_log_w, win_log_h);
         if let Some(w) = &self.window {
             w.set_outer_position(PhysicalPosition::new(place.window.x, place.window.y));
             let _ = platform::set_click_through(w.as_ref(), false);
             self.click_through = false;
-            w.request_redraw();
         }
+
+        // Compose open_t≈0 (pet solid, card invisible) and present immediately at
+        // the new size/pos — no WaitUntil delay (this was the main pet flash).
         self.texture_dirty = true;
+        self.redraw();
         info!(
             ?place.dir,
             win = ?(place.window.x, place.window.y, place.window.width, place.window.height),
@@ -792,10 +829,38 @@ impl App {
         }
         self.menu_hover = None;
         self.menu_press = None;
+        self.menu_hover_t = 0.0;
+        self.menu_press_t = 0.0;
+        self.menu_present_pos = None;
+        self.menu_list_scroll = 0;
         self.restore_overlay_origin_window();
         // L3-05: ignore click that closed the dock + brief double-tap reopen.
         self.menu_reopen_after = Some(now + Duration::from_millis(280));
         info!("launcher dock exited");
+    }
+
+    /// Mouse wheel: scroll shortcut list when dock is open (many apps).
+    fn scroll_menu_list(&mut self, lines: i32) {
+        if !self.menu_ui_active || lines == 0 {
+            return;
+        }
+        let total = self
+            .shortcuts
+            .list_enabled_sorted()
+            .len();
+        let cur = self.menu_list_scroll as i32;
+        let next = (cur - lines).max(0) as usize; // wheel up → show earlier items
+        let next = clamp_list_scroll(next, total);
+        if next != self.menu_list_scroll {
+            self.menu_list_scroll = next;
+            self.menu_hover = None;
+            self.menu_press = None;
+            self.texture_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            info!(scroll = next, total, "menu list scroll");
+        }
     }
 
     fn enter_settings_ui(&mut self) {
@@ -816,6 +881,9 @@ impl App {
             self.menu_layout = None;
             self.menu_hover = None;
             self.menu_press = None;
+            self.menu_hover_t = 0.0;
+            self.menu_press_t = 0.0;
+            self.menu_present_pos = None;
         } else {
             self.capture_overlay_origin();
         }
@@ -1355,8 +1423,11 @@ impl App {
             // Hidden: poll tray slowly.
             return Duration::from_millis(200);
         }
-        if self.menu_ui_active
-            || self.settings_ui_active
+        // Menu open/close + hover microinteractions need ~60fps for silk motion.
+        if self.menu_ui_active {
+            return Duration::from_millis(16);
+        }
+        if self.settings_ui_active
             || self.reminder_ui_active
             || self.drag.dragging
             || self.file_picker_busy
@@ -1436,6 +1507,37 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(_size) => {
                 // Layered present uses current inner_size each frame; no swapchain.
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.menu_ui_active
+                    && self
+                        .pet
+                        .as_ref()
+                        .map(|p| p.is_menu_interactive())
+                        .unwrap_or(false)
+                {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => {
+                            if y > 0.1 {
+                                1
+                            } else if y < -0.1 {
+                                -1
+                            } else {
+                                0
+                            }
+                        }
+                        MouseScrollDelta::PixelDelta(p) => {
+                            if p.y > 8.0 {
+                                1
+                            } else if p.y < -8.0 {
+                                -1
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    self.scroll_menu_list(lines);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_in_window = Point::new(position.x, position.y);
@@ -1726,6 +1828,10 @@ impl ApplicationHandler<UserEvent> for App {
 
         let now = Instant::now();
         if now.duration_since(self.last_frame) >= self.frame_interval() {
+            let dt = now
+                .duration_since(self.last_frame)
+                .as_secs_f32()
+                .clamp(0.0, 0.05);
             self.last_frame = now;
 
             if !self.visible {
@@ -1762,16 +1868,39 @@ impl ApplicationHandler<UserEvent> for App {
                 || self.menu_ui_active
                 || self.settings_ui_active
                 || self.texture_dirty;
+            // Present menu frames immediately in this tick (skip extra RedrawRequested hop).
+            let mut present_now = false;
 
-            // Menu open/close animation (L3)
+            // Menu open/close animation (L3) + Appica hover/press blends
             if let Some(pet) = self.pet.as_mut() {
                 let (animating, close_done) = pet.tick_menu_anim(now);
                 if close_done {
                     self.finish_exit_menu_ui(now);
                     need_redraw = true;
+                    present_now = true;
                 } else if animating || pet.is_menu_open() {
                     need_redraw = true;
                     self.texture_dirty = true;
+                    if animating {
+                        present_now = true;
+                    }
+                }
+            }
+            if self.menu_ui_active {
+                let ht = if self.menu_hover.is_some() { 1.0 } else { 0.0 };
+                let pt = if self.menu_press.is_some() { 1.0 } else { 0.0 };
+                let nh = crate::render::easing::approach(self.menu_hover_t, ht, 14.0, dt);
+                let np = crate::render::easing::approach(self.menu_press_t, pt, 18.0, dt);
+                if (nh - self.menu_hover_t).abs() > 0.002 || (np - self.menu_press_t).abs() > 0.002
+                {
+                    self.menu_hover_t = nh;
+                    self.menu_press_t = np;
+                    self.texture_dirty = true;
+                    need_redraw = true;
+                    present_now = true;
+                } else {
+                    self.menu_hover_t = nh;
+                    self.menu_press_t = np;
                 }
             }
 
@@ -1962,7 +2091,10 @@ impl ApplicationHandler<UserEvent> for App {
                 need_redraw = true;
             }
 
-            if need_redraw || self.texture_dirty {
+            if present_now && self.visible {
+                // Direct present for open/close — lower latency than request_redraw hop.
+                self.redraw();
+            } else if need_redraw || self.texture_dirty {
                 if let Some(w) = &self.window {
                     if self.visible {
                         w.request_redraw();
