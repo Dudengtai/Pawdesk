@@ -5,8 +5,17 @@
 //!
 //! Sharpness notes (发虚 fix):
 //! - Draw **black on white** into a DIBSection (1:1 device px, no stretch)
-//! - Use **Microsoft YaHei UI** + medium weight
+//! - Font stack: bundled high-quality faces first (assets/fonts, loaded FR_PRIVATE),
+//!   then **Microsoft YaHei UI**; faces are verified with `EnumFontFamiliesExW`
+//!   (a bare `CreateFontW` silently substitutes the default font, so an unverified
+//!   fallback chain never actually falls back).
+//! - Small sizes (≤ 28 device px) render **semibold** — Regular/Medium washes out
+//!   on glass at UI sizes; heavier stems keep strokes readable (阅读无障碍).
 //! - Crush soft AA fringes with a contrast curve so stems read solid on glass
+//!
+//! Recommended bundled fonts (drop one weight into `assets/fonts/`, free for
+//! commercial use): MiSans (小米), HarmonyOS Sans SC (华为), Source Han Sans SC /
+//! Noto Sans SC (思源黑体, OFL), Alibaba PuHuiTi (阿里巴巴普惠体).
 
 use std::sync::OnceLock;
 
@@ -17,60 +26,178 @@ mod gdi {
     use super::crop_ink;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    use tracing::warn;
 
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{COLORREF, RECT};
+    use windows::Win32::Foundation::{COLORREF, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC,
-        DeleteObject, DrawTextW, FillRect, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
-        ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS,
-        DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT, DT_LEFT, DT_NOPREFIX,
-        DT_WORDBREAK, FF_DONTCARE, FW_MEDIUM, HFONT, OUT_TT_PRECIS, TRANSPARENT,
+        AddFontResourceExW, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush,
+        DeleteDC, DeleteObject, DrawTextW, EnumFontFamiliesExW, FillRect, FR_PRIVATE, GetDC,
+        ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY, BI_RGB,
+        BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+        DIB_RGB_COLORS, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, FF_DONTCARE,
+        FONTENUMPROCW, FW_MEDIUM, FW_SEMIBOLD, HFONT, HDC, LF_FACESIZE, LOGFONTW, OUT_TT_PRECIS,
+        TEXTMETRICW, TRANSPARENT,
     };
+
+    /// Best-first CJK/Latin UI faces. The first four are **bundled** candidates
+    /// (loaded FR_PRIVATE from `assets/fonts/`); the rest are the system stack.
+    const FACE_PRIORITY: &[&str] = &[
+        "HarmonyOS Sans SC",
+        "MiSans",
+        "Noto Sans SC",
+        "Source Han Sans SC",
+        "Alibaba PuHuiTi 3.0",
+        "Alibaba PuHuiTi",
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "Segoe UI",
+        "DengXian",
+        "SimHei",
+    ];
+
+    /// Body text (device px ≤ this) renders semibold; larger titles stay medium.
+    const SEMIBOLD_MAX_PX: i32 = 28;
 
     fn to_wide(s: &str) -> Vec<u16> {
         OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    fn create_ui_font(px: i32) -> Option<HFONT> {
-        // YaHei UI: mixed CJK+Latin system chrome face.
-        let faces = [
-            "Microsoft YaHei UI",
-            "Microsoft YaHei",
-            "Segoe UI",
-            "DengXian",
-            "SimHei",
-        ];
-        // Negative height = character cell in device pixels (already DPR-scaled by caller).
-        let height = -px.abs().max(9);
-        for face in faces {
-            let name = to_wide(face);
-            let font = unsafe {
-                CreateFontW(
-                    height,
-                    0,
-                    0,
-                    0,
-                    // Medium weight — Normal often looks washed at UI sizes on glass.
-                    FW_MEDIUM.0 as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET,
-                    OUT_TT_PRECIS,
-                    CLIP_DEFAULT_PRECIS,
-                    // Grayscale AA (recolors cleanly onto glass). ClearType RGB fringes
-                    // become mud when we replace color with LABEL slate.
-                    ANTIALIASED_QUALITY,
-                    DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
-                    PCWSTR(name.as_ptr()),
-                )
-            };
-            if !font.is_invalid() {
-                return Some(font);
+    static FONTS_REGISTERED: OnceLock<()> = OnceLock::new();
+
+    /// Register every font file under `assets/fonts/` as process-private
+    /// (FR_PRIVATE — invisible to other apps, no admin rights needed).
+    fn register_bundled_fonts() {
+        let _ = FONTS_REGISTERED.get_or_init(|| {
+            for dir in bundled_font_dirs() {
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+                        continue;
+                    };
+                    if !matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc") {
+                        continue;
+                    }
+                    let name = to_wide(&p.to_string_lossy());
+                    let added = unsafe {
+                        AddFontResourceExW(PCWSTR(name.as_ptr()), FR_PRIVATE, None)
+                    };
+                    if added < 1 {
+                        warn!(path = %p.display(), "AddFontResourceExW failed");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Candidate `assets/fonts` roots: next to the exe (portable dist), parent of
+    /// exe (cargo run from target), and the project dir (dev).
+    fn bundled_font_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                dirs.push(dir.join("assets").join("fonts"));
+                if let Some(parent) = dir.parent() {
+                    dirs.push(parent.join("assets").join("fonts"));
+                }
             }
         }
-        None
+        dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets").join("fonts"));
+        dirs
+    }
+
+    /// Is `face` actually resolvable on `hdc`? (CreateFontW alone never fails —
+    /// it silently substitutes the default font, so fallbacks need a real check.)
+    fn face_available(hdc: HDC, face: &str) -> bool {
+        let mut lf = LOGFONTW {
+            lfHeight: 0,
+            lfWidth: 0,
+            lfEscapement: 0,
+            lfOrientation: 0,
+            lfWeight: 0,
+            lfItalic: 0,
+            lfUnderline: 0,
+            lfStrikeOut: 0,
+            lfCharSet: DEFAULT_CHARSET,
+            lfOutPrecision: OUT_TT_PRECIS,
+            lfClipPrecision: CLIP_DEFAULT_PRECIS,
+            lfQuality: ANTIALIASED_QUALITY,
+            lfPitchAndFamily: DEFAULT_PITCH.0 as u8 | FF_DONTCARE.0 as u8,
+            lfFaceName: [0u16; LF_FACESIZE as usize],
+        };
+        let wide = to_wide(face);
+        for (i, &u) in wide.iter().take(LF_FACESIZE as usize - 1).enumerate() {
+            lf.lfFaceName[i] = u;
+        }
+        let mut found = false;
+        unsafe extern "system" fn enum_proc(
+            _lf: *const LOGFONTW,
+            _tm: *const TEXTMETRICW,
+            _ft: u32,
+            lparam: LPARAM,
+        ) -> i32 {
+            let p = lparam.0 as *mut bool;
+            unsafe { *p = true }
+            0 // stop enumeration on first hit
+        }
+        let proc: FONTENUMPROCW = Some(enum_proc);
+        unsafe {
+            let _ = EnumFontFamiliesExW(hdc, &lf, proc, LPARAM(&mut found as *mut bool as isize), 0);
+        }
+        found
+    }
+
+    fn create_ui_font(px: i32) -> Option<HFONT> {
+        // Bundled fonts take priority over the system stack (see module docs).
+        register_bundled_fonts();
+        // Negative height = character cell in device pixels (already DPR-scaled by caller).
+        let height = -px.abs().max(9);
+        // Adaptive weight: small body text semibold (readable on glass), titles medium.
+        let weight = if px <= SEMIBOLD_MAX_PX { FW_SEMIBOLD } else { FW_MEDIUM };
+        let hdc_screen = unsafe { GetDC(None) };
+        let face = if !hdc_screen.0.is_null() {
+            let found = FACE_PRIORITY
+                .iter()
+                .copied()
+                .find(|f| face_available(hdc_screen, f))
+                .unwrap_or(FACE_PRIORITY[0]);
+            unsafe { ReleaseDC(None, hdc_screen) };
+            found
+        } else {
+            FACE_PRIORITY[0]
+        };
+        let name = to_wide(face);
+        let font = unsafe {
+            CreateFontW(
+                height,
+                0,
+                0,
+                0,
+                weight.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_TT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                // Grayscale AA (recolors cleanly onto glass). ClearType RGB fringes
+                // become mud when we replace color with LABEL slate.
+                ANTIALIASED_QUALITY,
+                DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+                PCWSTR(name.as_ptr()),
+            )
+        };
+        if font.is_invalid() {
+            None
+        } else {
+            Some(font)
+        }
     }
 
     /// Map GDI grayscale coverage → alpha with a **crisper** curve.

@@ -1,5 +1,6 @@
 //! Application lifecycle (M0–M4).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,7 +30,7 @@ use crate::render::menu_ui::{
 use crate::render::reminder_ui::{client_to_layout, compose_reminder_frame, food_button_layout};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
 // Attaching a DXGI/Vulkan swapchain to a WS_EX_LAYERED window breaks per-pixel alpha.
-use crate::shortcut::{launch, pick_executable, ShortcutItem, ShortcutRepository};
+use crate::shortcut::{extract_icon, launch, pick_executable, IconRgba, ShortcutItem, ShortcutRepository};
 use crate::ui::launcher_place::{
     logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
     DEFAULT_GAP, DEFAULT_MARGIN,
@@ -41,6 +42,7 @@ use crate::ui::radial_menu::{
     MENU_WINDOW_W,
 };
 use crate::ui::tray::TrayHandle;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
@@ -73,6 +75,8 @@ pub struct App {
     feed_persist_pending: bool,
     /// M4 shortcuts.
     shortcuts: ShortcutRepository,
+    /// Extracted app icons, keyed by target path (None = extraction failed once).
+    shortcut_icons: HashMap<PathBuf, Option<Arc<IconRgba>>>,
     /// Expanded radial menu UI.
     menu_ui_active: bool,
     /// Suppress re-opening launcher immediately after close (accidental double-click).
@@ -143,6 +147,7 @@ impl App {
             reminder_ui_active: false,
             feed_persist_pending: false,
             shortcuts,
+            shortcut_icons: HashMap::new(),
             menu_ui_active: false,
             menu_reopen_after: None,
             settings_ui_active: false,
@@ -330,7 +335,33 @@ impl App {
         Ok(())
     }
 
+    /// Cached icon for a shortcut (lazy extract; None cached for failures).
+    fn shortcut_icon(&mut self, item: &ShortcutItem) -> Option<Arc<IconRgba>> {
+        if !item.is_path_valid() {
+            return None;
+        }
+        let key = item.target_path.clone();
+        if let Some(hit) = self.shortcut_icons.get(&key) {
+            return hit.clone();
+        }
+        let icon = extract_icon(&key).map(Arc::new);
+        self.shortcut_icons.insert(key, icon.clone());
+        icon
+    }
+
     fn sync_texture_from_pet(&mut self) {
+        // Warm the icon cache and snapshot icons before borrowing `self.pet`
+        // (extraction needs `&mut self`; the pet borrow below would block it).
+        let menu_icons: HashMap<Uuid, Option<Arc<IconRgba>>> = if self.menu_ui_active {
+            self.shortcuts
+                .list_enabled_sorted()
+                .into_iter()
+                .map(|s| (s.id, self.shortcut_icon(&s)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         let Some(pet) = self.pet.as_ref() else {
             return;
         };
@@ -375,7 +406,11 @@ impl App {
                 .as_ref()
                 .map(|s| s.is_paused())
                 .unwrap_or(false);
-            let entries = build_entries(self.shortcuts.list_enabled_sorted().as_slice(), paused);
+            let entries = build_entries(
+                self.shortcuts.list_enabled_sorted().as_slice(),
+                paused,
+                |s| menu_icons.get(&s.id).cloned().flatten(),
+            );
             let total = count_shortcuts(&entries);
             self.menu_list_scroll = clamp_list_scroll(self.menu_list_scroll, total);
             let (lw, lh) = self.menu_logical_size;
@@ -764,7 +799,11 @@ impl App {
             .as_ref()
             .map(|s| s.is_paused())
             .unwrap_or(false);
-        let entries = build_entries(self.shortcuts.list_enabled_sorted().as_slice(), paused);
+        let entries = build_entries(
+            self.shortcuts.list_enabled_sorted().as_slice(),
+            paused,
+            |s| self.shortcut_icon(s),
+        );
         self.menu_list_scroll = 0;
         self.menu_layout = Some(layout_pinned_scroll(
             &entries,
@@ -1008,6 +1047,7 @@ impl App {
         if let Some(path) = path {
             let order = self.shortcuts.items().len() as u32;
             self.shortcuts.add(ShortcutItem::from_path(&path, order));
+            self.shortcut_icons.clear();
             self.persist_shortcuts();
             self.texture_dirty = true;
             info!(path = %path.display(), "shortcut added (async picker)");
@@ -1038,7 +1078,7 @@ impl App {
                 }
                 self.texture_dirty = true;
             }
-            MenuEntry::Shortcut { id, valid, name } => {
+            MenuEntry::Shortcut { id, valid, name, .. } => {
                 if !valid {
                     warn!(%name, "shortcut path invalid — open manager to fix");
                     let row = self
@@ -1121,6 +1161,7 @@ impl App {
             SettingsHit::RowToggle(i) => {
                 if let Some(item) = self.shortcuts.list_sorted().get(i).cloned() {
                     self.shortcuts.set_enabled(item.id, !item.enabled);
+                    self.shortcut_icons.clear();
                     self.persist_shortcuts();
                     self.texture_dirty = true;
                 }
@@ -1142,6 +1183,7 @@ impl App {
             SettingsHit::RowDelete(i) => {
                 if let Some(item) = self.shortcuts.list_sorted().get(i).cloned() {
                     self.shortcuts.remove(item.id);
+                    self.shortcut_icons.clear();
                     self.persist_shortcuts();
                     self.texture_dirty = true;
                 }

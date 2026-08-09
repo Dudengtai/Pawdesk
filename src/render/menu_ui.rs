@@ -5,6 +5,7 @@
 
 use crate::render::easing::{ease_out_cubic, ease_out_quint, lerp, stagger_t};
 use crate::render::text::{center_in_rect, rasterize_text};
+use crate::shortcut::{scale_icon_rgba, IconRgba, IconShape};
 use crate::ui::radial_menu::{MenuEntry, RadialLayout};
 
 // ── Palette (Appica-warm · design §2 · no system Acrylic) ─────────────────
@@ -233,7 +234,7 @@ pub fn compose_menu_frame(
             content_x,
             dpi.s(layout.card_y + 36.0),
             dpi.su(220),
-            dpi.px(12.0),
+            dpi.px(12.5),
             with_alpha(SECONDARY, title_a),
         );
     }
@@ -347,7 +348,7 @@ pub fn compose_menu_frame(
                     reveal,
                 );
             }
-            MenuEntry::Shortcut { name, valid, .. } => {
+            MenuEntry::Shortcut { name, valid, icon, .. } => {
                 saw_shortcut = true;
                 draw_list_row(
                     &mut out,
@@ -361,6 +362,7 @@ pub fn compose_menu_frame(
                     radius,
                     name,
                     *valid,
+                    icon.as_deref(),
                     hover_w,
                     press_w,
                     reveal,
@@ -558,6 +560,7 @@ fn draw_list_row(
     radius: f32,
     name: &str,
     valid: bool,
+    icon: Option<&IconRgba>,
     hover_w: f32,
     press_w: f32,
     reveal: f32,
@@ -602,42 +605,105 @@ fn draw_list_row(
 
     let icx = (x + dpi.s(22.0)) as i32;
     let icy = (y + bh * 0.5) as i32;
-    let disc_r = dpi.s(13.0).round() as i32;
+    // Shared slot for icons: round icons get a dark tile container, square
+    // icons stand alone — both end up with the same visual footprint.
+    let tile_r = dpi.s(13.0).round() as i32;
+    let tile_corner = dpi.s(7.0).round().max(3.0) as i32;
     let (disc, disc_d) = if valid {
         (PRIMARY, PRIMARY_HOVER)
     } else {
         (ORANGE, ORANGE)
     };
-    fill_soft_disc(
-        out,
-        w,
-        h,
-        icx,
-        icy,
-        disc_r,
-        0.7,
-        with_alpha(disc, reveal),
-        with_alpha(disc_d, reveal),
-    );
 
-    let ch = if valid {
-        name.chars().next().unwrap_or('A').to_string()
+    if valid {
+        if let Some(icon) = icon {
+            match icon.shape {
+                IconShape::Round => {
+                    // Dark tile container fills the empty corners, then the
+                    // icon at ~80% (Windows-11-style inner inset).
+                    fill_soft_tile(
+                        out,
+                        w,
+                        h,
+                        icx,
+                        icy,
+                        tile_r,
+                        tile_corner,
+                        0.7,
+                        with_alpha(disc, reveal),
+                        with_alpha(disc_d, reveal),
+                    );
+                    let icon_d = (tile_r as f32 * 2.0 * 0.80).max(8.0) as u32;
+                    let (iw, ih, scaled) =
+                        scale_icon_rgba(&icon.rgba, icon.w, icon.h, icon_d, icon_d);
+                    blit_icon_tile(out, w, &scaled, iw, ih, icx, icy, tile_r, tile_corner);
+                }
+                IconShape::Square => {
+                    // No container — the icon itself fills the slot (~92%).
+                    let icon_d = (tile_r as f32 * 2.0 * 0.92).max(8.0) as u32;
+                    let (iw, ih, scaled) =
+                        scale_icon_rgba(&icon.rgba, icon.w, icon.h, icon_d, icon_d);
+                    let dx = (icx - iw as i32 / 2).max(0) as u32;
+                    let dy = (icy - ih as i32 / 2).max(0) as u32;
+                    blit(out, w, h, &scaled, iw, ih, dx, dy);
+                }
+            }
+        } else {
+            fill_soft_tile(
+                out,
+                w,
+                h,
+                icx,
+                icy,
+                tile_r,
+                tile_corner,
+                0.7,
+                with_alpha(disc, reveal),
+                with_alpha(disc_d, reveal),
+            );
+            let ch = name.chars().next().unwrap_or('A').to_string();
+            if let Some((tw, th, tbuf)) =
+                rasterize_text(&ch, dpi.su(24), dpi.px(12.5), with_alpha(WHITE, reveal))
+            {
+                let (tx, ty) = center_in_rect(
+                    icx as f32 - tile_r as f32,
+                    icy as f32 - tile_r as f32,
+                    tile_r as f32 * 2.0,
+                    tile_r as f32 * 2.0,
+                    tw,
+                    th,
+                    dpi.s(0.5),
+                );
+                blit(out, w, h, &tbuf, tw, th, tx, ty);
+            }
+        }
     } else {
-        "!".to_string()
-    };
-    if let Some((tw, th, tbuf)) =
-        rasterize_text(&ch, dpi.su(24), dpi.px(12.0), with_alpha(WHITE, reveal))
-    {
-        let (tx, ty) = center_in_rect(
-            icx as f32 - disc_r as f32,
-            icy as f32 - disc_r as f32,
-            disc_r as f32 * 2.0,
-            disc_r as f32 * 2.0,
-            tw,
-            th,
-            dpi.s(0.5),
+        fill_soft_tile(
+            out,
+            w,
+            h,
+            icx,
+            icy,
+            tile_r,
+            tile_corner,
+            0.7,
+            with_alpha(disc, reveal),
+            with_alpha(disc_d, reveal),
         );
-        blit(out, w, h, &tbuf, tw, th, tx, ty);
+        if let Some((tw, th, tbuf)) =
+            rasterize_text("!", dpi.su(24), dpi.px(12.5), with_alpha(WHITE, reveal))
+        {
+            let (tx, ty) = center_in_rect(
+                icx as f32 - tile_r as f32,
+                icy as f32 - tile_r as f32,
+                tile_r as f32 * 2.0,
+                tile_r as f32 * 2.0,
+                tw,
+                th,
+                dpi.s(0.5),
+            );
+            blit(out, w, h, &tbuf, tw, th, tx, ty);
+        }
     }
 
     let max_tw = (bw - dpi.s(88.0)).max(8.0) as u32;
@@ -868,7 +934,7 @@ fn draw_empty_state(
     if let Some((tw, th, tbuf)) = rasterize_text(
         "点「添加应用」选 exe / 快捷方式",
         dpi.su(300),
-        dpi.px(12.0),
+        dpi.px(12.5),
         with_alpha(SECONDARY, reveal),
     ) {
         let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
@@ -1107,7 +1173,7 @@ pub fn compose_settings_frame(
         dpi.s(24.0),
         dpi.s(46.0),
         dpi.su(240),
-        dpi.px(13.0),
+        dpi.px(13.5),
         SECONDARY,
     );
 
@@ -1158,7 +1224,7 @@ pub fn compose_settings_frame(
         dpi.s(36.0),
         dpi.s(REMINDER_CARD_TOP + 12.0),
         dpi.su(160),
-        dpi.px(13.0),
+        dpi.px(13.5),
         SECONDARY,
     );
 
@@ -1267,7 +1333,7 @@ pub fn compose_settings_frame(
         dpi.s(300.0),
         dpi.s(REMINDER_CARD_TOP + 70.0),
         dpi.su(90),
-        dpi.px(13.0),
+        dpi.px(13.5),
         if paused || !enabled { ORANGE } else { BLUE },
     );
     // Pause toggle chip
@@ -1292,7 +1358,7 @@ pub fn compose_settings_frame(
         dpi.s(REMINDER_CARD_TOP + 32.0),
         dpi.s(68.0),
         dpi.s(26.0),
-        dpi.px(13.0),
+        dpi.px(13.5),
         BLUE,
         dpi,
     );
@@ -1331,7 +1397,7 @@ pub fn compose_settings_frame(
         dpi.s(36.0),
         dpi.s(PET_CARD_TOP + 12.0),
         dpi.su(160),
-        dpi.px(13.0),
+        dpi.px(13.5),
         SECONDARY,
     );
     // [−]
@@ -1405,7 +1471,7 @@ pub fn compose_settings_frame(
         dpi.s(220.0),
         dpi.s(PET_CARD_TOP + 44.0),
         dpi.su(180),
-        dpi.px(12.0),
+        dpi.px(12.5),
         TERTIARY,
     );
 
@@ -1418,7 +1484,7 @@ pub fn compose_settings_frame(
         dpi.s(24.0),
         dpi.s(LIST_TOP - 22.0),
         dpi.su(160),
-        dpi.px(13.0),
+        dpi.px(13.5),
         SECONDARY,
     );
 
@@ -1507,15 +1573,15 @@ pub fn compose_settings_frame(
         } else {
             format!("{mark}  {name} · 无法找到程序")
         };
-        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(200), dpi.px(14.0), color) {
+        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(180), dpi.px(14.0), color) {
             let ty = (y + (row_h - th as f32) * 0.5 + dpi.s(0.5)).round() as u32;
             blit(&mut out, w, h, &t, tw, th, dpi.s(36.0) as u32, ty);
         }
         let mid_y = (y + row_h * 0.5 - dpi.s(6.0)) as u32;
-        trailing_btn(&mut out, w, h, w - dpi.su(168), mid_y, "上移", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(120), mid_y, "下移", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(72), mid_y, "启停", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(32), mid_y, "删除", RED, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(184), mid_y, "上移", BLUE, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(136), mid_y, "下移", BLUE, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(88), mid_y, "启停", BLUE, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(48), mid_y, "删除", RED, dpi);
     }
 
     fill_rrect_aa(
@@ -1539,17 +1605,6 @@ pub fn compose_settings_frame(
         hf - dpi.s(24.0),
         dpi.s(12.0),
         PRIMARY,
-    );
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(28.0),
-        hf - dpi.s(70.0),
-        wf - dpi.s(28.0),
-        hf - dpi.s(62.0),
-        dpi.s(4.0),
-        INNER_HL,
     );
     blit_text_centered(
         &mut out,
@@ -1619,16 +1674,16 @@ pub fn hit_settings(local_x: f32, local_y: f32, row_count: usize) -> Option<Sett
         if local_y < y || local_y > y + ROW_H - 4.0 {
             continue;
         }
-        if local_x >= w - 32.0 - 20.0 {
+        if local_x >= w - 48.0 - 20.0 {
             return Some(SettingsHit::RowDelete(i));
         }
-        if local_x >= w - 72.0 - 16.0 {
+        if local_x >= w - 88.0 - 16.0 {
             return Some(SettingsHit::RowToggle(i));
         }
-        if local_x >= w - 120.0 - 16.0 {
+        if local_x >= w - 136.0 - 16.0 {
             return Some(SettingsHit::RowDown(i));
         }
-        if local_x >= w - 168.0 - 16.0 {
+        if local_x >= w - 184.0 - 16.0 {
             return Some(SettingsHit::RowUp(i));
         }
     }
@@ -1645,7 +1700,7 @@ fn trailing_btn(
     color: [u8; 4],
     dpi: Dpi,
 ) {
-    if let Some((tw, th, t)) = rasterize_text(label, dpi.su(48), dpi.px(12.0), color) {
+    if let Some((tw, th, t)) = rasterize_text(label, dpi.su(48), dpi.px(12.5), color) {
         blit(out, w, h, &t, tw, th, x.saturating_sub(tw / 2), y);
     }
 }
@@ -1773,6 +1828,55 @@ fn fill_soft_disc(
                 (1.0 - (d - (r - 0.5)) / (feather + 0.5)).clamp(0.0, 1.0)
             };
             let shade = ((dy / r.max(1.0)) * 0.28 + 0.72).clamp(0.0, 1.0);
+            let mut c = [0u8; 4];
+            for k in 0..3 {
+                c[k] = (inner[k] as f32 * (1.0 - shade) + outer[k] as f32 * shade) as u8;
+            }
+            c[3] = (inner[3] as f32 * edge) as u8;
+            put(out, w, x, y, c);
+        }
+    }
+}
+
+/// Rounded-square tile with the same soft feather + top-light gradient as
+/// `fill_soft_disc`, matching the square shape of app icons.
+fn fill_soft_tile(
+    out: &mut [u8],
+    w: u32,
+    _h: u32,
+    cx: i32,
+    cy: i32,
+    half: i32,
+    corner: i32,
+    feather: f32,
+    inner: [u8; 4],
+    outer: [u8; 4],
+) {
+    let hx = half as f32;
+    let hr = corner.max(1) as f32;
+    let extent = (half as f32 + feather + 1.0) as i32;
+    for y in (cy - extent)..=(cy + extent) {
+        for x in (cx - extent)..=(cx + extent) {
+            if x < 0 || y < 0 || x >= w as i32 {
+                continue;
+            }
+            let px = x as f32 - cx as f32;
+            let py = y as f32 - cy as f32;
+            // Signed distance to the rounded rect (negative inside).
+            let qx = px.abs() - (hx - hr);
+            let qy = py.abs() - (hx - hr);
+            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt()
+                + qx.max(qy).min(0.0)
+                - hr;
+            if d > feather {
+                continue;
+            }
+            let edge = if d <= -0.5 {
+                1.0
+            } else {
+                (1.0 - (d + 0.5) / (feather + 0.5)).clamp(0.0, 1.0)
+            };
+            let shade = ((py / hx.max(1.0)) * 0.28 + 0.72).clamp(0.0, 1.0);
             let mut c = [0u8; 4];
             for k in 0..3 {
                 c[k] = (inner[k] as f32 * (1.0 - shade) + outer[k] as f32 * shade) as u8;
@@ -1923,4 +2027,49 @@ fn scale_rgba_fit(
         }
     }
     (dw, dh, out)
+}
+
+/// Blit `src` centered on (cx, cy), clipped to a rounded-square tile
+/// of half-size `half` and corner radius `corner`.
+fn blit_icon_tile(
+    out: &mut [u8],
+    w: u32,
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    cx: i32,
+    cy: i32,
+    half: i32,
+    corner: i32,
+) {
+    if sw == 0 || sh == 0 || src.len() < (sw * sh * 4) as usize {
+        return;
+    }
+    let x0 = cx - half;
+    let y0 = cy - half;
+    let x1 = cx + half;
+    let y1 = cy + half;
+    let r = corner.max(1) as f32;
+    let ox = cx - sw as i32 / 2;
+    let oy = cy - sh as i32 / 2;
+    for y in 0..sh as i32 {
+        for x in 0..sw as i32 {
+            let px = (ox + x) as f32;
+            let py = (oy + y) as f32;
+            // Rounded-rect containment: clamp to inner rect, test corner circle.
+            let cxp = px.clamp(x0 as f32 + r, x1 as f32 - r);
+            let cyp = py.clamp(y0 as f32 + r, y1 as f32 - r);
+            let dx = px - cxp;
+            let dy = py - cyp;
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let si = ((y as u32 * sw + x as u32) * 4) as usize;
+            let c = [src[si], src[si + 1], src[si + 2], src[si + 3]];
+            if c[3] == 0 {
+                continue;
+            }
+            put(out, w, ox + x, oy + y, c);
+        }
+    }
 }

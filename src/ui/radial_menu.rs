@@ -6,7 +6,8 @@
 
 use crate::event::Point;
 use crate::platform::Rect;
-use crate::shortcut::ShortcutItem;
+use crate::shortcut::{IconRgba, ShortcutItem};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Legacy full-window size (pre pin-pet). Prefer [`CARD_LOGICAL_W`] + placement.
@@ -51,6 +52,8 @@ pub enum MenuEntry {
         id: Uuid,
         name: String,
         valid: bool,
+        /// Real app icon (extracted from the shortcut target); None → letter disc.
+        icon: Option<Arc<IconRgba>>,
     },
 }
 
@@ -129,7 +132,11 @@ pub fn clamp_list_scroll(scroll: usize, total: usize) -> usize {
     scroll.min(max_scroll)
 }
 
-pub fn build_entries(shortcuts: &[ShortcutItem], reminder_paused: bool) -> Vec<MenuEntry> {
+pub fn build_entries(
+    shortcuts: &[ShortcutItem],
+    reminder_paused: bool,
+    mut icon_of: impl FnMut(&ShortcutItem) -> Option<Arc<IconRgba>>,
+) -> Vec<MenuEntry> {
     let mut entries = vec![
         MenuEntry::AddShortcut,
         MenuEntry::Manage,
@@ -145,6 +152,7 @@ pub fn build_entries(shortcuts: &[ShortcutItem], reminder_paused: bool) -> Vec<M
             id: s.id,
             name: s.name.clone(),
             valid: s.is_path_valid(),
+            icon: icon_of(s),
         });
     }
     entries
@@ -406,6 +414,7 @@ mod tests {
                 id: Uuid::nil(),
                 name: format!("App{i}"),
                 valid: true,
+                icon: None,
             });
         }
         entries
@@ -575,7 +584,7 @@ mod tests {
         for i in 0..10 {
             items.push(ShortcutItem::new(format!("A{i}"), std::path::PathBuf::from("x"), i as u32));
         }
-        let e = build_entries(&items, false);
+        let e = build_entries(&items, false, |_| None);
         assert_eq!(count_shortcuts(&e), 10);
     }
 }
