@@ -1,7 +1,18 @@
 /target/
+/dist/
 **/*.rs.bk
 *.pdb
 .DS_Store
 .idea/
 .vscode/
 *.log
+
+# Local npm scratch (tray SVG rasterize)
+/node_modules/
+/package-lock.json
+/package.json
+
+# Ad-hoc screenshots / analysis dumps at repo root
+/screenshot*.png
+/ScreenShot*.png
+/*.tmp.rs

@@ -30,7 +30,10 @@ use crate::render::menu_ui::{
 use crate::render::reminder_ui::{client_to_layout, compose_reminder_frame, food_button_layout};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
 // Attaching a DXGI/Vulkan swapchain to a WS_EX_LAYERED window breaks per-pixel alpha.
-use crate::shortcut::{extract_icon, launch, pick_executable, IconRgba, ShortcutItem, ShortcutRepository};
+use crate::shortcut::{
+    build_pick_context, extract_icon, launch, pick_executable, IconRgba, ShortcutItem,
+    ShortcutRepository,
+};
 use crate::ui::launcher_place::{
     logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
     DEFAULT_GAP, DEFAULT_MARGIN,
@@ -1007,10 +1010,10 @@ impl App {
         };
         self.file_picker_busy = true;
 
-        // Always-on-top layered window steals focus / fights COM dialog → lag.
-        if let Some(w) = &self.window {
-            w.set_window_level(WindowLevel::Normal);
-        }
+        // Capture picker settings on the UI thread with the launcher as owner.
+        // The native dialog keeps the owner relationship without switching the
+        // pet window away from AlwaysOnTop.
+        let picker = build_pick_context(self.window.as_deref());
 
         info!("file picker starting on worker thread");
         let _ = std::thread::Builder::new()
@@ -1023,7 +1026,7 @@ impl App {
                         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
                     };
                     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-                    let path = pick_executable().ok().flatten();
+                    let path = pick_executable(picker).ok().flatten();
                     CoUninitialize();
                     if proxy.send_event(UserEvent::FilePicked(path)).is_err() {
                         // Event loop gone
@@ -1031,7 +1034,7 @@ impl App {
                 }
                 #[cfg(not(windows))]
                 {
-                    let path = pick_executable().ok().flatten();
+                    let path = pick_executable(picker).ok().flatten();
                     let _ = proxy.send_event(UserEvent::FilePicked(path));
                 }
             });
@@ -1039,11 +1042,6 @@ impl App {
 
     fn on_file_picked(&mut self, path: Option<PathBuf>) {
         self.file_picker_busy = false;
-        // Restore pet above desktop icons.
-        if let Some(w) = &self.window {
-            w.set_window_level(WindowLevel::AlwaysOnTop);
-            w.request_redraw();
-        }
         if let Some(path) = path {
             let order = self.shortcuts.items().len() as u32;
             self.shortcuts.add(ShortcutItem::from_path(&path, order));

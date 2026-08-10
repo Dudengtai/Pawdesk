@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.6**（2026-08-07：GDI 文字 · 列表滚轮 · 主按钮扁平） |
-| 依据 | `prd.md` v0.5 · `design.md` v0.8 |
+| 版本 | **v0.7**（2026-08-10：原生文件选择 · 虚拟桌面 · 添加应用不闪） |
+| 依据 | `prd.md` v0.5 · `design.md` v0.9 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 
@@ -53,7 +53,7 @@
 | 托盘 | `tray-icon` | 托盘与菜单 |
 | 序列化 | `serde` + JSON | 配置 |
 | 日志 | `tracing` | 文件日志 |
-| 文件框 | `rfd`（工作线程） | 选 exe/lnk |
+| 文件框 | Windows：`IFileOpenDialog`（工作线程）；其它：`rfd` | 选 exe/lnk/url |
 
 说明：仓库内保留 `wgpu` 相关代码，**当前宠物主路径不走 GPU 表面**，避免与 layered 冲突。
 
@@ -328,7 +328,27 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 
 `TrayCommand`：`ShowPet` · `HidePet` · `PetScaleUp` · `PetScaleDown` · `ToggleReminderPause` · `OpenSettings` · `Exit`。
 
-### 7.4 日志
+### 7.4 添加应用 / 文件选择（`shortcut/picker.rs`）
+
+目标：不卡主循环、不闪 launcher、桌面快捷方式显示完整。
+
+| 项 | 约定 |
+| --- | --- |
+| 线程 | UI 线程只采集 `PickContext`（owner HWND）；**COM STA 工作线程** 弹框 |
+| Windows 实现 | 原生 `IFileOpenDialog`，**不用 rfd** 打开对话框 |
+| Owner | `set_parent` / `Show(hwndOwner)` 绑定宠物 HWND，**不**切换 `AlwaysOnTop` ↔ `Normal` |
+| 起始目录 | `SHGetKnownFolderItem(FOLDERID_Desktop)` → **Shell 虚拟桌面**（用户桌面 ∪ 公共桌面） |
+| 禁止 | `SetFolder("%USERPROFILE%\\Desktop")` 纯文件系统路径（会丢 `C:\\Users\\Public\\Desktop`） |
+| 禁止 | `FOS_FORCEFILESYSTEM`（强制 FS 视图，破坏虚拟桌面合并） |
+| 选项 | `FOS_FILEMUSTEXIST` · `FOS_PATHMUSTEXIST` · `FOS_NODEREFERENCELINKS`（返回 `.lnk` 本身） |
+| 过滤器 | 默认「程序 / 快捷方式」`*.lnk;*.url;*.exe`；备选「所有文件」`*.*` |
+| 取消 | `HRESULT 0x800704C7` → `None`，不报错 |
+| 回主线程 | `UserEvent::FilePicked(Option<PathBuf>)` → 写仓库 / 刷新 UI |
+| 非 Windows | 仍走 `rfd` fallback |
+
+入口：`App::begin_pick_executable` → `build_pick_context` → 工作线程 `pick_executable`。
+
+### 7.5 日志
 
 `%LOCALAPPDATA%/PawDesk/logs/` · `tracing`。  
 启动应打：`pet_scale`、`pet_logical`、建窗 `logical`/`phys_w`（便于核对缩放是否生效）。
@@ -351,15 +371,32 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 - 统一 `AppError`；用户可读 + 日志细节。  
 - 启动失败、选文件取消、配置损坏：不崩，可回退默认/备份。
 
-### 8.3 发布
+### 8.3 构建产物与发布
 
-- `tools/package.ps1` → `dist/PawDesk/`（exe + assets）。  
-- 无管理员常规运行；资源相对 exe。
+三个目录**不是**三套代码，而是同一源码的不同产物：
+
+| 路径 | 来源 | 用途 |
+| --- | --- | --- |
+| `target/debug/pawdesk.exe` | `cargo build` / `cargo run` | 开发调试 |
+| `target/release/pawdesk.exe` | `cargo build --release` | 日常使用 / 验收最新修复 |
+| `dist/PawDesk/` | `tools/package.ps1` 从 **release** 复制（**不入库**，按需生成） | 便携分发包（exe + 精简 assets） |
+
+```text
+源码
+ ├─ cargo build           → target/debug/
+ ├─ cargo build --release → target/release/
+ └─ tools/package.ps1     → dist/PawDesk/  （依赖 release 已编好）
+```
+
+- 改代码后若只跑 `cargo build --release`，**不会**自动更新 `dist/`；要便携包须再跑 `package.ps1`。  
+- 无管理员常规运行；运行时资源优先 exe 旁 `assets/`，开发时回退工程根 `assets/`。  
+- 正式安装包（Inno Setup / WiX 等）**尚未实现**，首期以便携包或直接跑 release 为主。
 
 ### 8.4 测试
 
 - 单元：状态机、调度、配置、`clamp_pet_scale` / `step_pet_scale`、排序、**place_launcher**、菜单布局。  
-- 手工：四边四角开坞、探头开坞、提醒冲突、托盘、DPI 缩放、**宠物变大/变小与设置百分比**、待机眨眼观感。
+- 手工：四边四角开坞、探头开坞、提醒冲突、托盘、DPI 缩放、**宠物变大/变小与设置百分比**、待机眨眼观感。  
+- 手工（添加应用）：点「添加应用」launcher **不闪**；对话框桌面可见 **用户 + 公共** 快捷方式；取消后置顶仍正确。
 
 ---
 
@@ -400,4 +437,5 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | v0.3 | 2026-08-04 | 按模块重排；与 PRD / 钉宠实现同步 |
 | v0.4 | 2026-08-06 | 待机眨眼管线 + pet.scale UI |
 | v0.5 | 2026-08-07 | 启动坞 Appica + 丝滑动效；60fps；原子 present；防宠闪 |
-| **v0.6** | **2026-08-07** | **GDI 文字**；列表 **滚轮滚动**（`LIST_VISIBLE_ROWS`/`menu_list_scroll`）；flat primary；对齐 design **v0.8** |
+| v0.6 | 2026-08-07 | **GDI 文字**；列表 **滚轮滚动**（`LIST_VISIBLE_ROWS`/`menu_list_scroll`）；flat primary；对齐 design **v0.8** |
+| **v0.7** | **2026-08-10** | 添加应用：原生 `IFileOpenDialog`、Shell 虚拟桌面、不切 z-order；文档澄清 debug/release/dist |

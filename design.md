@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.8**（2026-08-07：主按钮扁平 · GDI 文字 · 列表滚轮无限扩展） |
-| 依据 | `prd.md` v0.5 · `tech.md` v0.6 |
+| 版本 | **v0.9**（2026-08-10：添加应用不闪 · 桌面快捷方式完整可见） |
+| 依据 | `prd.md` v0.5 · `tech.md` v0.7 |
 | 效果图 | `docs/mockups/launcher-preview.*` · `launcher-pin-flip.*` |
 
 ---
@@ -264,12 +264,15 @@
 - 开坞用 `ease.out_back` → 弹跳割裂。  
 - 先 resize 再等下一帧 redraw → 空帧闪。  
 - 卡片高度不够 + `break` 裁行 → 只显示 2 个应用。  
-- fontdue 小字拉丁 → 波浪/大小不一。
+- fontdue 小字拉丁 → 波浪/大小不一。  
+- 弹系统文件框前把窗从 `AlwaysOnTop` 切到 `Normal` 再切回 → launcher **闪一下**。  
+- 文件框打开 `%USERPROFILE%\Desktop` 文件系统路径 → 只见用户桌面，**公共桌面快捷方式缺失**。
 
 业务：
 
 - 启动成功 → 关坞动画。  
-- 添加文件框 → 坞可保持。  
+- **添加应用**：系统文件框打开期间 **坞保持**；launcher **不闪、不掉置顶**。  
+- 文件框默认落在 Shell **虚拟桌面**（用户桌面 ∪ 公共桌面），可见桌面上全部 `.lnk` / `.url` / `.exe`。  
 - 管理 → 进设置（可瞬时关坞，避免拖动画）。  
 - 关坞后 **~280ms** 防连环重开。
 
@@ -381,6 +384,7 @@ assets/tray/icon.png
 | 列表滚动 | `menu_list_scroll` + `layout_pinned_scroll` + `MouseWheel`；视口 `LIST_VISIBLE_ROWS=4` |
 | 60fps 坞时钟 | `app::frame_interval` → 16ms when `menu_ui_active` |
 | 开坞无空帧 | `enter_menu_ui` 立即 `redraw`；`update_layered_rgba_ex(pos)` 原子 present |
+| 添加应用不闪 / 桌面完整 | `shortcut/picker` 原生 `IFileOpenDialog` + Shell 虚拟桌面；owner 绑定、不切 z-order |
 | 宠物大小 | `config.pet.scale` · `pet_logical_size` · 设置/托盘 |
 | 真眨眼待机 | `assets/.../idle_blink` · `build_idle_base.py` |
 | 呈现 | `UpdateLayeredWindow` + 预乘 BGRA |
@@ -397,4 +401,5 @@ assets/tray/icon.png
 | v0.5 | 2026-08-06 | 待机真眨眼 + 宠物大小可调 |
 | v0.6 | 2026-08-07 | Appica token / 精致控件 / 开合动效初版 |
 | v0.7 | 2026-08-07 | 丝滑开合：宠不闪、60fps、原子 present |
-| **v0.8** | **2026-08-07** | 主按钮扁平实心；**GDI 文字**；列表 **滚轮滚动**（非封顶 5）；tech v0.6 |
+| v0.8 | 2026-08-07 | 主按钮扁平实心；**GDI 文字**；列表 **滚轮滚动**（非封顶 5）；tech v0.6 |
+| **v0.9** | **2026-08-10** | 添加应用：不闪 z-order；虚拟桌面显示全部快捷方式；tech **v0.7** |

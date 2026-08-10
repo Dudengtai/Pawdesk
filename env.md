@@ -320,20 +320,42 @@ target/x86_64-pc-windows-msvc/release/
 
 配置文件不应预置用户机器路径。用户配置应在首次运行时生成到应用数据目录。
 
-### 12.3 便携版部署
+### 12.3 本地三个 exe 的关系
 
-首期优先使用便携版：
+| 路径 | 怎么生成 | 什么时候用 |
+| --- | --- | --- |
+| `target/debug/pawdesk.exe` | `cargo build` / `cargo run` | 开发调试 |
+| `target/release/pawdesk.exe` | `cargo build --release` | 验收最新功能、日常自用 |
+| `dist/PawDesk/pawdesk.exe` | `tools/package.ps1` | 便携分发；**不是** cargo 自动产物 |
 
-1. 在干净目录中复制发布程序和资源目录。
+注意：只编 release **不会**更新 `dist/`。要刷新便携包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package.ps1
+```
+
+日常验证最新修复请优先：
+
+```powershell
+cargo build --release
+.\target\release\pawdesk.exe
+```
+
+### 12.4 便携版部署
+
+首期优先使用便携版（或直接跑 release）：
+
+1. 在干净目录中复制发布程序和资源目录（或运行 `package.ps1`）。
 2. 不要求管理员权限运行。
 3. 启动程序并验证资源加载。
 4. 验证配置目录自动创建。
-5. 验证快捷方式添加、启动、删除和排序。
-6. 验证托盘退出和再次启动。
+5. 验证快捷方式添加（**桌面用户+公共快捷方式均可见**）、启动、删除和排序。
+6. 验证「添加应用」时 launcher **不闪**。
+7. 验证托盘退出和再次启动。
 
 ## 13. 安装包部署
 
-如果后续制作安装包，安装程序应满足：
+当前**未实现**正式安装包；需要时可选用 Inno Setup / WiX 等。若后续制作安装包，安装程序应满足：
 
 - 支持 Windows 10/11 x64。
 - 默认安装到用户可写目录或正确处理安装权限。

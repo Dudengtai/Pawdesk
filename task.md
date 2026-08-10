@@ -6,8 +6,8 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.7**（2026-08-07：坞 polish 收口 — GDI 字 · 滚轮列表 · flat 主按钮） |
-| 依据文档 | `prd.md` v0.5、`tech.md` v0.6、`design.md` v0.8 |
+| 当前版本 | **v0.8**（2026-08-10：添加应用原生选择器 · 虚拟桌面 · 不闪） |
+| 依据文档 | `prd.md` v0.5、`tech.md` v0.7、`design.md` v0.9 |
 | 环境参考 | `env.md` |
 | 状态 | **M0–M5 可日常使用**；**M6 坞精致化主路径已落地**；字体更精致化后期 |
 | **下一步** | **优化 30s 随机撒娇 one-shot 动画效果**（`idle_stretch` / `cute` / `tail_wag` / `sleep`）→ 见 PET-A07 |
@@ -31,7 +31,8 @@
 | v0.5 | 2026-08-06 | 待机真眨眼资源 + clip 播放 polish；`pet.scale` 默认 0.6 + 设置/托盘手动调节；文档同步 prd/design/tech |
 | v0.5.1 | 2026-08-06 | 记录 **下一步 = 随机撒娇动画效果优化**（PET-A07）；release 便携包已打 |
 | v0.6 | 2026-08-07 | 启动坞 Appica 精致 UI + 丝滑开合；MENU-09~13 / L6；design v0.7 · tech v0.5 |
-| **v0.7** | **2026-08-07** | **坞 bug 收口**：flat 主按钮；GDI 文字（fontdue 弃用于 UI）；列表滚轮可扩展（非封顶 5）；design **v0.8** · tech **v0.6**；L7 |
+| v0.7 | 2026-08-07 | **坞 bug 收口**：flat 主按钮；GDI 文字（fontdue 弃用于 UI）；列表滚轮可扩展（非封顶 5）；design **v0.8** · tech **v0.6**；L7 |
+| **v0.8** | **2026-08-10** | 添加应用：原生 `IFileOpenDialog`、Shell 虚拟桌面、取消 z-order 闪烁；design **v0.9** · tech **v0.7** |
 
 ---
 
@@ -273,6 +274,7 @@ foundation (工程/错误/日志/事件总线)
 | SC-05 | 失效路径：保留条目 + 提示修复/删除 | M4 | P1 | SC-04 | prd F-SC-07, design §7.3 | [x] |
 | SC-06 | 删除仅移除应用条目，不删用户磁盘文件 | M4 | P0 | SC-02 | prd F-SC-06 | [x] |
 | SC-07 | 排序与失效处理单元测试 | M4 | P0 | SC-02 | tech §16.1 | [x] |
+| SC-08 | 添加应用：原生对话框 + 虚拟桌面 + 不切置顶 | M6-A | P0 | SC-03 | tech §7.4, design §5.6 | [x] |
 
 **完成标准**
 
@@ -524,7 +526,9 @@ foundation (工程/错误/日志/事件总线)
 | --- | --- | --- |
 | BUG-01 | 启动报 `0x800700e8` 偶发 | 多实例/管道误报；先杀进程再启 |
 | BUG-02 | 提醒窗 ↔ 待机窗切换位置/尺寸跳变、闪一下 | `app.rs` 缩放/origin |
-| BUG-03 | 添加应用曾卡顿 | 已异步 rfd；回归确认 |
+| BUG-03 | 添加应用曾卡顿 | ✅ 异步 COM STA；不再阻塞 UI |
+| BUG-03b | 点「添加应用」launcher 闪一下 | ✅ 不再切换 AlwaysOnTop；owner 绑定对话框 |
+| BUG-03c | 桌面快捷方式显示不全 | ✅ Shell 虚拟桌面（用户∪公共）；去掉 `FOS_FORCEFILESYSTEM` |
 | BUG-04 | 失效快捷方式体验弱 | 点进管理但未高亮该行 |
 | BUG-05 | 设置页托盘暂停文案不随状态改菜单项 | 现靠 tooltip；可增强 |
 | BUG-06 | 多显示器热插拔后位置 | 已有拖放/显示钳制；热插拔事件可再补 |
@@ -605,6 +609,8 @@ foundation (工程/错误/日志/事件总线)
 - **色键**：仅品红；**禁止黑键**
 - **工具**：`tools/build_idle_base.py`、`build_coherent_30fps.py`、`gen_pet_videos.py`、`extract_video_frames.py`、`set_pet_from_image.py`、`package.ps1`、`xai_video_i2v.py`
 - **配置坑**：勿用 PowerShell `Set-Content`/`ConvertTo-Json` 乱写 `config.json`（易 BOM/非法 JSON → 回退 bak 的旧 scale）
+- **添加应用**：`shortcut/picker.rs` → Windows 原生 `IFileOpenDialog`；`build_pick_context` + 后台 STA；虚拟桌面；不切 z-order（tech §7.4）
+- **构建产物**：`target/debug` 开发 · `target/release` 正式 · `dist/PawDesk` 仅 package 快照（不会随 cargo 自动更新）
 - **便携包**：`tools/package.ps1` → `dist/PawDesk/`（不含 `_master` / `_video`）
 
 ### 11.3.1 动作 clip 快照（2026-08-06）
@@ -649,9 +655,9 @@ foundation (工程/错误/日志/事件总线)
 - **待机真眨眼** + 30s 撒娇；clip crossfade；距离迟滞 / Watching 驻留  
 - **宠物大小可调**（设置步进 + 托盘变大/变小；默认 0.6；schema v3）  
 - 提醒闭环 + 设置内开关/间隔/暂停  
-- 快捷启动坞（**固定侧栏卡初版**）+ 异步文件选择  
+- 快捷启动坞（钉宠玻璃卡）+ **原生**异步文件选择（虚拟桌面 / 不闪）  
 - 隐藏不抢提醒；显示后 pending；工作区钳制  
-- 便携：`dist/PawDesk/`；单元测试 85 passed  
+- 便携：`dist/PawDesk/`（需 `package.ps1` 刷新）；单元测试 95 passed  
 - **下一步（拍板）**：**PET-A07 随机撒娇动画效果优化**  
 - **其后 / 并行**：钉宠 Launcher（§14）、飞扑、形象精修
 
@@ -660,8 +666,9 @@ foundation (工程/错误/日志/事件总线)
 | 用途 | 路径 |
 | --- | --- |
 | 工程根 | `D:\AI练习目录\PawDesk` |
-| Debug | `target\debug\pawdesk.exe` |
-| Release / 便携 | `target\release\pawdesk.exe` · `dist\PawDesk\` |
+| Debug（开发） | `target\debug\pawdesk.exe` ← `cargo run` / `cargo build` |
+| Release（最新优化） | `target\release\pawdesk.exe` ← `cargo build --release` |
+| 便携包（可选快照） | `dist\PawDesk\` ← `tools\package.ps1`（从 release 复制，**不入库 / 不自动同步**） |
 | 配置 | `%APPDATA%\PawDesk\config.json` |
 | 日志 | `%LOCALAPPDATA%\PawDesk\logs\app.log` |
 | 资源 | `assets\pets\cow-cat\` · `assets\tray\icon.png` |
@@ -705,9 +712,10 @@ M6-D   宠物动作与形象（最后再开）
 
 1. 提醒窗尺寸切换跳变 / 闪烁  
 2. 设置打开时 origin 与完成回位是否稳定  
-3. 异步选文件取消后置顶/焦点是否正确  
-4. 失效快捷方式 → 管理页可定位（可与 L5 合并）  
-5. 多开启动的友好提示（可选）  
+3. ~~异步选文件取消后置顶/焦点是否正确~~ ✅ 不再切 z-order；owner 绑定  
+4. ~~桌面快捷方式显示不全~~ ✅ Shell 虚拟桌面（用户∪公共）  
+5. 失效快捷方式 → 管理页可定位（可与 L5 合并）  
+6. 多开启动的友好提示（可选）  
 
 ### 13.4 通用交互检查清单（手工 · 钉宠专项见 §14.6）
 
@@ -882,6 +890,7 @@ close → restore origin（禁 persist 临时坐标）
 | L7-02 | UI 文字改 **GDI**（YaHei UI）；弃 fontdue 画启动坞字 | P0 | [x] |
 | L7-03 | 列表视口 + **滚轮滚动**；软上限 128；修「只显示 2 个」 | P0 | [x] |
 | L7-04 | 文档 design v0.8 / tech v0.6 / task 同步 | P0 | [x] |
+| L7-05 | 添加应用：原生选择器 + 虚拟桌面 + 不闪；docs → design v0.9 / tech v0.7 | P0 | [x] |
 | L7-05 | 更精致字体（ClearType/子像素/字重体系） | P2 | [ ] **后期** |
 
 **完成标准**：3+ 应用可全见（≤4 直接见，更多滚轮）；主按钮无白条；拉丁/中文基线齐
