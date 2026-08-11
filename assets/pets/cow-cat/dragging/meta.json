@@ -2,7 +2,7 @@
   "name": "dragging",
   "frame_width": 256,
   "frame_height": 256,
-  "frames": 24,
+  "frames": 30,
   "fps": 30.0,
   "loop": true,
   "anchor": {
@@ -33,7 +33,13 @@
     "20.png",
     "21.png",
     "22.png",
-    "23.png"
+    "23.png",
+    "24.png",
+    "25.png",
+    "26.png",
+    "27.png",
+    "28.png",
+    "29.png"
   ],
-  "source": "coherent_warp"
+  "source": "lively_v1"
 }

@@ -28,9 +28,11 @@ JOBS = [
     ),
     (
         "stretch",
-        "Same exact cat character sitting, performs a lazy front-paw stretch then returns "
-        "to sit, yellow-green eyes, teal collar, locked camera, solid magenta background, "
-        "keep identity",
+        "Same exact black-and-white tuxedo cat, yellow-green eyes, teal collar, full body, "
+        "locked camera, solid magenta background. Start upright sitting. Then realistic lazy "
+        "cat morning stretch: lower chest, front paws slide FORWARD on the ground (not raised), "
+        "rear up, back long, tail lifts and curves up, hold, then return to original sit. "
+        "Not begging, not standing on hind legs, not waving paws in air. Keep identity.",
         6,
     ),
     (

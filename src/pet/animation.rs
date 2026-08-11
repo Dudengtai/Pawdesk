@@ -65,8 +65,12 @@ impl AnimationClip {
         out
     }
 
-    /// Continuous frame sample with premultiplied alpha blend between neighbors.
-    /// `frame_f` may be fractional; looping wraps, one-shot clamps to last frame.
+    /// Sample a frame for display.
+    ///
+    /// Uses **nearest frame** (no inter-frame blend). Sub-frame blending of two
+    /// slightly-shifted mouth/nose poses was reading as ghosting/double features
+    /// on the desktop, especially during idle micro-motion and stretch.
+    /// Looping wraps; one-shot clamps to last frame.
     pub fn frame_rgba_smooth(&self, frame_f: f32) -> Vec<u8> {
         let n = self.frame_count.max(1);
         if n == 1 {
@@ -83,22 +87,14 @@ impl AnimationClip {
         } else {
             frame_f.clamp(0.0, max_f)
         };
-        let i0 = f.floor() as u32;
-        let i1 = if self.looping {
-            (i0 + 1) % n
+        // Nearest: avoids mouth/nose double-exposure between frames.
+        let nearest = f.round() as u32;
+        let idx = if self.looping {
+            nearest % n
         } else {
-            (i0 + 1).min(n - 1)
+            nearest.min(n - 1)
         };
-        let t = (f - i0 as f32).clamp(0.0, 1.0);
-        if t < 0.001 || i0 == i1 {
-            return self.frame_rgba(i0);
-        }
-        if t > 0.999 {
-            return self.frame_rgba(i1);
-        }
-        let a = self.frame_rgba(i0);
-        let b = self.frame_rgba(i1);
-        blend_rgba_premul(&a, &b, t)
+        self.frame_rgba(idx)
     }
 }
 
@@ -179,17 +175,14 @@ impl AnimationLibrary {
         self.clips.iter().find(|c| c.name == name)
     }
 
-    /// One-shot idle action names (excludes base blink / watch-for-watching).
+    /// One-shot idle action names actually scheduled by [`IdlePicker`].
+    ///
+    /// Only names in [`IDLE_ACTION_ENABLED`] that also loaded successfully.
     pub fn idle_action_names(&self) -> Vec<String> {
-        self.clips
+        IDLE_ACTION_ENABLED
             .iter()
-            .map(|c| c.name.clone())
-            .filter(|n| {
-                n.starts_with("idle_")
-                    && n != IDLE_BASE
-                    && n != "idle_watch"
-                    && n != "idle_fallback"
-            })
+            .filter(|n| self.get(n).is_some())
+            .map(|n| (*n).to_string())
             .collect()
     }
 
@@ -622,7 +615,15 @@ impl AnimationPlayer {
 pub const IDLE_BASE: &str = "idle_blink";
 
 /// Seconds between random one-shot idle actions while sitting / watching.
-pub const IDLE_ACTION_INTERVAL_SECS: f32 = 30.0;
+/// Product: one cute action about every minute (low-disturbance desktop pet).
+pub const IDLE_ACTION_INTERVAL_SECS: f32 = 60.0;
+
+/// One-shot pool currently enabled for polish.
+///
+/// Debug focus (2026-08-10): **only `idle_stretch`**.  
+/// Other authored clips (`idle_cute` / `tail_wag` / `sleep`) stay on disk but are
+/// **not** scheduled until re-listed here.
+pub const IDLE_ACTION_ENABLED: &[&str] = &["idle_stretch"];
 
 /// Picks one-shot idle actions on a fixed wall-clock interval.
 ///
@@ -641,11 +642,17 @@ pub struct IdlePicker {
 
 impl IdlePicker {
     pub fn new(action_names: Vec<String>, now: Instant) -> Self {
+        // Optional override for local testing: PAWDESK_CUTE_SECS=10
+        let interval = std::env::var("PAWDESK_CUTE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|v| *v >= 1.0 && *v <= 600.0)
+            .unwrap_or(IDLE_ACTION_INTERVAL_SECS);
         Self {
             history: VecDeque::new(),
             history_limit: 2,
             action_names,
-            action_interval_secs: IDLE_ACTION_INTERVAL_SECS,
+            action_interval_secs: interval,
             last_action_at: now,
         }
     }
@@ -672,12 +679,24 @@ impl IdlePicker {
         // Intentionally empty: do not reset 30s on every go_idle.
     }
 
-    /// If enough wall time passed since last cute action, pick the next one.
-    pub fn maybe_start_action(&mut self, now: Instant) -> Option<String> {
+    /// True when the cute-action cooldown has elapsed (does **not** consume the timer).
+    pub fn action_due(&self, now: Instant) -> bool {
         if self.action_names.is_empty() {
-            return None;
+            return false;
         }
-        if now.duration_since(self.last_action_at).as_secs_f32() < self.action_interval_secs {
+        let need = std::time::Duration::from_secs_f32(self.action_interval_secs.max(0.5));
+        now.duration_since(self.last_action_at) >= need
+    }
+
+    /// Peek next action name without advancing history / timer (for logging).
+    pub fn peek_action_names(&self) -> &[String] {
+        &self.action_names
+    }
+
+    /// Pick and commit a cute action. Call only when you will actually start it.
+    /// Updates `last_action_at` so the next cooldown starts from now.
+    pub fn take_action(&mut self, now: Instant) -> Option<String> {
+        if !self.action_due(now) {
             return None;
         }
         let choice = self.pick_action();
@@ -685,10 +704,21 @@ impl IdlePicker {
         Some(choice)
     }
 
+    /// Legacy: due-check + take. Prefer [`action_due`] / [`take_action`] so a failed
+    /// start does not burn the cooldown.
+    pub fn maybe_start_action(&mut self, now: Instant) -> Option<String> {
+        self.take_action(now)
+    }
+
     /// Seconds until next scheduled cute action (for debug / UI).
     pub fn secs_until_action(&self, now: Instant) -> f32 {
         let elapsed = now.duration_since(self.last_action_at).as_secs_f32();
         (self.action_interval_secs - elapsed).max(0.0)
+    }
+
+    /// Interval used by this picker (may differ from default if overridden).
+    pub fn interval_secs(&self) -> f32 {
+        self.action_interval_secs
     }
 
     fn pick_action(&mut self) -> String {
@@ -735,30 +765,44 @@ mod idle_picker_tests {
     fn no_action_before_interval() {
         let t0 = Instant::now();
         let mut p = IdlePicker::new(vec!["idle_stretch".into()], t0);
-        assert!(p.maybe_start_action(t0 + Duration::from_secs(10)).is_none());
+        assert!(!p.action_due(t0 + Duration::from_secs(30)));
+        assert!(p.maybe_start_action(t0 + Duration::from_secs(30)).is_none());
     }
 
     #[test]
     fn action_after_interval() {
         let t0 = Instant::now();
-        let mut p = IdlePicker::new(
-            vec!["idle_stretch".into(), "idle_cute".into()],
-            t0,
-        );
-        let a = p.maybe_start_action(t0 + Duration::from_secs(31));
-        assert!(a.is_some());
-        assert_ne!(a.unwrap(), IDLE_BASE);
+        let mut p = IdlePicker::new(vec!["idle_stretch".into()], t0);
+        // Wall clock: one cute action about every minute.
+        assert!(p.action_due(t0 + Duration::from_secs(61)));
+        let a = p.take_action(t0 + Duration::from_secs(61));
+        assert_eq!(a.as_deref(), Some("idle_stretch"));
+        // Cooldown restarts after take.
+        assert!(!p.action_due(t0 + Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn enabled_pool_is_stretch_only() {
+        assert_eq!(IDLE_ACTION_ENABLED, &["idle_stretch"]);
     }
 
     #[test]
     fn watching_go_idle_does_not_reset_timer() {
         let t0 = Instant::now();
         let mut p = IdlePicker::new(vec!["idle_stretch".into()], t0);
-        // Simulate ~20s on base, then "go_idle" from watching (mark_base no-op).
-        p.mark_base(t0 + Duration::from_secs(20));
-        // At 31s wall time, action should still fire (not reset at 20s).
-        let a = p.maybe_start_action(t0 + Duration::from_secs(31));
+        // Simulate ~40s on base, then "go_idle" from watching (mark_base no-op).
+        p.mark_base(t0 + Duration::from_secs(40));
+        // At 61s wall time, action should still fire (not reset at 40s).
+        let a = p.maybe_start_action(t0 + Duration::from_secs(61));
         assert!(a.is_some());
+    }
+
+    #[test]
+    fn action_due_uses_duration_not_float_edge() {
+        let t0 = Instant::now();
+        let p = IdlePicker::new(vec!["idle_stretch".into()], t0);
+        assert!(!p.action_due(t0 + Duration::from_millis(59_900)));
+        assert!(p.action_due(t0 + Duration::from_secs(60)));
     }
 
     #[test]

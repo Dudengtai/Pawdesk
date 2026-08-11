@@ -125,7 +125,7 @@
 | 用户感知 | 状态 | 视觉要点 |
 | --- | --- | --- |
 | 日常待机 | Idle base | **近静坐姿** + **真眨眼**（上眼皮遮虹膜；禁止半透明黑椭圆叠在黄眼上） |
-| 撒娇 | Idle one-shot | 伸懒腰 / 卖萌 / 轻摇 / 小睡，可看清 |
+| 撒娇 | Idle one-shot | **当前仅 `idle_stretch`（侧视朝左、横铺桌面）**；卖萌/轻摇/小睡 **暂停调度** |
 | 在看你 | Watching | 轻晃注视；可朝向光标（水平镜像） |
 | 飞扑（后期） | Approaching + Playing | 扑近 + 落地互动 |
 | 被拎起 | Dragging | 后颈枢轴晃动 + 轻微 scale 脉冲 |
@@ -137,12 +137,22 @@
 
 ### 3.3 待机节奏（体验）
 
-- 默认近静；周期内自然眨眼（可含双眨），**不以身体大幅 morph 当第二套动画**。  
-- 约 30s 来一次撒娇；鼠标在旁边观察时**不要饿死**这一定时感。  
-- 撒娇动作忌「闪一下」——要够长；one-shot 结束可短 hold 再回待机。  
-- clip 切换用短 **crossfade**，忌硬切。  
+- 默认有**微生命感**：轻呼吸 + 真眨眼（可双眨）+ 极轻头位；**不以大幅身体 morph 当第二套动画**。  
+- 约 **60s（1 分钟）** 来一次撒娇；鼠标在旁边观察时**不要饿死**这一定时感。  
+- **当前调试焦点（2026-08-10）**：只调 **静态待机 `idle_blink` + 伸懒腰 `idle_stretch`**。  
+  - 调度池：`IDLE_ACTION_ENABLED = ["idle_stretch"]`（`src/pet/animation.rs`）  
+  - `idle_cute` / `idle_tail_wag` / `idle_sleep` **资源保留、不进池**  
+- 伸懒腰：侧视、**面朝左**、身体横在桌面；首尾回坐姿。  
+- 撒娇忌「闪一下」；one-shot 末帧短 hold 再回待机。  
+- clip 切换：oneshot **不** sit→sit crossfade；回 base 可短 crossfade。  
 
-**下一步（体验精修）**：随机撒娇四套（伸懒腰 / 卖萌 / 轻摇 / 小睡）需 **互异可辨、身份一致、回坐姿顺滑**——见 `task.md` **PET-A07**。
+**资源**  
+- 伸懒腰：`python tools/gen_stretch_video.py` → `python tools/pack_stretch_from_video.py`（`video_stretch_v3_side_left`）  
+- 脸/脚：`python tools/harden_pet_face.py`（实心鼻/嘴 α=255；待机**无呼吸**只眨眼，防重影）  
+- 其它 warp 底：`tools/build_lively_pet.py`（**不会覆盖** `source: video_stretch*` 的 stretch）  
+
+**呈现**  
+- 宠物纵向 **底对齐**（护脚）；隐藏/最小化恢复时重绑 layered 并立刻 present。
 
 ---
 
@@ -360,7 +370,8 @@ assets/tray/icon.png
 ```
 
 抽帧与视频工具见 `tools/`；色键仅品红。  
-待机真眨眼：`tools/build_idle_base.py`；成套 warp 动作：`tools/build_coherent_30fps.py`。
+全套灵动动画（含待机真眨眼）：`tools/build_lively_pet.py`（`lively_v1`）。  
+旧：`build_idle_base.py` / `build_coherent_30fps.py` 可作参考，**日常请用 lively**。
 
 ### 9.2 效果图
 
@@ -386,7 +397,7 @@ assets/tray/icon.png
 | 开坞无空帧 | `enter_menu_ui` 立即 `redraw`；`update_layered_rgba_ex(pos)` 原子 present |
 | 添加应用不闪 / 桌面完整 | `shortcut/picker` 原生 `IFileOpenDialog` + Shell 虚拟桌面；owner 绑定、不切 z-order |
 | 宠物大小 | `config.pet.scale` · `pet_logical_size` · 设置/托盘 |
-| 真眨眼待机 | `assets/.../idle_blink` · `build_idle_base.py` |
+| 灵动全套 clip | `assets/pets/cow-cat/*` · `build_lively_pet.py` |
 | 呈现 | `UpdateLayeredWindow` + 预乘 BGRA |
 
 ---

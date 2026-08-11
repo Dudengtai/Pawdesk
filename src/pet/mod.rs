@@ -6,7 +6,7 @@ mod movement;
 mod state;
 
 pub use animation::{
-    blend_rgba_premul, AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE,
+    AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE,
     IDLE_ACTION_INTERVAL_SECS,
 };
 pub use interaction::{DistanceLevel, InteractionDetector};
@@ -26,11 +26,15 @@ use crate::platform::Rect;
 const INTERACTION_DURATION: Duration = Duration::from_millis(1500);
 const FEED_DURATION: Duration = Duration::from_millis(900);
 /// Soft blend when switching clips (reduces hard pose pops).
-const CLIP_CROSSFADE_SECS: f32 = 0.14;
+/// Keep short for oneshots so sit-bookend frames don't eat the readable motion.
+const CLIP_CROSSFADE_SECS: f32 = 0.10;
 /// Extra hold on last frame of one-shot cute actions before returning to base.
-const ACTION_SETTLE_SECS: f32 = 0.22;
+const ACTION_SETTLE_SECS: f32 = 0.28;
 /// One-shot cute actions play at least this long (readable on desktop).
-const ACTION_MIN_SECS: f32 = 2.8;
+/// Video stretch is ~2.4s @30fps — do not time-stretch those denser clips.
+const ACTION_MIN_SECS: f32 = 2.2;
+/// How fast `face_dir` eases toward the cursor facing target (higher = snappier).
+const FACE_DIR_SPEED: f32 = 12.0;
 
 /// Mouse pounce (`Approaching` → cursor) is deferred to a later polish pass.
 /// When `false`, near-range only keeps `Watching` (no leap / fly-to-cursor).
@@ -82,7 +86,10 @@ pub struct PetController {
     /// `menu_open_t` at the moment close started (for reverse lerp).
     menu_close_from_t: f32,
     /// Horizontal facing while approaching / watching: -1 = face left, 1 = face right.
+    /// Smoothed toward [`Self::face_dir_target`] each tick for soft flips.
     pub face_dir: f32,
+    /// Desired facing from cursor / approach direction (-1 or 1).
+    face_dir_target: f32,
     /// Continuous frame index for smooth 30fps sampling (`frame_rgba_smooth`).
     pub display_frame_f: f32,
     /// Previous clip pixels while crossfading into the new clip.
@@ -95,6 +102,17 @@ pub struct PetController {
 impl PetController {
     pub fn new(library: AnimationLibrary, now: Instant) -> Self {
         let actions = library.idle_action_names();
+        if actions.is_empty() {
+            warn!("no idle one-shot actions loaded — cute timer will never fire");
+        } else {
+            info!(
+                count = actions.len(),
+                actions = %actions.join(","),
+                enabled = %crate::pet::animation::IDLE_ACTION_ENABLED.join(","),
+                interval_s = IDLE_ACTION_INTERVAL_SECS,
+                "idle cute action pool ready (stretch-only polish mode)"
+            );
+        }
         let mut picker = IdlePicker::new(actions, now);
         let initial = picker.pick_initial(now);
         let clip = library
@@ -132,6 +150,7 @@ impl PetController {
             menu_closing: false,
             menu_close_from_t: 1.0,
             face_dir: 1.0,
+            face_dir_target: 1.0,
             display_frame_f: 0.0,
             crossfade_from: None,
             crossfade_started: None,
@@ -139,16 +158,13 @@ impl PetController {
         }
     }
 
-    /// RGBA for current display with sub-frame blending + optional clip crossfade.
+    /// RGBA for current display.
+    ///
+    /// Clip crossfade is **disabled for pet body** (blend of two face poses → mouth
+    /// ghosting). Frame sampling is nearest-neighbor via [`AnimationClip::frame_rgba_smooth`].
     pub fn display_rgba(&self) -> Vec<u8> {
-        let current = self.active_clip().frame_rgba_smooth(self.display_frame_f);
-        if let Some(from) = &self.crossfade_from {
-            if self.crossfade_t < 0.999 && from.len() == current.len() {
-                let t = crate::render::easing::ease_smooth(self.crossfade_t);
-                return blend_rgba_premul(from, &current, t);
-            }
-        }
-        current
+        let _ = (&self.crossfade_from, self.crossfade_t); // retained for future UI fades
+        self.active_clip().frame_rgba_smooth(self.display_frame_f)
     }
 
     /// True while a clip crossfade is still visible (caller should keep presenting).
@@ -178,6 +194,19 @@ impl PetController {
             self.crossfade_t = 1.0;
         }
         changed
+    }
+
+    /// Snap facing (no slow lerp). Soft approach was unnecessary for binary mirror
+    /// and made threshold flicker feel like a half-mirrored face.
+    fn tick_face_dir(&mut self, now: Instant) -> bool {
+        let _ = now;
+        let prev = self.face_dir;
+        self.face_dir = self.face_dir_target;
+        (self.face_dir - prev).abs() > 0.001
+    }
+
+    fn set_face_target(&mut self, dir: f32) {
+        self.face_dir_target = if dir < 0.0 { -1.0 } else { 1.0 };
     }
 
     pub fn active_clip(&self) -> &AnimationClip {
@@ -343,6 +372,7 @@ impl PetController {
 
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = self.tick_crossfade(now);
+        changed |= self.tick_face_dir(now);
 
         // Dragging: keep swing clip alive + subtle scale pulse (was frozen before).
         if matches!(self.state, PetState::Dragging) {
@@ -352,7 +382,7 @@ impl PetController {
                 .duration_since(self.player.started_at_pub())
                 .as_secs_f32();
             // Soft “held by scruff” bob — snappy but readable.
-            self.drag_scale = 1.045 + 0.028 * (elapsed * 7.0).sin();
+            self.drag_scale = 1.05 + 0.04 * (elapsed * 6.5).sin();
             if frame != self.current_frame || (self.display_frame_f - prev_f).abs() > 0.0005 {
                 changed = true;
             }
@@ -364,7 +394,6 @@ impl PetController {
         let on_action = self.state.is_idle()
             && self.player.clip_name() != IDLE_BASE
             && !self.player.is_looping();
-        let can_schedule_cute = self.state.is_idle() || matches!(self.state, PetState::Watching);
 
         // Approaching: pose phase = hop progress (coherent pounce).
         // Dense clips (≥8 frames): continuous player / progress sampling at 30fps.
@@ -395,40 +424,112 @@ impl PetController {
             return changed;
         }
 
-        if !can_schedule_cute {
-            return changed;
+        // Wall-clock cute actions: Idle(base) / Watching / HiddenAtEdge (peek must not starve timer).
+        if self.try_start_scheduled_cute(now) {
+            changed = true;
         }
 
-        // Every ~30s (wall clock) while Idle or Watching, play a random cute action.
-        // Watching no longer starves the timer (medium-range mouse is common).
-        if on_base || matches!(self.state, PetState::Watching) {
-            if let Some(action) = self.picker.maybe_start_action(now) {
-                if self.library.get(&action).is_some() {
-                    let ok = if self.state.is_idle() {
-                        try_transition(&self.state, PetState::Idle(action.clone())).is_ok()
-                    } else {
-                        try_transition(&self.state, PetState::Idle(action.clone())).is_ok()
-                    };
-                    if ok {
-                        self.state = PetState::Idle(action.clone());
-                        self.begin_crossfade(now);
-                        if let Some(clip) = self.library.get(&action) {
-                            self.player = AnimationPlayer::start(clip, now);
-                        }
-                        self.current_frame = 0;
-                        self.display_frame_f = 0.0;
-                        changed = true;
-                        info!(
-                            anim = %action,
-                            next_in_s = IDLE_ACTION_INTERVAL_SECS,
-                            "idle cute action started"
-                        );
-                    }
+        changed
+    }
+
+    /// Start a random one-shot cute action when the picker cooldown elapses.
+    ///
+    /// Eligible: calm idle base, Watching, or edge-peek (peek is restored first so the
+    /// full stretch is visible). Heavy states (menu / drag / reminder / mid-action) skip.
+    fn try_start_scheduled_cute(&mut self, now: Instant) -> bool {
+        if self.is_playing_cute_action() {
+            return false;
+        }
+        if matches!(
+            self.state,
+            PetState::Dragging
+                | PetState::MenuOpen
+                | PetState::Reminder(_)
+                | PetState::Approaching { .. }
+                | PetState::PlayingInteraction(_)
+        ) {
+            return false;
+        }
+
+        let eligible = self.is_on_base_idle()
+            || matches!(self.state, PetState::Watching | PetState::HiddenAtEdge(_));
+        if !eligible {
+            return false;
+        }
+        if !self.picker.action_due(now) {
+            return false;
+        }
+
+        // Peeking at edge: bring fully on-screen first so the action is readable.
+        if matches!(self.state, PetState::HiddenAtEdge(_)) {
+            if self.snap_restore_from_edge(now).is_none() {
+                // Still edge-locked — don't burn the cooldown.
+                warn!("cute action due but edge restore failed");
+                return false;
+            }
+            info!("cute action due — restored from edge peek first");
+        }
+
+        let Some(action) = self.picker.take_action(now) else {
+            return false;
+        };
+        if self.library.get(&action).is_none() {
+            warn!(anim = %action, "cute action clip missing — will retry next interval");
+            // Cooldown already consumed by take_action; keep going rather than tight-looping.
+            return false;
+        }
+
+        // Watching / Idle(base) → Idle(action)
+        match try_transition(&self.state, PetState::Idle(action.clone())) {
+            Ok(s) => self.state = s,
+            Err(_) => {
+                // Force idle name if transition table rejects (should not happen for Watching/Idle).
+                if self.state.is_idle() {
+                    self.state = PetState::Idle(action.clone());
+                } else {
+                    warn!(
+                        from = self.state.name(),
+                        anim = %action,
+                        "cute action transition rejected"
+                    );
+                    return false;
                 }
             }
         }
 
-        changed
+        if let Some(clip) = self.library.get(&action) {
+            info!(
+                anim = %action,
+                frames = clip.frame_count,
+                fps = clip.fps,
+                looping = clip.looping,
+                next_in_s = self.picker.interval_secs(),
+                "idle cute action started"
+            );
+            if clip.frame_count <= 1 {
+                warn!(anim = %action, "cute clip has ≤1 frame — will look static");
+            }
+            if clip.looping {
+                warn!(anim = %action, "cute clip is looping=true — oneshot finish path may never run");
+            }
+            // No sit→sit crossfade into oneshots (bookends already match base).
+            self.crossfade_from = None;
+            self.crossfade_started = None;
+            self.crossfade_t = 1.0;
+            // Skip short sit bookend so the first presented frames already move.
+            let fps = clip.fps.max(1.0);
+            let skip_frames = ((clip.frame_count as f32) * 0.06).round().clamp(0.0, 5.0);
+            let past = now
+                .checked_sub(std::time::Duration::from_secs_f32(skip_frames / fps))
+                .unwrap_or(now);
+            self.player = AnimationPlayer::start(clip, past);
+            self.current_frame = skip_frames.floor() as u32;
+            self.display_frame_f = skip_frames;
+        } else {
+            warn!(anim = %action, "cute action missing after check");
+            return false;
+        }
+        true
     }
 
     /// `idle_blink` clip layout: [0]=open, [1]=half, [2]=closed (any extra frames ignored).
@@ -497,7 +598,8 @@ impl PetController {
     fn tick_continuous(&mut self, now: Instant) -> (u32, bool) {
         let n = self.player.frame_count_pub().max(1) as f32;
         let mut fps = self.active_clip().fps.max(1.0);
-        // One-shot cute actions: stretch to at least ~ACTION_MIN_SECS so motion is readable.
+        // One-shot cute actions: if natural duration is short, slow slightly for readability.
+        // Dense video clips (e.g. idle_stretch ~72f@30 ≈ 2.4s) play at authored fps.
         let oneshot_action = self.state.is_idle()
             && self.player.clip_name() != IDLE_BASE
             && !self.player.is_looping();
@@ -576,16 +678,9 @@ impl PetController {
 
         let level = self.interaction.compute_level_stable(pet_center, cursor);
         let prev = self.state.clone();
-        let prev_face = self.face_dir;
         let dwell_ok = self.interaction.watch_dwell_ready(level, now);
 
-        // Face the cursor while interested (Watching / near) so the look feels alive.
-        if !matches!(level, DistanceLevel::Far) {
-            let dx = cursor.x - pet_center.x;
-            if dx.abs() > 10.0 {
-                self.face_dir = if dx < 0.0 { -1.0 } else { 1.0 };
-            }
-        }
+        // Facing is fixed (no cursor-driven horizontal flip).
 
         match level {
             DistanceLevel::Far => {
@@ -603,7 +698,7 @@ impl PetController {
                     if self.is_on_base_idle() || matches!(self.state, PetState::Watching) {
                         if let Some(until) = self.next_approach_at {
                             if now < until {
-                                return self.state != prev || (self.face_dir - prev_face).abs() > 0.0;
+                                return self.state != prev;
                             }
                         }
                         if can_interrupt(
@@ -623,7 +718,7 @@ impl PetController {
             }
         }
 
-        self.state != prev || (self.face_dir - prev_face).abs() > 0.0
+        self.state != prev
     }
 
     /// Sit+blink base only (not mid one-shot cute clip).
@@ -668,10 +763,6 @@ impl PetController {
         let dest = Point::new(cursor.x - win_w * 0.5, cursor.y - win_h * 0.5);
         let dist = InteractionDetector::compute_distance(window_top_left, dest);
         let dur = approach_duration(dist);
-        let dx = dest.x - window_top_left.x;
-        if dx.abs() > 1.0 {
-            self.face_dir = if dx < 0.0 { -1.0 } else { 1.0 };
-        }
         if let Ok(s) = try_transition(
             &self.state,
             PetState::Approaching {
@@ -1020,14 +1111,17 @@ impl PetController {
         } else {
             IDLE_BASE.to_string()
         };
-        let need_xfade = target_name != self.player.clip_name();
+
+        // One-shot actions (stretch etc.) already bookend on base_sit — a clip
+        // crossfade here double-exposes the last stretch pose over blink and
+        // reads as a ghost/phantom when settling. Always hard-cut to base.
+        self.crossfade_from = None;
+        self.crossfade_started = None;
+        self.crossfade_t = 1.0;
 
         // Allow Idle(any) -> Idle(base) by setting state directly when already idle.
         if self.state.is_idle() {
             self.state = PetState::Idle(target_name.clone());
-            if need_xfade {
-                self.begin_crossfade(now);
-            }
             if let Some(clip) = self
                 .library
                 .get(&target_name)
@@ -1044,9 +1138,6 @@ impl PetController {
         }
         if let Ok(s) = try_transition(&self.state, PetState::Idle(target_name.clone())) {
             self.state = s;
-            if need_xfade {
-                self.begin_crossfade(now);
-            }
             if let Some(clip) = self
                 .library
                 .get(&target_name)
@@ -1065,7 +1156,8 @@ impl PetController {
     fn switch_clip_for_state(&mut self, now: Instant) {
         let clip_name = match &self.state {
             PetState::Idle(name) => name.clone(),
-            PetState::Watching => "idle_watch".to_string(),
+            // Use base sit+blink (not warped watch) — head-sway clips caused double nose/mouth.
+            PetState::Watching => IDLE_BASE.to_string(),
             PetState::Approaching { .. } => "approaching".to_string(),
             PetState::PlayingInteraction(name) => name.clone(),
             PetState::Dragging => "dragging".to_string(),

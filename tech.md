@@ -108,7 +108,7 @@ dist/PawDesk/           便携包（package.ps1）
 ### 3.1 状态机
 
 ```text
-Idle ──30s──> Idle(one-shot) ──完──> Idle
+Idle ──60s──> Idle(one-shot) ──完──> Idle
 Idle ──中/近距──> Watching ──远──> Idle
 （关闭）Watching ──飞扑──> Approaching ──> Playing ──> Idle
 * ──提醒──> Reminder(*) ──回位──> Idle
@@ -131,22 +131,25 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 
 | Clip | 用途 | 备注 |
 | --- | --- | --- |
-| `idle_blink` | 默认待机（循环） | **真眼皮替换**（虹膜 mask）；工具 `tools/build_idle_base.py` |
-| `idle_stretch` / `cute` / `tail_wag` / `sleep` | 30s 撒娇 one-shot | 身份一致 warp 序列见 `build_coherent_30fps.py` |
-| `idle_watch` | Watching | 无缝循环；进/出与坐姿对齐 |
+| `idle_blink` | 默认待机（循环） | 呼吸 + **真眼皮** + 微头位；主调对象之一 |
+| `idle_stretch` | **唯一** 60s one-shot（当前） | 侧视朝左横铺；`video_stretch_v3_side_left` |
+| `idle_cute` / `tail_wag` / `sleep` | 资源在盘，**不调度** | 复开：写入 `IDLE_ACTION_ENABLED` |
+| `idle_watch` | Watching | 无缝 lean；进/出与坐姿对齐 |
 | `approaching` / `playing_interaction` | 飞扑链路（**运行关闭**） | |
 | `dragging` / `edge_peek` | 拖动 / 边缘 | 拖动态 **持续播帧** |
 | `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | |
 
-**待机规则**
+**待机规则（调试焦点：静态 + 伸懒腰）**
 
-- Base：`idle_blink`（约 4s @30fps 循环；静坐 + 自然眨眼，忌身体大幅 morph 当第二层动画）。  
-- 墙钟约 30s 随机 one-shot；**Watching 不重置** 30s 计时。  
-- one-shot 播放至少约 ≥2.8s 可感知；末帧短 hold 再回 base。  
-- clip 切换：`begin_crossfade` ≈ **140ms** 预乘 alpha 混合。  
-- 呈现：`display_frame_f` 亚帧混合 + 约 30fps 刷新密集 clip。  
-
-**下一步（工程）**：优化 one-shot 池资源与观感（`idle_stretch` / `cute` / `tail_wag` / `sleep`）— 任务 **PET-A07**（`task.md`）。优先 `tools/build_coherent_30fps.py` 分动作精修，保持单身份与脚底锚点。
+- Base：`idle_blink`（约 4s @30fps 循环）。  
+- 墙钟约 **60s** 播 **`idle_stretch` only**（`IDLE_ACTION_ENABLED`）；**Watching / 躲边不饿死** 计时；躲边到点会先 restore。  
+- one-shot 约 72f @30（~2.4s）+ settle hold；**进入 oneshot 不做 crossfade**。  
+- 呈现：密集 clip **本帧直接 present**（不单靠 `request_redraw`）；`face_dir` 平滑。  
+- 工具：`harden_pet_face.py` → `gen_stretch_video.py` → `pack_stretch_from_video.py`；可选 `PAWDESK_CUTE_SECS=10`。  
+- 脸：**禁止重绘几何粉鼻**；保留原画鼻 RGB，只把 muzzle α 封为 255（`harden_pet_face.py`）。  
+- 播帧 / 缩放：最近邻；禁亚帧混合 / 宠体 crossfade。  
+- Watching：**直接用 `idle_blink`**（关头晃），消灭嘴鼻重影。  
+- 脚底：`FOOT_Y≈224` + 底对齐 present + Show/Occluded 重绑 layered。
 
 **飞扑**
 

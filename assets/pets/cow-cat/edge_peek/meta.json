@@ -2,8 +2,8 @@
   "name": "edge_peek",
   "frame_width": 256,
   "frame_height": 256,
-  "frames": 24,
-  "fps": 14.0,
+  "frames": 30,
+  "fps": 18.0,
   "loop": true,
   "anchor": {
     "x": 128,
@@ -33,7 +33,13 @@
     "20.png",
     "21.png",
     "22.png",
-    "23.png"
+    "23.png",
+    "24.png",
+    "25.png",
+    "26.png",
+    "27.png",
+    "28.png",
+    "29.png"
   ],
-  "source": "coherent_warp"
+  "source": "lively_v1"
 }

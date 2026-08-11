@@ -543,20 +543,9 @@ impl App {
             self.pet.as_ref().map(|p| p.drag_scale).unwrap_or(1.0)
         };
 
-        let mirror_x = self
-            .pet
-            .as_ref()
-            .map(|p| {
-                // Face left while watching the cursor / approaching / mid-play.
-                let may_mirror = matches!(
-                    p.state,
-                    crate::pet::PetState::Approaching { .. }
-                        | crate::pet::PetState::Watching
-                        | crate::pet::PetState::PlayingInteraction(_)
-                );
-                may_mirror && p.face_dir < 0.0
-            })
-            .unwrap_or(false);
+        // Always draw the authored facing (no mouse-driven flip).
+        // Horizontal mirror made the cat face away from the cursor and looked inverted.
+        let mirror_x = false;
 
         // Overlays: present at composed device-pixel size (1:1). Do not wait for
         // winit's async resize — that empty intermediate frame is the pet "flash".
@@ -1315,11 +1304,17 @@ impl App {
                 self.visible = true;
                 if let Some(w) = &self.window {
                     w.set_visible(true);
+                    // Minimize/hide can leave layered state stale — re-arm + hard present.
+                    if let Err(e) = platform::enable_transparent_window(w.as_ref()) {
+                        warn!("re-enable layered on show: {e}");
+                    }
+                    let logical = self.pet_size();
+                    self.resize_pet_window(logical, logical);
                 }
                 self.clamp_window_to_work_area();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.texture_dirty = true;
+                // Direct present (don't rely only on request_redraw after restore).
+                self.redraw();
                 info!("pet shown");
                 // Deliver any reminder that fired while hidden.
                 let now = Instant::now();
@@ -1547,6 +1542,23 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(_size) => {
                 // Layered present uses current inner_size each frame; no swapchain.
+                // After minimize/restore Windows may change size — force a clean present.
+                self.texture_dirty = true;
+                if self.visible {
+                    self.redraw();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                // Restoring from taskbar minimize: re-arm layered + present full pet.
+                if !occluded && self.visible {
+                    if let Some(w) = &self.window {
+                        if let Err(e) = platform::enable_transparent_window(w.as_ref()) {
+                            warn!("re-enable layered after un-occlude: {e}");
+                        }
+                    }
+                    self.texture_dirty = true;
+                    self.redraw();
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.menu_ui_active
@@ -2087,8 +2099,11 @@ impl ApplicationHandler<UserEvent> for App {
                         self.texture_dirty = true;
                     }
                 }
-                // Dense sprite loops always advance — keep presenting at ~30fps.
-                if pet.is_crossfading()
+                // Dense sprite motion: present *in this tick* (layered windows often
+                // drop/coalesce RedrawRequested, so request_redraw alone can freeze on
+                // frame 0 of a oneshot — log says "action started" but no visible motion).
+                let pet_motion = pet.is_crossfading()
+                    || pet.is_playing_cute_action()
                     || pet.state.is_idle()
                     || matches!(
                         pet.state,
@@ -2098,15 +2113,31 @@ impl ApplicationHandler<UserEvent> for App {
                             | PetState::HiddenAtEdge(_)
                             | PetState::PlayingInteraction(_)
                             | PetState::Reminder(_)
-                    )
-                {
+                    );
+                if pet_motion {
                     need_redraw = true;
                     self.texture_dirty = true;
+                    // Direct present for clip playback (same path as menu open silk).
+                    if pet.is_playing_cute_action()
+                        || pet.is_crossfading()
+                        || matches!(
+                            pet.state,
+                            PetState::Watching
+                                | PetState::Dragging
+                                | PetState::HiddenAtEdge(_)
+                                | PetState::Approaching { .. }
+                                | PetState::PlayingInteraction(_)
+                        )
+                        || pet.state.is_idle()
+                    {
+                        present_now = true;
+                    }
                 }
                 if pet.tick_interaction(now) {
                     pet.begin_returning(now);
                     self.texture_dirty = true;
                     need_redraw = true;
+                    present_now = true;
                 }
             }
 
@@ -2219,10 +2250,13 @@ fn scale_rgba_centered_crisp(
     out
 }
 
-/// Scale `src` (sw×sh RGBA) into a transparent `dw×dh` canvas, centered, with optional uniform scale.
+/// Scale `src` (sw×sh RGBA) into a transparent `dw×dh` canvas with optional uniform scale.
 ///
 /// Upscales to fill the destination (needed on high-DPI: 128 logical → 256 physical).
 /// Uses bilinear sampling so cartoon edges stay smooth instead of blocky nearest-neighbor.
+///
+/// **Vertical align = bottom-weighted** (feet/anchor sit on the desk edge of the window)
+/// so minimize/restore or slight size jitter does not crop paws the way pure centering can.
 fn scale_rgba_centered(
     src: &[u8],
     sw: u32,
@@ -2243,24 +2277,36 @@ fn scale_rgba_centered(
     let fit = (dw as f64 / tw).min(dh as f64 / th);
     let fw = (tw * fit).round().max(1.0) as u32;
     let fh = (th * fit).round().max(1.0) as u32;
-    // Leave a tiny safe margin so soft edges are not clipped by the window.
-    let margin = 2u32.min(fw / 16).min(fh / 16);
-    let fw = fw.saturating_sub(margin * 2).max(1);
-    let fh = fh.saturating_sub(margin * 2).max(1);
+    // Safe margin: extra on the bottom so soft paw AA is never flush with HWND edge.
+    let margin_x = 2u32.min(fw / 16);
+    let margin_top = 2u32.min(fh / 16);
+    let margin_bot = 4u32.min(fh / 12).max(3);
+    let fw = fw.saturating_sub(margin_x * 2).max(1);
+    let fh = fh
+        .saturating_sub(margin_top + margin_bot)
+        .max(1);
     let ox = ((dw.saturating_sub(fw)) / 2) as i32;
-    let oy = ((dh.saturating_sub(fh)) / 2) as i32;
+    // Bottom-align content inside the drawable area (feet down).
+    let oy = (dh.saturating_sub(fh + margin_bot)) as i32;
 
     let sw_f = sw as f64;
     let sh_f = sh as f64;
     let fw_f = fw as f64;
     let fh_f = fh as f64;
 
+    // Scale factor in source-texels per dest pixel. >1 = downscale.
+    let scale_x = sw_f / fw_f;
+    let scale_y = sh_f / fh_f;
+    // Downscale or near 1:1: bilinear keeps silhouette AA soft.
+    // Strong upscale of face features used to smear nose/mouth — still prefer bilinear
+    // for edges now that sprites carry a soft alpha ramp; interior stays crisp because
+    // neighboring texels share the same fur color.
     for dy in 0..fh {
         for dx in 0..fw {
             let src_dx = if mirror_x { fw - 1 - dx } else { dx };
-            // Map dest pixel center into continuous source coords.
-            let sx = (src_dx as f64 + 0.5) * sw_f / fw_f - 0.5;
-            let sy = (dy as f64 + 0.5) * sh_f / fh_f - 0.5;
+            // Map dest pixel center into source continuous coords.
+            let sx = (src_dx as f64 + 0.5) * scale_x - 0.5;
+            let sy = (dy as f64 + 0.5) * scale_y - 0.5;
             let sample = sample_rgba_bilinear(src, sw, sh, sx, sy);
             let px = ox + dx as i32;
             let py = oy + dy as i32;
