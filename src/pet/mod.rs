@@ -7,7 +7,7 @@ mod state;
 
 pub use animation::{
     AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE,
-    IDLE_ACTION_INTERVAL_SECS,
+    IDLE_ACTION_INTERVAL_SECS, blend_rgba_premul,
 };
 pub use interaction::{DistanceLevel, InteractionDetector};
 pub use movement::{
@@ -25,11 +25,13 @@ use crate::platform::Rect;
 
 const INTERACTION_DURATION: Duration = Duration::from_millis(1500);
 const FEED_DURATION: Duration = Duration::from_millis(900);
-/// Soft blend when switching clips (reduces hard pose pops).
-/// Keep short for oneshots so sit-bookend frames don't eat the readable motion.
+/// Soft blend when switching clips (UI / non-body). Pet body oneshots rely on
+/// exact sit bookends; the one-shot return uses this as a short residual guard,
+/// since pose-blending still ghosts open mouths/noses.
 const CLIP_CROSSFADE_SECS: f32 = 0.10;
-/// Extra hold on last frame of one-shot cute actions before returning to base.
-const ACTION_SETTLE_SECS: f32 = 0.28;
+/// Hold the oneshot's last frame (sit bookend) briefly so exit feels settled.
+/// With exact base_sit last frame this is invisible against idle_blink/000.
+const ACTION_SETTLE_SECS: f32 = 0.20;
 /// One-shot cute actions play at least this long (readable on desktop).
 /// Video stretch is ~2.4s @30fps — do not time-stretch those denser clips.
 const ACTION_MIN_SECS: f32 = 2.2;
@@ -97,6 +99,8 @@ pub struct PetController {
     crossfade_started: Option<Instant>,
     /// 0 = full previous frame, 1 = full current clip.
     crossfade_t: f32,
+    /// Whether the captured crossfade is visible (one-shot return only).
+    crossfade_display: bool,
 }
 
 impl PetController {
@@ -110,7 +114,7 @@ impl PetController {
                 actions = %actions.join(","),
                 enabled = %crate::pet::animation::IDLE_ACTION_ENABLED.join(","),
                 interval_s = IDLE_ACTION_INTERVAL_SECS,
-                "idle cute action pool ready (stretch-only polish mode)"
+                "idle cute action pool ready"
             );
         }
         let mut picker = IdlePicker::new(actions, now);
@@ -155,16 +159,26 @@ impl PetController {
             crossfade_from: None,
             crossfade_started: None,
             crossfade_t: 1.0,
+            crossfade_display: false,
         }
     }
 
     /// RGBA for current display.
     ///
-    /// Clip crossfade is **disabled for pet body** (blend of two face poses → mouth
-    /// ghosting). Frame sampling is nearest-neighbor via [`AnimationClip::frame_rgba_smooth`].
+    /// Ordinary body clip switches keep crossfade disabled (blend of two face
+    /// poses → mouth ghosting). One-shot returns enable a short captured-pose
+    /// fade as a residual guard; frame sampling remains nearest-neighbor via
+    /// [`AnimationClip::frame_rgba_smooth`].
     pub fn display_rgba(&self) -> Vec<u8> {
-        let _ = (&self.crossfade_from, self.crossfade_t); // retained for future UI fades
-        self.active_clip().frame_rgba_smooth(self.display_frame_f)
+        let current = self.active_clip().frame_rgba_smooth(self.display_frame_f);
+        if self.crossfade_display {
+            if let Some(from) = &self.crossfade_from {
+                if self.crossfade_t < 1.0 {
+                    return blend_rgba_premul(from, &current, self.crossfade_t);
+                }
+            }
+        }
+        current
     }
 
     /// True while a clip crossfade is still visible (caller should keep presenting).
@@ -179,6 +193,8 @@ impl PetController {
         self.crossfade_from = Some(from);
         self.crossfade_started = Some(now);
         self.crossfade_t = 0.0;
+        // Hidden by default; only one-shot return opts in via go_idle_with_settle.
+        self.crossfade_display = false;
     }
 
     fn tick_crossfade(&mut self, now: Instant) -> bool {
@@ -192,6 +208,7 @@ impl PetController {
             self.crossfade_from = None;
             self.crossfade_started = None;
             self.crossfade_t = 1.0;
+            self.crossfade_display = false;
         }
         changed
     }
@@ -418,9 +435,9 @@ impl PetController {
         // One-shot idle action finished (includes settle hold) → back to sit+blink.
         if on_action && finished {
             self.picker.mark_action_done(now);
-            self.go_idle(now);
+            self.go_idle_with_settle(now);
             changed = true;
-            info!("idle action finished -> base blink");
+            info!("idle action finished -> base blink (settle)");
             return changed;
         }
 
@@ -512,19 +529,16 @@ impl PetController {
             if clip.looping {
                 warn!(anim = %action, "cute clip is looping=true — oneshot finish path may never run");
             }
-            // No sit→sit crossfade into oneshots (bookends already match base).
+            // Seamless enter: oneshots begin on sit bookend (== idle_blink frame 0).
+            // Do NOT skip bookend frames (that caused a hard pop into mid-pose).
+            // Do NOT pose-crossfade (double mouth/nose ghosting).
             self.crossfade_from = None;
             self.crossfade_started = None;
             self.crossfade_t = 1.0;
-            // Skip short sit bookend so the first presented frames already move.
-            let fps = clip.fps.max(1.0);
-            let skip_frames = ((clip.frame_count as f32) * 0.06).round().clamp(0.0, 5.0);
-            let past = now
-                .checked_sub(std::time::Duration::from_secs_f32(skip_frames / fps))
-                .unwrap_or(now);
-            self.player = AnimationPlayer::start(clip, past);
-            self.current_frame = skip_frames.floor() as u32;
-            self.display_frame_f = skip_frames;
+            self.crossfade_display = false;
+            self.player = AnimationPlayer::start(clip, now);
+            self.current_frame = 0;
+            self.display_frame_f = 0.0;
         } else {
             warn!(anim = %action, "cute action missing after check");
             return false;
@@ -1105,6 +1119,17 @@ impl PetController {
     // ── Helpers ──
 
     fn go_idle(&mut self, now: Instant) {
+        self.go_idle_impl(now, false);
+    }
+
+    /// Return to base with a short captured-pose fade. One-shot tails are
+    /// authored to end on idle_blink/000; the fade is a residual guard for any
+    /// remaining pixel differences (docs F-AN-06).
+    fn go_idle_with_settle(&mut self, now: Instant) {
+        self.go_idle_impl(now, true);
+    }
+
+    fn go_idle_impl(&mut self, now: Instant, settle: bool) {
         let name = self.picker.pick_initial(now);
         let target_name = if self.library.get(&name).is_some() {
             name.clone()
@@ -1112,22 +1137,30 @@ impl PetController {
             IDLE_BASE.to_string()
         };
 
-        // One-shot actions (stretch etc.) already bookend on base_sit — a clip
-        // crossfade here double-exposes the last stretch pose over blink and
-        // reads as a ghost/phantom when settling. Always hard-cut to base.
-        self.crossfade_from = None;
-        self.crossfade_started = None;
-        self.crossfade_t = 1.0;
-
         // Allow Idle(any) -> Idle(base) by setting state directly when already idle.
         if self.state.is_idle() {
             self.state = PetState::Idle(target_name.clone());
-            if let Some(clip) = self
+            let target = self
                 .library
                 .get(&target_name)
                 .or_else(|| self.library.get(IDLE_BASE))
-            {
-                self.player = AnimationPlayer::start(clip, now);
+                .map(|clip| clip.name.clone());
+            if let Some(name) = target {
+                if settle {
+                    // Capture the oneshot's last displayed frame before swap.
+                    self.begin_crossfade(now);
+                    self.crossfade_display = true;
+                } else {
+                    self.crossfade_from = None;
+                    self.crossfade_started = None;
+                    self.crossfade_t = 1.0;
+                    self.crossfade_display = false;
+                }
+                // Start base at frame 0 (sit identity) so exit from oneshot sit
+                // bookend has no visible pose jump.
+                if let Some(clip) = self.library.get(&name) {
+                    self.player = AnimationPlayer::start(clip, now);
+                }
                 self.current_frame = 0;
                 self.display_frame_f = 0.0;
             }
@@ -1143,6 +1176,10 @@ impl PetController {
                 .get(&target_name)
                 .or_else(|| self.library.get(IDLE_BASE))
             {
+                self.crossfade_from = None;
+                self.crossfade_started = None;
+                self.crossfade_t = 1.0;
+                self.crossfade_display = false;
                 self.player = AnimationPlayer::start(clip, now);
                 self.current_frame = 0;
                 self.display_frame_f = 0.0;

@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.7.1**（2026-08-11：文档归入 `docs/` · 目录图同步） |
+| 版本 | **v0.7.2**（2026-08-11：`idle_cute` yawn 进调度池 · oneshot settle 书挡） |
 | 依据 | `prd.md` v0.5 · `design.md` v0.9 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
@@ -135,24 +135,30 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | Clip | 用途 | 备注 |
 | --- | --- | --- |
 | `idle_blink` | 默认待机（循环） | 呼吸 + **真眼皮** + 微头位；主调对象之一 |
-| `idle_stretch` | **唯一** 60s one-shot（当前） | 侧视朝左横铺；`video_stretch_v3_side_left` |
-| `idle_cute` / `tail_wag` / `sleep` | 资源在盘，**不调度** | 复开：写入 `IDLE_ACTION_ENABLED` |
+| `idle_stretch` | 60s one-shot | 侧视朝左横铺；约 72f@30；`fix_stretch_return_v1` + smooth settle |
+| `idle_cute` | 60s one-shot | 撒娇 yawn；约 84f@16（~5.25s）；`video_reminder_yawn_fluid`；首尾 ≡ `idle_blink/000` |
+| `idle_tail_wag` / `idle_sleep` | 资源在盘，**不调度** | 复开：写入 `IDLE_ACTION_ENABLED` |
 | `idle_watch` | Watching | 无缝 lean；进/出与坐姿对齐 |
 | `approaching` / `playing_interaction` | 飞扑链路（**运行关闭**） | |
 | `dragging` / `edge_peek` | 拖动 / 边缘 | 拖动态 **持续播帧** |
-| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | |
+| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | wave：挥手（yawn 已迁到 `idle_cute`） |
 
-**待机规则（调试焦点：静态 + 伸懒腰）**
+**待机规则（调试焦点：静态 + 撒娇 yawn + 伸懒腰）**
 
 - Base：`idle_blink`（约 4s @30fps 循环）。  
-- 墙钟约 **60s** 播 **`idle_stretch` only**（`IDLE_ACTION_ENABLED`）；**Watching / 躲边不饿死** 计时；躲边到点会先 restore。  
-- one-shot 约 72f @30（~2.4s）+ settle hold；**进入 oneshot 不做 crossfade**。  
+- 墙钟约 **60s** 播 **`idle_cute` / `idle_stretch`**（`IDLE_ACTION_ENABLED`）；**Watching / 躲边不饿死** 计时；躲边到点会先 restore。  
+- one-shot 约 2.4–5.3s + settle hold（`ACTION_SETTLE_SECS≈0.20`）；**进入 oneshot 不做 crossfade**，从帧 0 播（sit bookend）。  
 - 呈现：密集 clip **本帧直接 present**（不单靠 `request_redraw`）；`face_dir` 平滑。  
-- 工具：`harden_pet_face.py` → `gen_stretch_video.py` → `pack_stretch_from_video.py`；可选 `PAWDESK_CUTE_SECS=10`。  
+- 工具链：  
+  - stretch：`harden_pet_face.py` → `gen_stretch_video.py` → `pack_stretch_from_video.py`  
+  - cute yawn：`gen_reminder_yawn_video.py` → `pack_idle_cute_seamless.py`  
+  - 回坐统一：`smooth_oneshot_returns.py`  
+  - 本地加速：`PAWDESK_CUTE_SECS=10`  
 - 脸：**禁止重绘几何粉鼻**；保留原画鼻 RGB，只把 muzzle α 封为 255（`harden_pet_face.py`）。  
-- 播帧 / 缩放：最近邻；禁亚帧混合 / 宠体 crossfade。  
+- 播帧 / 缩放：最近邻；禁亚帧混合。普通 clip 切换禁宠体 crossfade；one-shot 回 base 保留约 **100ms** 书挡短过渡（`go_idle_with_settle` + `crossfade_display`）。  
 - Watching：**直接用 `idle_blink`**（关头晃），消灭嘴鼻重影。  
-- 脚底：`FOOT_Y≈224` + 底对齐 present + Show/Occluded 重绑 layered。
+- 脚底：`FOOT_Y≈224` + 底对齐 present + Show/Occluded 重绑 layered。  
+- `build_lively_pet.py`：**不覆盖** `source: video_stretch*` / `video_reminder_yawn*` / `yawn_keys*` 的已烘焙 clip。
 
 **飞扑**
 

@@ -84,6 +84,6 @@
     "71.png"
   ],
   "source": "fix_stretch_return_v1",
-  "notes": "Stretch out + reverse-return (no AI sit-up morph). Clean prefix 0..55, reversed home; soft edge AA.",
+  "notes": "Stretch out + reverse-return (no AI sit-up morph). Clean prefix 0..55, reversed home, 6f smooth settle 66-71 ending on idle_blink/000; soft edge AA. Tail rewritten by smooth_oneshot_returns_v1",
   "facing": "left"
 }

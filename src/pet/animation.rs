@@ -620,10 +620,11 @@ pub const IDLE_ACTION_INTERVAL_SECS: f32 = 60.0;
 
 /// One-shot pool currently enabled for polish.
 ///
-/// Debug focus (2026-08-10): **only `idle_stretch`**.  
-/// Other authored clips (`idle_cute` / `tail_wag` / `sleep`) stay on disk but are
+/// - `idle_cute`: yawn (撒娇) — continuous video open/close with pink tongue.
+/// - `idle_stretch`: stretch (still available).
+/// Other authored clips (`idle_tail_wag` / `idle_sleep`) stay on disk but are
 /// **not** scheduled until re-listed here.
-pub const IDLE_ACTION_ENABLED: &[&str] = &["idle_stretch"];
+pub const IDLE_ACTION_ENABLED: &[&str] = &["idle_cute", "idle_stretch"];
 
 /// Picks one-shot idle actions on a fixed wall-clock interval.
 ///
@@ -782,8 +783,9 @@ mod idle_picker_tests {
     }
 
     #[test]
-    fn enabled_pool_is_stretch_only() {
-        assert_eq!(IDLE_ACTION_ENABLED, &["idle_stretch"]);
+    fn enabled_pool_includes_cute_yawn() {
+        assert!(IDLE_ACTION_ENABLED.contains(&"idle_cute"));
+        assert!(IDLE_ACTION_ENABLED.contains(&"idle_stretch"));
     }
 
     #[test]

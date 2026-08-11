@@ -934,13 +934,27 @@ def main() -> None:
             False,
             notes="Anticipate crouch → tall stretch → settle (fallback warp)",
         )
-    write_set(
-        "idle_cute",
-        build_cute(base, eyes),
-        ACTION_FPS,
-        False,
-        notes="Head tilt + half lids + pad-up",
-    )
+    # Prefer video-baked yawn cute if present — do not overwrite.
+    cute_meta = OUT / "idle_cute" / "meta.json"
+    skip_cute = False
+    if cute_meta.is_file():
+        try:
+            src = json.loads(cute_meta.read_text(encoding="utf-8")).get("source", "")
+            if str(src).startswith("video_reminder_yawn") or str(src).startswith(
+                "yawn_keys"
+            ):
+                print("  idle_cute: keep existing yawn cute (skip warp)")
+                skip_cute = True
+        except Exception:
+            pass
+    if not skip_cute:
+        write_set(
+            "idle_cute",
+            build_cute(base, eyes),
+            ACTION_FPS,
+            False,
+            notes="Head tilt + half lids + pad-up",
+        )
     write_set(
         "idle_tail_wag",
         build_tail_wag(base, eyes),
@@ -966,7 +980,24 @@ def main() -> None:
     write_set("playing_interaction", build_playing(base), ACTION_FPS, True)
     write_set("dragging", build_dragging(base), ACTION_FPS, True)
     write_set("edge_peek", build_edge_peek(base, eyes), 18.0, True)
-    write_set("reminder_wave", build_reminder_wave(base), ACTION_FPS, True)
+    # Prefer video-baked wide-open meow if present — do not overwrite.
+    wave_meta = OUT / "reminder_wave" / "meta.json"
+    skip_wave = False
+    if wave_meta.is_file():
+        try:
+            src = json.loads(wave_meta.read_text(encoding="utf-8")).get("source", "")
+            src_s = str(src)
+            if (
+                src_s.startswith("video_reminder_meow")
+                or src_s.startswith("video_reminder_yawn")
+                or src_s.startswith("yawn_keys")
+            ):
+                print("  reminder_wave: keep existing yawn clip (skip warp)")
+                skip_wave = True
+        except Exception:
+            pass
+    if not skip_wave:
+        write_set("reminder_wave", build_reminder_wave(base), ACTION_FPS, True)
     write_set("reminder_feed", build_reminder_feed(base, eyes), ACTION_FPS, True)
 
     print("done — lively_v1 all clips regenerated")
