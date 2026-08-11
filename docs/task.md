@@ -6,11 +6,11 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.8**（2026-08-10：添加应用原生选择器 · 虚拟桌面 · 不闪） |
+| 当前版本 | **v0.9**（2026-08-11：精灵去品红边 / 软边 / 伸懒腰无幻影 / 固定朝向 · 文档归入 `docs/`） |
 | 依据文档 | `prd.md` v0.5、`tech.md` v0.7、`design.md` v0.9 |
 | 环境参考 | `env.md` |
-| 状态 | **M0–M5 可日常使用**；**M6 坞精致化主路径已落地**；字体更精致化后期 |
-| **下一步** | **只调 `idle_blink` + `idle_stretch`**（其它 oneshot 已停调度）；通过后再开 cute/wag/sleep |
+| 状态 | **M0–M5 可日常使用**；**M6 坞精致化主路径已落地**；**cow-cat 精灵桌面可读性收口**；字体更精致化后期 |
+| **下一步** | 观察 `idle_blink` + `idle_stretch` 日常观感；通过后再开 cute/wag/sleep；可选：飞扑重开 / 更多 oneshot |
 
 ### 1.1 使用说明
 
@@ -33,6 +33,17 @@
 | v0.6 | 2026-08-07 | 启动坞 Appica 精致 UI + 丝滑开合；MENU-09~13 / L6；design v0.7 · tech v0.5 |
 | v0.7 | 2026-08-07 | **坞 bug 收口**：flat 主按钮；GDI 文字（fontdue 弃用于 UI）；列表滚轮可扩展（非封顶 5）；design **v0.8** · tech **v0.6**；L7 |
 | **v0.8** | **2026-08-10** | 添加应用：原生 `IFileOpenDialog`、Shell 虚拟桌面、取消 z-order 闪烁；design **v0.9** · tech **v0.7** |
+| **v0.9** | **2026-08-11** | **精灵 polish**：品红描边 despill、全帧软边 AA、双线性缩放；`idle_stretch` 倒放回坐（去掉 AI 多头幻影）；取消鼠标驱动左右翻转（固定素材朝向）；工具脚本 `despill_pet_edges` / `soften_pet_edges` / `fix_stretch_return`；**文档迁入 `docs/`** 并补根 `README.md` 索引 |
+
+### 1.3 2026-08-11 精灵与呈现收口（已落地）
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 品红 / 粉紫轮廓 | [x] | `tools/despill_pet_edges.py` 全 `cow-cat` 帧 |
+| 硬边锯齿 | [x] | 素材 Gaussian 软边 + `scale_rgba_centered` 预乘双线性 |
+| 伸懒腰结束幻影 | [x] | 回坐改为干净前半段倒放；`go_idle` 硬切 base，无 clip crossfade |
+| 鼠标左右朝向反了 | [x] | 禁用 `mirror_x` 与 cursor `face_dir` 翻转，固定素材朝向 |
+| 文档杂乱 | [x] | `prd/tech/design/task/env` → `docs/`；`docs/README.md` + 根 `README.md` |
 
 ---
 
@@ -595,7 +606,7 @@ foundation (工程/错误/日志/事件总线)
 - **动画工具**：stretch → `gen_stretch_video.py` / `pack_stretch_from_video.py`；warp 底 → `build_lively_pet.py`
 - **显示大小**：`config.pet.scale` 默认 **0.6**；`pet_logical_size`；设置 `PetScaleDec/Inc`；托盘变大/变小；schema **v3** 迁移
 - **飞扑**：`ENABLE_MOUSE_POUNCE = false`；资源与路径代码保留
-- **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `docs/mockups/launcher-pin-flip.*`
+- **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `mockups/launcher-pin-flip.*`
 - **呈现**：CPU RGBA → `UpdateLayeredWindow(ULW_ALPHA)` 预乘 BGRA；禁止宠物 HWND 挂 DXGI/wgpu
 - **色键**：仅品红；**禁止黑键**
 - **工具**：`tools/build_lively_pet.py`（主）、`build_idle_base.py`、`build_coherent_30fps.py`（旧）、`gen_pet_videos.py`、`extract_video_frames.py`、`set_pet_from_image.py`、`package.ps1`、`xai_video_i2v.py`
@@ -639,7 +650,7 @@ foundation (工程/错误/日志/事件总线)
 | M5 日常化 | ✅ | 设置提醒、托盘、便携包、降帧 |
 | **M6 质量迭代** | 🔄 **进行中** | A bug → **B 钉宠 Launcher（§14）** → C 玻璃 UI → D 形象最后 |
 | **M6 动画/缩放增量** | ✅ 2026-08-06 | 真眨眼、crossfade、拖动动画、`pet.scale` UI |
-| 效果图 mockup | ✅ | `docs/mockups/launcher-preview.*` · `launcher-pin-flip.*` |
+| 效果图 mockup | ✅ | `mockups/launcher-preview.*` · `launcher-pin-flip.*` |
 
 ### 12.2 已交付能力摘要
 
@@ -732,7 +743,7 @@ M6-D   宠物动作与形象（最后再开）
 ### 13.6 文档与验收
 
 - 每完成 §14 一个 Lx：勾任务状态 + 更新 §11.2  
-- UI：对照 `docs/mockups/launcher-pin-flip.png`；保持 DPR 1:1 锐利  
+- UI：对照 `mockups/launcher-pin-flip.png`；保持 DPR 1:1 锐利  
 - **M6-D 启动前** 需用户确认：形象方向与是否开飞扑  
 
 ---
@@ -745,7 +756,7 @@ M6-D   宠物动作与形象（最后再开）
 > - 视觉：**Appica 暖玻璃** + primary/soft/row；禁止真桌面 Acrylic / Web 组件库  
 > - 动效：卡从身边长出；**宠不闪**；~**60fps**；线性 open_t + out_quint/out_cubic  
 > - 单 HWND：`W = union(pet_screen_rect, card_rect)`，层内分画宠与卡  
-> - 依据：`design.md` §5（v0.7）、`tech.md` §5（v0.5）；效果图 `docs/mockups/launcher-preview.*`
+> - 依据：`design.md` §5（v0.7）、`tech.md` §5（v0.5）；效果图 `mockups/launcher-preview.*`
 
 ### 14.1 目标与非目标
 

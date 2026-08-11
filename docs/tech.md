@@ -2,10 +2,11 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.7**（2026-08-10：原生文件选择 · 虚拟桌面 · 添加应用不闪） |
+| 版本 | **v0.7.1**（2026-08-11：文档归入 `docs/` · 目录图同步） |
 | 依据 | `prd.md` v0.5 · `design.md` v0.9 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
+| 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
 
 ---
 
@@ -72,6 +73,8 @@
 ## 2. 源码模块地图
 
 ```text
+README.md               工程入口说明 → 指向 docs/
+docs/                   全部项目文档（prd/tech/design/task/env + mockups）
 src/
 ├─ main.rs              入口、日志
 ├─ app.rs               生命周期、叠层 UI 切换、开坞接线
@@ -86,7 +89,7 @@ src/
 
 assets/pets/cow-cat/    分 clip 帧序列 + meta.json
 assets/tray/            托盘图标
-tools/                  抽帧、打包、视频工具
+tools/                  抽帧、打包、despill/软边/stretch 重建
 dist/PawDesk/           便携包（package.ps1）
 ```
 
@@ -442,3 +445,4 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | v0.5 | 2026-08-07 | 启动坞 Appica + 丝滑动效；60fps；原子 present；防宠闪 |
 | v0.6 | 2026-08-07 | **GDI 文字**；列表 **滚轮滚动**（`LIST_VISIBLE_ROWS`/`menu_list_scroll`）；flat primary；对齐 design **v0.8** |
 | **v0.7** | **2026-08-10** | 添加应用：原生 `IFileOpenDialog`、Shell 虚拟桌面、不切 z-order；文档澄清 debug/release/dist |
+| v0.7.1 | 2026-08-11 | 文档迁入 `docs/`；§2 目录图补 `README.md` / `docs/` / 资源工具 |

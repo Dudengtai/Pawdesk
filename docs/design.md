@@ -4,7 +4,7 @@
 | --- | --- |
 | 版本 | **v0.9**（2026-08-10：添加应用不闪 · 桌面快捷方式完整可见） |
 | 依据 | `prd.md` v0.5 · `tech.md` v0.7 |
-| 效果图 | `docs/mockups/launcher-preview.*` · `launcher-pin-flip.*` |
+| 效果图 | `mockups/launcher-preview.*` · `launcher-pin-flip.*` |
 
 ---
 
@@ -206,7 +206,7 @@
 - 卡片逻辑尺寸约 **360×360**；列表视口固定约 **4** 行，**滚轮滚动**查看更多（软上限 128，非产品封顶 5）。整窗 = 宠矩形 ∪ 卡片。  
 - 宠物区：开坞第 0 帧为**自由剪影**（与待机一致）；托盘 /「轻点关闭」随卡片 fade 渐入，避免「突然套托盘」闪变。
 
-参考：`docs/mockups/launcher-preview.html` · `launcher-pin-flip.*`。
+参考：`mockups/launcher-preview.html` · `launcher-pin-flip.*`。
 
 ### 5.3 空间布局（钉宠）
 
@@ -377,8 +377,8 @@ assets/tray/icon.png
 
 | 文件 | 内容 |
 | --- | --- |
-| `docs/mockups/launcher-preview.html` | 方案 A/B 对比 |
-| `docs/mockups/launcher-pin-flip.html` | 钉宠 Flip/Shift 场景 |
+| `mockups/launcher-preview.html` | 方案 A/B 对比 |
+| `mockups/launcher-pin-flip.html` | 钉宠 Flip/Shift 场景 |
 | 对应 `.png` | 导出静帧 |
 
 ### 9.3 与 tech 的对应
