@@ -1985,6 +1985,23 @@ fn blit(dest: &mut [u8], dw: u32, dh: u32, src: &[u8], sw: u32, sh: u32, dx: u32
     }
 }
 
+/// Alpha-composite one RGBA layer onto another at an integer offset.
+///
+/// Exposed so app-level overlay transitions can merge independently composed
+/// launcher / settings buffers into one atomic layered-window frame.
+pub fn blit_rgba(
+    dest: &mut [u8],
+    dw: u32,
+    dh: u32,
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dx: u32,
+    dy: u32,
+) {
+    blit(dest, dw, dh, src, sw, sh, dx, dy);
+}
+
 fn scale_rgba_fit(
     src: &[u8],
     sw: u32,

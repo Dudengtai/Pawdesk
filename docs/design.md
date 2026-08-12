@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.9.1**（2026-08-11：`idle_cute` yawn + stretch 双 oneshot · 无缝回坐） |
-| 依据 | `prd.md` v0.5 · `tech.md` v0.7.2 |
+| 版本 | **v0.10**（2026-08-12：设置从「管理」按钮丝滑生长并停靠启动坞旁） |
+| 依据 | `prd.md` v0.5 · `tech.md` v0.8 |
 | 效果图 | `mockups/launcher-preview.*` · `launcher-pin-flip.*` |
 
 ---
@@ -27,7 +27,8 @@
 - 启动坞 = **钉宠锚点 + Appica 暖玻璃卡片**（非径向环、非系统 Acrylic）。  
 - 菜单 / 设置 / 提醒叠层：CPU 自绘 + HiDPI 物理像素；开合 scale+fade + 子项 stagger + hover/press 插值。  
 - **观感目标**：点宠 → **卡片从身边长出**；宠不闪、不跳、不弹（宠始终全不透明；托盘渐入）。  
-- 开坞期呈现 **~60fps**；几何开局锁定；开坞同帧原子 present（防空帧闪）。  
+- 点「管理」→ **设置从按钮中心长出**并停靠坞旁；托盘打开设置仍居中。  
+- 开坞 / 设置转场呈现 **~60fps**；几何开局锁定；同帧原子 present（防空帧闪）。  
 - 列表：**视口约 4 行 + 滚轮滚动**（软上限 128，**不是**封顶 5 个）。  
 - 文字：Windows **GDI 栅格**（hinted）；更精致字体渲染 **后期再做**。  
 - 形象与飞扑精修放后期（见 `task.md` M6-D / PET-A07）。
@@ -285,7 +286,7 @@
 - 启动成功 → 关坞动画。  
 - **添加应用**：系统文件框打开期间 **坞保持**；launcher **不闪、不掉置顶**。  
 - 文件框默认落在 Shell **虚拟桌面**（用户桌面 ∪ 公共桌面），可见桌面上全部 `.lnk` / `.url` / `.exe`。  
-- 管理 → 进设置（可瞬时关坞，避免拖动画）。  
+- 管理 → 进设置：**从「管理」按钮中心丝滑生长**，最终停靠在启动坞旁（锚点 + 工作区钳制）；启动坞卡层在转场前段同步淡出，避免硬切。托盘打开设置仍居中。  
 - 关坞后 **~280ms** 防连环重开。
 
 ### 5.7 桌宠反馈（可选增强）
@@ -324,6 +325,7 @@
 
 ### 7.1 设置面板
 
+- 打开方式：从启动坞「管理」或失效行点击时，面板以该按钮为锚点、约 **340ms** 从 **15%** 生长到 100%（`ease.out_quint` scale + `ease.out_cubic` fade），最终停靠在工作区内启动坞旁；托盘「打开设置」保持居中直开。
 - 与启动坞同一套玻璃 / 圆角 / 字号气质。  
 - 分区顺序：  
   1. **健康提醒**（开关、间隔、暂停）  
@@ -351,6 +353,8 @@
 | 单击开坞 | 卡 scale 0.90→1 + fade（宠钉住不闪）+ 轻 cascade；**~60fps** | out_quint ~380ms |
 | 关坞 | 卡连续收回；宠保持 | linear clock ~240ms |
 | 开坞首帧 | 原子 present（尺寸+坐标+像素同帧）；托盘未显、剪影连续 | tech §5.4 |
+| 管理 → 设置 | 面板从按钮中心 **15%→100%** 生长 + fade；启动坞卡层前段淡出；最终停靠坞旁 | out_quint + out_cubic ~340ms |
+| 托盘 → 设置 | 居中直开（无生长转场） | — |
 | 列表 / 按钮 hover | 色与阴影插值 | approach ~100ms |
 | 主按钮按下 | 0.97 下压 + 色加深 | approach ~80ms |
 | 拖动 | 拎起 clip + 轻微 scale 脉冲 | — |
@@ -387,7 +391,10 @@ assets/tray/icon.png
 
 | 设计概念 | 技术落点 |
 | --- | --- |
-| 钉宠 / Flip/Shift | `ui/launcher_place.rs` |
+| 钉宠 / Flip/Shift | `ui/launcher_place.rs` · `place_launcher` |
+| 设置旁停靠 / 生长矩形 | `place_settings_near_point` · `settings_rect_at` · `union_rects` |
+| 设置转场时钟 | `app::SettingsTransition` · `begin_settings_from_launcher` · `tick/finish_settings_transition` |
+| 转场合成 blit | `menu_ui::blit_rgba` + `scale_rgba_around_anchor`（app） |
 | Appica 玻璃坞 / 控件 | `render/menu_ui.rs`（token、flat primary、soft/row、stagger） |
 | UI 文字 | `render/text.rs` → **GDI** YaHei UI（后期可再精致化） |
 | 缓动 / stagger / approach | `render/easing.rs` |
@@ -416,3 +423,5 @@ assets/tray/icon.png
 | v0.7 | 2026-08-07 | 丝滑开合：宠不闪、60fps、原子 present |
 | v0.8 | 2026-08-07 | 主按钮扁平实心；**GDI 文字**；列表 **滚轮滚动**（非封顶 5）；tech v0.6 |
 | **v0.9** | **2026-08-10** | 添加应用：不闪 z-order；虚拟桌面显示全部快捷方式；tech **v0.7** |
+| v0.9.1 | 2026-08-11 | `idle_cute` yawn + stretch 双 oneshot · 无缝回坐 |
+| **v0.10** | **2026-08-12** | 设置从「管理」按钮中心丝滑生长并停靠启动坞旁；启动坞卡层同步淡出；tech **v0.8** |

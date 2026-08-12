@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.7.2**（2026-08-11：`idle_cute` yawn 进调度池 · oneshot settle 书挡） |
-| 依据 | `prd.md` v0.5 · `design.md` v0.9 |
+| 版本 | **v0.8**（2026-08-12：设置从启动坞锚点生长转场 · 停靠启动坞旁） |
+| 依据 | `prd.md` v0.5 · `design.md` v0.10 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -97,7 +97,7 @@ dist/PawDesk/           便携包（package.ps1）
 | --- | --- |
 | `app` | 窗尺寸/位置切换（宠 / 坞 / 提醒 / 设置）、事件汇总 |
 | `pet` | `PetState`、clip 切换、拖动/边缘/菜单动画 t |
-| `launcher_place` | **纯函数** `place_launcher`（物理像素） |
+| `launcher_place` | **纯函数** `place_launcher` / `place_settings_near_point` / `settings_rect_at`（物理像素） |
 | `radial_menu` | 条目布局 `layout_pinned`、命中 |
 | `menu_ui` | 玻璃坞 + 设置面板 CPU 绘制 |
 | `reminder` | 间隔、暂停、补发一次 |
@@ -218,7 +218,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 宠物 | 128×`pet.scale` 逻辑（默认 ~77） | 日常；用户可调 |
 | 启动坞 | union(宠, 卡) | `place_launcher` |
 | 提醒 | 固定提醒窗 | 居中 |
-| 设置 | ~420×580 逻辑 | 居中 |
+| 设置 | 420×640 逻辑 | 启动坞转场后停靠坞旁；托盘直开居中 |
 
 `overlay_origin`：进叠层前宠物 top-left；退出恢复；**禁止**把坞临时坐标写入配置。
 
@@ -245,7 +245,14 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 输出：window / pet_local / card_local / dir
 ```
 
-辅助：`logical_to_physical` / `physical_to_logical` / `snap_dpr`。
+辅助：`logical_to_physical` / `physical_to_logical` / `snap_dpr` / `union_rects`。
+
+**设置停靠（同文件）**
+
+| 函数 | 作用 |
+| --- | --- |
+| `place_settings_near_point(anchor, w, h, work, margin)` | 以锚点为中心种子，`shift` 钳进 work，得到最终设置矩形 |
+| `settings_rect_at(anchor, final, w, h, t)` | 转场中插值：中心 anchor→final，scale **0.15→1**（`ease_out_quint`）；`t=1` ≡ `final` |
 
 ### 5.3 接线与绘制
 
@@ -254,12 +261,14 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 开坞 | `app::enter_menu_ui`：探头 snap → `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → `menu_present_pos` → resize → **立即 `redraw()`** |
 | 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + **视口内**快捷行；宠在 **pet_local** |
 | 列表数据 | `build_entries`：全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限 |
-| 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll` |
+| 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll`（转场中禁用） |
 | 绘制 | `compose_menu_frame`：Appica token；flat primary；卡层 fade/scale；宠全不透明；滚动提示文案 |
 | 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium） |
 | 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **线性** 0..1；开 **380ms** / 关 **240ms** |
 | 视觉曲线 | compose：`ease_out_quint` scale 0.90→1；`ease_out_cubic` fade 略领先；子项 `stagger_t` |
 | 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t }`；`app` 每帧 `approach` 插值 |
+| 管理→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
+| 托盘→设置 | `enter_settings_ui` / `enter_settings_ui_highlight`：居中直开，**无** `settings_transition` |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
 | 多屏 | `work_area_from_point(宠中心)` |
 
@@ -273,8 +282,10 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
 | 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
+| 设置转场 | 点击「管理」/失效行 → `begin_settings_from_launcher`：锚点 = 按钮中心，`place_settings_near_point` 钳制最终矩形；`settings_transition` 线性 340ms，60fps，union(启动坞, 当前设置) 合成 + `update_layered_rgba_ex(screen_pos)` 原子 present；前 40% 启动坞卡层与宠物淡出，设置层 `scale_rgba_around_anchor` 从 15% 生长（`ease_out_quint` + `ease_out_cubic`），t=1 后 `finish_settings_transition` 同步 winit 几何 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
-| 帧率 | `menu_ui_active` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
+| 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
+| 转场命中 | 生长期间 **不**接 settings hit；t=1 后 `finish_settings_transition` 再开 |
 | 宠 clip | `MenuOpen` 尽量保持当前 `idle_*` clip，避免强制切 base 引发 crossfade 闪 |
 
 **根因备忘（已修）**
@@ -374,7 +385,7 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | 状态 | 建议 |
 | --- | --- |
 | 待机（密帧 blink） | 约 **30 FPS** 呈现亚帧混合；隐藏可再降 |
-| **启动坞打开中** | **~60 FPS**（16ms），保证 scale/fade 丝滑 |
+| **启动坞打开中 / 设置转场** | **~60 FPS**（16ms），保证 scale/fade 丝滑 |
 | 设置 / 提醒 / 拖动 | 临时约 30 FPS |
 | 目标 | 待机 CPU &lt; 3%、内存 &lt; 200MB（PRD） |
 
@@ -452,3 +463,5 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | v0.6 | 2026-08-07 | **GDI 文字**；列表 **滚轮滚动**（`LIST_VISIBLE_ROWS`/`menu_list_scroll`）；flat primary；对齐 design **v0.8** |
 | **v0.7** | **2026-08-10** | 添加应用：原生 `IFileOpenDialog`、Shell 虚拟桌面、不切 z-order；文档澄清 debug/release/dist |
 | v0.7.1 | 2026-08-11 | 文档迁入 `docs/`；§2 目录图补 `README.md` / `docs/` / 资源工具 |
+| v0.7.2 | 2026-08-11 | `idle_cute` yawn 进调度池 · oneshot settle 书挡 |
+| **v0.8** | **2026-08-12** | 设置从启动坞「管理」按钮中心丝滑生长并停靠坞旁（`settings_transition` + `place_settings_near_point` + `settings_rect_at`）；启动坞卡层同步淡出；托盘直开仍居中 |

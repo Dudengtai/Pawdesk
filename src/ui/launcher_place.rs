@@ -4,6 +4,7 @@
 //! [`logical_to_physical`] / [`snap_dpr`] before calling [`place_launcher`].
 
 use crate::platform::Rect;
+use crate::render::easing::ease_out_quint;
 use crate::ui::radial_menu::ExpandDir;
 
 /// Extra padding around union(pet, card) when forming the overlay window.
@@ -95,6 +96,56 @@ pub fn place_launcher(
     }
 
     finish(pet0, pet, card, dir, work, margin)
+}
+
+/// Place a settings-sized panel near `anchor`, clamped fully inside `work`.
+///
+/// All geometry is physical pixels. The panel is seeded centered on the anchor,
+/// then Shift-clamped so it stays visible at every work-area edge/corner.
+pub fn place_settings_near_point(
+    anchor: (i32, i32),
+    w: i32,
+    h: i32,
+    work: Rect,
+    margin: i32,
+) -> Rect {
+    let (w, h) = fit_card_to_work(w, h, work, margin);
+    let mut r = Rect {
+        x: anchor.0 - w / 2,
+        y: anchor.1 - h / 2,
+        width: w,
+        height: h,
+    };
+    shift_rect_into_work(&mut r, work, margin);
+    r
+}
+
+/// Settings rect while it grows from `anchor` toward `final_rect`.
+///
+/// `t` is the linear transition clock 0..1. Scale starts at 15% and settles with
+/// the same `ease_out_quint` used by the launcher; the center eases from the
+/// anchor to the final rect center, so `t=1` exactly equals `final_rect`.
+pub fn settings_rect_at(
+    anchor: (i32, i32),
+    final_rect: Rect,
+    settings_w: i32,
+    settings_h: i32,
+    t: f32,
+) -> Rect {
+    let k = ease_out_quint(t);
+    let s = 0.15 + 0.85 * k;
+    let w = ((settings_w as f32) * s).round().max(1.0) as i32;
+    let h = ((settings_h as f32) * s).round().max(1.0) as i32;
+    let fcx = final_rect.x + final_rect.width / 2;
+    let fcy = final_rect.y + final_rect.height / 2;
+    let cx = anchor.0 as f32 + (fcx - anchor.0) as f32 * k;
+    let cy = anchor.1 as f32 + (fcy - anchor.1) as f32 * k;
+    Rect {
+        x: cx.round() as i32 - w / 2,
+        y: cy.round() as i32 - h / 2,
+        width: w,
+        height: h,
+    }
 }
 
 fn finish(
@@ -246,6 +297,12 @@ fn shift_card_into_work(card: &mut Rect, work: Rect, margin: i32) {
     card.y += dy;
 }
 
+fn shift_rect_into_work(r: &mut Rect, work: Rect, margin: i32) {
+    let (dx, dy) = shift_rect_into_work_delta(r, work, margin);
+    r.x += dx;
+    r.y += dy;
+}
+
 fn shift_rect_into_work_delta(r: &Rect, work: Rect, margin: i32) -> (i32, i32) {
     let min_x = work.x + margin;
     let min_y = work.y + margin;
@@ -266,7 +323,7 @@ fn shift_rect_into_work_delta(r: &Rect, work: Rect, margin: i32) -> (i32, i32) {
     (nx - r.x, ny - r.y)
 }
 
-fn union_rects(a: Rect, b: Rect) -> Rect {
+pub fn union_rects(a: Rect, b: Rect) -> Rect {
     let x1 = a.x.min(b.x);
     let y1 = a.y.min(b.y);
     let x2 = (a.x + a.width).max(b.x + b.width);
@@ -458,6 +515,60 @@ mod tests {
         assert!(p.card_screen.height <= work.height - 2 * DEFAULT_MARGIN);
         assert!(fully_inside(&p.card_screen, work, DEFAULT_MARGIN));
         assert!(fully_inside(&p.window, work, 0));
+    }
+
+    #[test]
+    fn settings_near_center_anchor_stays_centered() {
+        let work = work_1920();
+        let r = place_settings_near_point((960, 500), 420, 640, work, DEFAULT_MARGIN);
+        assert_eq!(r.width, 420);
+        assert_eq!(r.height, 640);
+        assert!(fully_inside(&r, work, DEFAULT_MARGIN));
+        assert_eq!(r.x + r.width / 2, 960);
+        assert_eq!(r.y + r.height / 2, 500);
+    }
+
+    #[test]
+    fn settings_near_corners_clamped_inside() {
+        let work = work_1920();
+        for anchor in [
+            (0, 0),
+            (1920, 1040),
+            (1920, 0),
+            (0, 1040),
+            (1000, 1040),
+        ] {
+            let r = place_settings_near_point(anchor, 420, 640, work, DEFAULT_MARGIN);
+            assert!(fully_inside(&r, work, DEFAULT_MARGIN), "anchor {anchor:?} -> {r:?}");
+            assert_eq!(r.width, 420);
+            assert_eq!(r.height, 640);
+        }
+    }
+
+    #[test]
+    fn settings_rect_t1_matches_final() {
+        let final_rect = Rect {
+            x: 100,
+            y: 80,
+            width: 420,
+            height: 640,
+        };
+        let r = settings_rect_at((400, 300), final_rect, 420, 640, 1.0);
+        assert_eq!(r, final_rect);
+    }
+
+    #[test]
+    fn settings_rect_t0_centers_on_anchor() {
+        let final_rect = Rect {
+            x: 100,
+            y: 80,
+            width: 420,
+            height: 640,
+        };
+        let r = settings_rect_at((400, 300), final_rect, 420, 640, 0.0);
+        assert!(r.width > 0 && r.height > 0);
+        assert_eq!(r.x + r.width / 2, 400);
+        assert_eq!(r.y + r.height / 2, 300);
     }
 
     #[test]

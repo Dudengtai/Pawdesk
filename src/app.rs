@@ -23,9 +23,10 @@ use crate::pet::{
 };
 use crate::platform;
 use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
+use crate::render::easing::{ease_in_cubic, ease_out_cubic, ease_out_quint};
 use crate::render::menu_ui::{
-    compose_menu_frame, compose_settings_frame, hit_settings, MenuChromeState, SettingsHit,
-    SETTINGS_H, SETTINGS_W,
+    blit_rgba, compose_menu_frame, compose_settings_frame, hit_settings, MenuChromeState,
+    SettingsHit, SETTINGS_H, SETTINGS_W,
 };
 use crate::render::reminder_ui::{client_to_layout, compose_reminder_frame, food_button_layout};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
@@ -35,8 +36,8 @@ use crate::shortcut::{
     ShortcutRepository,
 };
 use crate::ui::launcher_place::{
-    logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
-    DEFAULT_GAP, DEFAULT_MARGIN,
+    logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher,
+    place_settings_near_point, settings_rect_at, snap_dpr, union_rects, DEFAULT_GAP, DEFAULT_MARGIN,
 };
 use crate::ui::pet_window::DragState;
 use crate::ui::radial_menu::{
@@ -52,6 +53,21 @@ pub enum UserEvent {
     App(AppEvent),
     /// Async file-dialog result (never block UI thread with rfd).
     FilePicked(Option<PathBuf>),
+}
+
+/// Settings open transition from a launcher anchor point (physical pixels).
+#[derive(Debug, Clone, Copy)]
+struct SettingsTransition {
+    /// Manage-button center on screen; the panel grows from here.
+    anchor: (i32, i32),
+    /// Final settings window rect (physical) once the transition settles.
+    final_rect: platform::Rect,
+    /// Launcher window rect (physical) while it crossfades away.
+    menu_rect: platform::Rect,
+    started: Instant,
+    duration: Duration,
+    /// Linear 0..1 clock; advanced by `about_to_wait`, read by compose.
+    t: f32,
 }
 
 pub struct App {
@@ -102,6 +118,10 @@ pub struct App {
     menu_list_scroll: usize,
     /// Settings list row to emphasize (from invalid launcher item).
     settings_highlight_row: Option<usize>,
+    /// Settings grows from the launcher's Manage button instead of snapping center.
+    settings_transition: Option<SettingsTransition>,
+    /// Overlay window top-left (physical) for atomic layered present during settings transition.
+    settings_present_pos: Option<(i32, i32)>,
     /// Pet position before menu/settings expand (window top-left, physical).
     overlay_origin: Option<Point>,
     /// Current pet frame RGBA for alpha hit-testing (normal pet size).
@@ -163,6 +183,8 @@ impl App {
             menu_present_pos: None,
             menu_list_scroll: 0,
             settings_highlight_row: None,
+            settings_transition: None,
+            settings_present_pos: None,
             overlay_origin: None,
             hit_rgba: Vec::new(),
             hit_size: (128, 128),
@@ -355,7 +377,9 @@ impl App {
     fn sync_texture_from_pet(&mut self) {
         // Warm the icon cache and snapshot icons before borrowing `self.pet`
         // (extraction needs `&mut self`; the pet borrow below would block it).
-        let menu_icons: HashMap<Uuid, Option<Arc<IconRgba>>> = if self.menu_ui_active {
+        let menu_icons: HashMap<Uuid, Option<Arc<IconRgba>>> = if self.menu_ui_active
+            || (self.settings_ui_active && self.settings_transition.is_some())
+        {
             self.shortcuts
                 .list_enabled_sorted()
                 .into_iter()
@@ -385,17 +409,101 @@ impl App {
                 self.config.reminder.interval_minutes,
                 self.config.reminder.paused,
             );
-            let (w, h, composed) = compose_settings_frame(
+            let (sw, sh, settings_rgba) = compose_settings_frame(
                 &rows,
                 reminder,
                 self.config.pet.scale,
                 dpr,
                 self.settings_highlight_row,
             );
+
+            if let Some(tr) = self.settings_transition {
+                let t = tr.t;
+                let cur = settings_rect_at(
+                    tr.anchor,
+                    tr.final_rect,
+                    SETTINGS_W as i32,
+                    SETTINGS_H as i32,
+                    t,
+                );
+                let union = union_rects(tr.menu_rect, cur);
+                let w = union.width.max(1) as u32;
+                let h = union.height.max(1) as u32;
+                let mut out = vec![0u8; (w * h * 4) as usize];
+                // Launcher card crossfades away early in the handoff.
+                let menu_t = t * 2.5;
+                if menu_t < 1.0 {
+                    if let (Some(pet), Some(layout)) = (self.pet.as_ref(), self.menu_layout.as_ref())
+                    {
+                        let clip = pet.active_clip();
+                        let mut pet_rgba = pet.display_rgba();
+                        // Pet and card share the early crossfade window, so removing
+                        // the launcher layer never snaps a half-visible pet away.
+                        fade_rgba_alpha(&mut pet_rgba, 1.0 - ease_in_cubic(menu_t));
+                        let paused = self
+                            .scheduler
+                            .as_ref()
+                            .map(|s| s.is_paused())
+                            .unwrap_or(false);
+                        let mut l = layout.clone();
+                        // Start from the launcher's current open state and crossfade
+                        // the card away during the early handoff window.
+                        l.open_t = layout.open_t * (1.0 - ease_in_cubic(menu_t));
+                        let (mw, mh, menu_rgba) = compose_menu_frame(
+                            &pet_rgba,
+                            clip.frame_width,
+                            clip.frame_height,
+                            &l,
+                            paused,
+                            dpr,
+                            MenuChromeState {
+                                hover: None,
+                                press: None,
+                                hover_t: 0.0,
+                                press_t: 0.0,
+                            },
+                        );
+                        if mw == tr.menu_rect.width as u32
+                            && mh == tr.menu_rect.height as u32
+                            && w >= mw
+                            && h >= mh
+                        {
+                            blit_rgba(
+                                &mut out,
+                                w,
+                                h,
+                                &menu_rgba,
+                                mw,
+                                mh,
+                                (tr.menu_rect.x - union.x) as u32,
+                                (tr.menu_rect.y - union.y) as u32,
+                            );
+                        }
+                    }
+                }
+                // Settings grows from the anchor toward its final rect.
+                let t_scale = ease_out_quint(t);
+                let scale = 0.15 + 0.85 * t_scale;
+                let fade = ease_out_cubic(t);
+                let (scaled, scaled_w, scaled_h) =
+                    scale_rgba_around_anchor(&settings_rgba, sw, sh, scale, fade);
+                let sdx = (cur.x - union.x).max(0) as u32;
+                let sdy = (cur.y - union.y).max(0) as u32;
+                if scaled_w <= w && scaled_h <= h {
+                    blit_rgba(&mut out, w, h, &scaled, scaled_w, scaled_h, sdx, sdy);
+                }
+                self.settings_present_pos = Some((union.x, union.y));
+                self.sprite_logical = (SETTINGS_W, SETTINGS_H);
+                self.hit_rgba = out;
+                self.hit_size = (w, h);
+                self.texture_dirty = false;
+                return;
+            }
+
             // Logical size for hit-mapping; physical pixels in hit_rgba.
             self.sprite_logical = (SETTINGS_W, SETTINGS_H);
-            self.hit_rgba = composed;
-            self.hit_size = (w, h);
+            self.hit_rgba = settings_rgba;
+            self.hit_size = (sw, sh);
             self.texture_dirty = false;
             return;
         }
@@ -550,7 +658,9 @@ impl App {
         // Overlays: present at composed device-pixel size (1:1). Do not wait for
         // winit's async resize — that empty intermediate frame is the pet "flash".
         let (win_w, win_h, present, screen_pos) = if overlay && !mirror_x {
-            let pos = if self.menu_ui_active {
+            let pos = if self.settings_ui_active && self.settings_transition.is_some() {
+                self.settings_present_pos
+            } else if self.menu_ui_active {
                 self.menu_present_pos
             } else {
                 None
@@ -872,7 +982,7 @@ impl App {
 
     /// Mouse wheel: scroll shortcut list when dock is open (many apps).
     fn scroll_menu_list(&mut self, lines: i32) {
-        if !self.menu_ui_active || lines == 0 {
+        if !self.menu_ui_active || lines == 0 || self.settings_transition.is_some() {
             return;
         }
         let total = self
@@ -898,10 +1008,92 @@ impl App {
         self.enter_settings_ui_highlight(None);
     }
 
+    /// Settings opened from a launcher button: grow from the clicked anchor to a
+    /// panel clamped beside the launcher, crossfading the card out along the way.
+    fn begin_settings_from_launcher(
+        &mut self,
+        anchor: (i32, i32),
+        highlight_row: Option<usize>,
+        now: Instant,
+    ) {
+        if self.reminder_ui_active || !self.menu_ui_active {
+            return;
+        }
+        let Some(pet) = self.pet.as_ref() else {
+            return;
+        };
+        if !pet.is_menu_open() {
+            return;
+        }
+        let Some(menu_pos) = self.menu_present_pos else {
+            self.enter_settings_ui_highlight(highlight_row);
+            return;
+        };
+        let Some(layout) = self.menu_layout.clone() else {
+            self.enter_settings_ui_highlight(highlight_row);
+            return;
+        };
+        let dpr = snap_dpr(self.scale_factor);
+        let menu_w = logical_to_physical(layout.window_w, dpr);
+        let menu_h = logical_to_physical(layout.window_h, dpr);
+        let menu_rect = platform::Rect {
+            x: menu_pos.0,
+            y: menu_pos.1,
+            width: menu_w,
+            height: menu_h,
+        };
+        let work = platform::work_area_from_point(
+            menu_rect.x + menu_rect.width / 2,
+            menu_rect.y + menu_rect.height / 2,
+        )
+        .map(|m| m.work_area)
+        .ok()
+        .or_else(|| {
+            self.window
+                .as_ref()
+                .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
+        })
+        .or_else(|| platform::primary_work_area().ok())
+        .unwrap_or(platform::Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        });
+        let settings_w = logical_to_physical(SETTINGS_W, dpr);
+        let settings_h = logical_to_physical(SETTINGS_H, dpr);
+        let final_rect =
+            place_settings_near_point(anchor, settings_w, settings_h, work, DEFAULT_MARGIN);
+
+        self.settings_highlight_row = highlight_row;
+        self.settings_ui_active = true;
+        self.settings_transition = Some(SettingsTransition {
+            anchor,
+            final_rect,
+            menu_rect,
+            started: now,
+            duration: Duration::from_millis(340),
+            t: 0.0,
+        });
+        self.settings_present_pos = None;
+        // Keep winit at the launcher geometry during the transition: atomic
+        // layered present drives the moving union window each frame.
+        self.texture_dirty = true;
+        self.redraw();
+        info!(
+            anchor = ?anchor,
+            final_rect = ?final_rect,
+            "settings transition started from launcher"
+        );
+    }
+
+    /// Settings opened without a launcher anchor (tray): centered, no transition.
     fn enter_settings_ui_highlight(&mut self, highlight_row: Option<usize>) {
         if self.reminder_ui_active {
             return;
         }
+        self.settings_transition = None;
+        self.settings_present_pos = None;
         // Close menu into settings without losing origin.
         if self.menu_ui_active {
             if let Some(pet) = self.pet.as_mut() {
@@ -935,8 +1127,77 @@ impl App {
     fn exit_settings_ui(&mut self) {
         self.settings_ui_active = false;
         self.settings_highlight_row = None;
+        self.settings_transition = None;
+        self.settings_present_pos = None;
         self.restore_overlay_origin_window();
         info!("settings UI exited");
+    }
+
+    /// Advance the launcher→settings transition; returns `true` when finished.
+    fn tick_settings_transition(&mut self, now: Instant) -> bool {
+        let Some(tr) = self.settings_transition else {
+            return false;
+        };
+        let t = ((now - tr.started).as_secs_f32() / tr.duration.as_secs_f32()).clamp(0.0, 1.0);
+        if t >= 1.0 {
+            self.finish_settings_transition(now);
+            return true;
+        }
+        self.settings_transition = Some(SettingsTransition { t, ..tr });
+        self.texture_dirty = true;
+        false
+    }
+
+    /// After the grow/slide finishes, snap winit geometry to the final rect and
+    /// resume ordinary settings hit-testing.
+    fn finish_settings_transition(&mut self, now: Instant) {
+        let Some(tr) = self.settings_transition else {
+            return;
+        };
+        self.settings_transition = None;
+        self.settings_present_pos = None;
+        if let Some(pet) = self.pet.as_mut() {
+            if pet.is_menu_open() {
+                pet.close_menu(now);
+            }
+        }
+        self.menu_ui_active = false;
+        self.menu_layout = None;
+        self.menu_hover = None;
+        self.menu_press = None;
+        self.menu_hover_t = 0.0;
+        self.menu_press_t = 0.0;
+        self.menu_present_pos = None;
+        self.menu_list_scroll = 0;
+        self.resize_pet_window(SETTINGS_W, SETTINGS_H);
+        if let Some(w) = &self.window {
+            w.set_outer_position(PhysicalPosition::new(tr.final_rect.x, tr.final_rect.y));
+            let _ = platform::set_click_through(w.as_ref(), false);
+            self.click_through = false;
+        }
+        self.texture_dirty = true;
+        self.redraw();
+        info!(
+            final = ?(tr.final_rect.x, tr.final_rect.y, tr.final_rect.width, tr.final_rect.height),
+            "settings transition settled"
+        );
+    }
+
+    /// Screen position (physical px) of the launcher item that opened settings.
+    fn menu_anchor_screen_for(&self, item_idx: Option<usize>) -> Option<(i32, i32)> {
+        let layout = self.menu_layout.as_ref()?;
+        let pos = self.menu_present_pos?;
+        let item = item_idx.and_then(|i| layout.items.get(i)).or_else(|| {
+            layout
+                .items
+                .iter()
+                .find(|it| matches!(it.entry, MenuEntry::Manage))
+        })?;
+        let dpr = snap_dpr(self.scale_factor);
+        Some((
+            pos.0 + (item.cx * dpr as f32).round() as i32,
+            pos.1 + (item.cy * dpr as f32).round() as i32,
+        ))
     }
 
     /// Map client cursor to menu layout logical coords.
@@ -955,6 +1216,9 @@ impl App {
     }
 
     fn update_menu_hover(&mut self) {
+        if self.settings_transition.is_some() {
+            return;
+        }
         if !self
             .pet
             .as_ref()
@@ -1046,13 +1310,17 @@ impl App {
         }
     }
 
-    fn handle_menu_entry(&mut self, entry: MenuEntry, now: Instant) {
+    fn handle_menu_entry(&mut self, entry: MenuEntry, item_idx: Option<usize>, now: Instant) {
         match entry {
             MenuEntry::AddShortcut => {
                 self.begin_pick_executable();
             }
             MenuEntry::Manage => {
-                self.enter_settings_ui();
+                let anchor = self.menu_anchor_screen_for(item_idx);
+                match anchor {
+                    Some(a) => self.begin_settings_from_launcher(a, None, now),
+                    None => self.enter_settings_ui(),
+                }
             }
             MenuEntry::PauseReminder => {
                 if let Some(s) = self.scheduler.as_mut() {
@@ -1073,7 +1341,11 @@ impl App {
                         .list_sorted()
                         .iter()
                         .position(|s| s.id == id);
-                    self.enter_settings_ui_highlight(row);
+                    let anchor = self.menu_anchor_screen_for(item_idx);
+                    match anchor {
+                        Some(a) => self.begin_settings_from_launcher(a, row, now),
+                        None => self.enter_settings_ui_highlight(row),
+                    }
                     return;
                 }
                 if let Some(item) = self.shortcuts.get(id).cloned() {
@@ -1459,7 +1731,8 @@ impl App {
             return Duration::from_millis(200);
         }
         // Menu open/close + hover microinteractions need ~60fps for silk motion.
-        if self.menu_ui_active {
+        // Launcher→settings handoff is the same class of motion.
+        if self.menu_ui_active || self.settings_transition.is_some() {
             return Duration::from_millis(16);
         }
         if self.settings_ui_active
@@ -1609,7 +1882,13 @@ impl ApplicationHandler<UserEvent> for App {
                         pet.begin_drag(now);
                     }
                     if self.menu_ui_active || self.settings_ui_active {
-                        // Don't expand while dragging.
+                        self.settings_ui_active = false;
+                        self.settings_transition = None;
+                        self.settings_present_pos = None;
+                        self.settings_highlight_row = None;
+                        self.menu_present_pos = None;
+                        self.menu_list_scroll = 0;
+                        // Keep overlay_origin for restore after drag end.
                     }
                     if self.reminder_ui_active {
                         let pos = self
@@ -1621,6 +1900,9 @@ impl ApplicationHandler<UserEvent> for App {
                         self.exit_reminder_ui_to_pet_size(pos);
                     } else if self.settings_ui_active {
                         self.settings_ui_active = false;
+                        self.settings_transition = None;
+                        self.settings_present_pos = None;
+                        self.settings_highlight_row = None;
                         let s = self.pet_size();
                         self.resize_pet_window(s, s);
                     } else if self.overlay_origin.is_some() && !self.menu_ui_active {
@@ -1646,8 +1928,8 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // --- Press: settings / menu / food / press-pending ---
                 if (button, state) == (WinitMouseButton::Left, ElementState::Pressed) {
-                    // Settings hits
-                    if self.settings_ui_active {
+                    // Settings hits (only after the open transition settles).
+                    if self.settings_ui_active && self.settings_transition.is_none() {
                         let (cw, ch) = self
                             .window
                             .as_ref()
@@ -1670,6 +1952,10 @@ impl ApplicationHandler<UserEvent> for App {
 
                     // Menu hits (map client → layout logical); ignore while closing
                     if self.menu_ui_active {
+                        // Settings handoff is animating; don't let the same press act twice.
+                        if self.settings_ui_active && self.settings_transition.is_some() {
+                            return;
+                        }
                         let interactive = self
                             .pet
                             .as_ref()
@@ -1684,7 +1970,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.menu_press = Some(idx);
                                     self.texture_dirty = true;
                                     if let Some(entry) = layout.items.get(idx) {
-                                        self.handle_menu_entry(entry.entry.clone(), now);
+                                        self.handle_menu_entry(entry.entry.clone(), Some(idx), now);
                                     }
                                     self.menu_press = None;
                                     if let Some(w) = &self.window {
@@ -1922,6 +2208,18 @@ impl ApplicationHandler<UserEvent> for App {
                 || self.texture_dirty;
             // Present menu frames immediately in this tick (skip extra RedrawRequested hop).
             let mut present_now = false;
+
+            // Launcher → settings handoff animation (grow + card crossfade).
+            if self.settings_ui_active && self.settings_transition.is_some() {
+                if self.tick_settings_transition(now) {
+                    need_redraw = true;
+                    present_now = true;
+                } else {
+                    self.texture_dirty = true;
+                    need_redraw = true;
+                    present_now = true;
+                }
+            }
 
             // Menu open/close animation (L3) + Appica hover/press blends
             if let Some(pet) = self.pet.as_mut() {
@@ -2320,6 +2618,52 @@ fn scale_rgba_centered(
     out
 }
 
+/// Multiply alpha on a tightly-packed RGBA8 buffer (straight-alpha fade).
+fn fade_rgba_alpha(rgba: &mut [u8], alpha: f32) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    for c in rgba.chunks_exact_mut(4) {
+        c[3] = (c[3] as f32 * alpha).round() as u8;
+    }
+}
+
+/// Scale an RGBA buffer around its anchor point, with optional global fade.
+///
+/// Used by the settings open transition: the panel bitmap is scaled by `scale`
+/// while `fade` is applied to alpha, so it grows outward from the clicked
+/// launcher button without an oversized intermediate buffer.
+fn scale_rgba_around_anchor(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    scale: f32,
+    fade: f32,
+) -> (Vec<u8>, u32, u32) {
+    let scale = scale.clamp(0.05, 3.0) as f64;
+    let dw = ((sw as f64) * scale).round().max(1.0) as u32;
+    let dh = ((sh as f64) * scale).round().max(1.0) as u32;
+    let mut out = vec![0u8; (dw * dh * 4) as usize];
+    if sw == 0 || sh == 0 || src.len() < (sw * sh * 4) as usize {
+        return (out, dw, dh);
+    }
+    let scale_x = sw as f64 / dw as f64;
+    let scale_y = sh as f64 / dh as f64;
+    let alpha = fade.clamp(0.0, 1.0);
+    for dy in 0..dh {
+        for dx in 0..dw {
+            // Sample back through the same center-relative scaling.
+            let sx = (dx as f64 + 0.5) * scale_x - 0.5;
+            let sy = (dy as f64 + 0.5) * scale_y - 0.5;
+            let mut c = sample_rgba_bilinear(src, sw, sh, sx, sy);
+            if alpha < 1.0 {
+                c[3] = (c[3] as f32 * alpha).round() as u8;
+            }
+            let i = ((dy * dw + dx) * 4) as usize;
+            out[i..i + 4].copy_from_slice(&c);
+        }
+    }
+    (out, dw, dh)
+}
+
 /// Bilinear sample of tightly-packed RGBA8. Transparent outside bounds.
 fn sample_rgba_bilinear(src: &[u8], w: u32, h: u32, x: f64, y: f64) -> [u8; 4] {
     if w == 0 || h == 0 {
@@ -2419,4 +2763,36 @@ fn dirs_log_dir() -> Result<PathBuf, AppError> {
     let local = std::env::var_os("LOCALAPPDATA")
         .ok_or_else(|| AppError::Platform("LOCALAPPDATA is not set".into()))?;
     Ok(PathBuf::from(local).join("PawDesk").join("logs"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fade_rgba_scales_only_alpha() {
+        let mut px = vec![10u8, 20, 30, 255, 40, 50, 60, 128];
+        fade_rgba_alpha(&mut px, 0.5);
+        assert_eq!(&px[0..3], &[10, 20, 30]);
+        assert_eq!(px[3], 128);
+        assert_eq!(&px[4..7], &[40, 50, 60]);
+        assert_eq!(px[7], 64);
+    }
+
+    #[test]
+    fn scale_around_anchor_matches_dimensions_and_fade() {
+        let src = vec![
+            0u8, 0, 0, 255,
+            255, 0, 0, 255,
+            0, 255, 0, 255,
+            0, 0, 255, 255,
+        ];
+        let (out, dw, dh) = scale_rgba_around_anchor(&src, 2, 2, 0.5, 0.5);
+        assert_eq!(dw, 1);
+        assert_eq!(dh, 1);
+        assert!(out[3] > 0 && out[3] <= 128);
+        let (full, dw2, dh2) = scale_rgba_around_anchor(&src, 2, 2, 1.0, 1.0);
+        assert_eq!((dw2, dh2), (2, 2));
+        assert_eq!(full, src);
+    }
 }
