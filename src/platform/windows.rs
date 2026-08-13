@@ -1,17 +1,20 @@
 //! Windows-specific platform helpers (tech §7.1, PLAT-01/02).
 
 use tracing::{debug, info, warn};
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, GetWindowLongW, SetClassLongPtrW, SetWindowLongW, SetWindowPos,
-    UpdateLayeredWindow, GCLP_HBRBACKGROUND, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
+    CallNextHookEx, GetCursorPos, GetSystemMetrics, GetWindowLongW, SetClassLongPtrW,
+    SetWindowsHookExW, SetWindowLongW, SetWindowPos, UnhookWindowsHookEx, UpdateLayeredWindow,
+    GCLP_HBRBACKGROUND, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    ULW_ALPHA, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    ULW_ALPHA, WH_MOUSE_LL, WM_LBUTTONDOWN, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -393,6 +396,197 @@ pub const PET_HIT_RADIUS_PX: f64 = 48.0;
 
 /// Alpha threshold for sprite hit-testing (0–255).
 pub const PET_HIT_ALPHA_THRESHOLD: u8 = 24;
+
+// --- Launcher outside-click guard -------------------------------------------
+//
+// While the launcher (快捷启动坞) is open, the pet window is a layered window
+// that only receives input over its own rect. A low-level mouse hook watches
+// for left clicks landing outside that rect (desktop / other apps) and flags
+// the app to close the dock. The hook is purely observant: it never consumes
+// the click, so the target window below still receives it normally.
+//
+// The hook must NOT run on the winit thread: WH_MOUSE_LL funnels *every*
+// system mouse packet (moves included) through the installing thread via a
+// synchronous message, so a busy render thread stalls input system-wide.
+// It runs on a dedicated idle thread with its own message pump instead; the
+// winit thread only polls an atomic flag once per frame.
+
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
+};
+
+/// Launcher window rect (physical screen coords), shared with the hook proc.
+/// `i32::MIN` sentinel = not installed.
+static LAUNCHER_RECT: [AtomicI32; 4] = [
+    AtomicI32::new(i32::MIN),
+    AtomicI32::new(i32::MIN),
+    AtomicI32::new(i32::MIN),
+    AtomicI32::new(i32::MIN),
+];
+/// Set by the hook proc when a left click landed outside the rect.
+static OUTSIDE_CLICKED: AtomicBool = AtomicBool::new(false);
+
+/// Observational low-level mouse hook active while the launcher is open.
+/// Owns the dedicated hook thread; the winit thread never pumps hook messages.
+pub struct OutsideClickGuard {
+    thread_id: u32,
+    join: Option<JoinHandle<()>>,
+}
+
+impl OutsideClickGuard {
+    /// Spawn a thread that installs the WH_MOUSE_LL hook and pumps messages,
+    /// so input delivery never waits on the render thread. `rect` is the
+    /// launcher window rect in physical pixels.
+    pub fn install(rect: Rect) -> Option<Self> {
+        OUTSIDE_CLICKED.store(false, Ordering::Relaxed);
+        set_launcher_rect(&rect);
+
+        let quitting = Arc::new(AtomicBool::new(false));
+        let thread_quitting = Arc::clone(&quitting);
+        let (tx, rx) = mpsc::channel::<(u32, bool)>();
+        let join = thread::Builder::new()
+            .name("launcher-outside-hook".into())
+            .spawn(move || {
+                let tid = unsafe { GetCurrentThreadId() };
+                let hook = unsafe {
+                    let hmod = GetModuleHandleW(PCWSTR::null())
+                        .ok()
+                        .map(|h| HINSTANCE(h.0));
+                    SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmod, 0)
+                };
+                let Ok(hook) = hook else {
+                    warn!("WH_MOUSE_LL install failed; outside-click close disabled");
+                    let _ = tx.send((tid, false));
+                    return;
+                };
+                let _ = tx.send((tid, true));
+                debug!("launcher outside-click hook installed (hook thread tid={tid})");
+
+                // Pump: low-level hook procs are delivered while this thread
+                // retrieves messages. The thread is idle otherwise.
+                let mut msg = MSG::default();
+                loop {
+                    if thread_quitting.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+                    if r.0 <= 0 {
+                        break; // WM_QUIT or error
+                    }
+                    unsafe {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+                unsafe {
+                    // Unhook from the installing thread (same thread).
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+            })
+            .ok()?;
+
+        let (tid, installed) = rx.recv().ok()?;
+        if !installed {
+            let _ = join.join();
+            return None;
+        }
+        Some(Self {
+            thread_id: tid,
+            join: Some(join),
+        })
+    }
+
+    /// Keep the rect in sync (window may move while open) — cheap atomic writes.
+    pub fn update_rect(&self, rect: Rect) {
+        set_launcher_rect(&rect);
+    }
+
+    /// Whether an outside left-click is pending; clears the flag.
+    pub fn take_outside_click() -> bool {
+        OUTSIDE_CLICKED.swap(false, Ordering::Relaxed)
+    }
+}
+
+impl Drop for OutsideClickGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+        LAUNCHER_RECT[0].store(i32::MIN, Ordering::Relaxed);
+        OUTSIDE_CLICKED.store(false, Ordering::Relaxed);
+        debug!("launcher outside-click hook removed");
+    }
+}
+
+fn set_launcher_rect(rect: &Rect) {
+    LAUNCHER_RECT[0].store(rect.x, Ordering::Relaxed);
+    LAUNCHER_RECT[1].store(rect.y, Ordering::Relaxed);
+    LAUNCHER_RECT[2].store(
+        rect.x.saturating_add(rect.width),
+        Ordering::Relaxed,
+    );
+    LAUNCHER_RECT[3].store(
+        rect.y.saturating_add(rect.height),
+        Ordering::Relaxed,
+    );
+}
+
+unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN && !cursor_inside_launcher() {
+        OUTSIDE_CLICKED.store(true, Ordering::Relaxed);
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Cursor position vs the launcher rect. Unknown cursor → treat as inside so a
+/// failed query never spuriously closes the dock.
+fn cursor_inside_launcher() -> bool {
+    let Ok((x, y)) = cursor_pos() else {
+        return true;
+    };
+    let rx = LAUNCHER_RECT[0].load(Ordering::Relaxed);
+    let ry = LAUNCHER_RECT[1].load(Ordering::Relaxed);
+    let rr = LAUNCHER_RECT[2].load(Ordering::Relaxed);
+    let rb = LAUNCHER_RECT[3].load(Ordering::Relaxed);
+    if rr <= rx || rb <= ry {
+        return true; // rect not installed yet — do nothing
+    }
+    x >= rx && y >= ry && x < rr && y < rb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke test: the hook thread installs WH_MOUSE_LL and the guard drops
+    /// cleanly (unhook + join) without hanging. No mouse input is needed.
+    #[test]
+    fn outside_click_guard_installs_and_drops() {
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            width: 200,
+            height: 150,
+        };
+        let guard = OutsideClickGuard::install(rect);
+        assert!(guard.is_some(), "WH_MOUSE_LL hook should install on Windows");
+        let guard = guard.expect("hook installed");
+        guard.update_rect(rect);
+        assert!(!OutsideClickGuard::take_outside_click());
+        drop(guard);
+        // Drop reset the sentinel rect.
+        assert_eq!(LAUNCHER_RECT[0].load(Ordering::Relaxed), i32::MIN);
+    }
+}
 
 /// Toggle mouse click-through (WS_EX_TRANSPARENT). When enabled, clicks pass to desktop.
 pub fn set_click_through(window: &impl HasWindowHandle, enabled: bool) -> Result<(), AppError> {

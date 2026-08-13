@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PawDesk · 奶牛猫 P0 形象概念</title>
+  <style>
+    :root {
+      --ink: #17202b;
+      --muted: #64707d;
+      --line: #d8dde2;
+      --soft: #f3f5f6;
+      --paper: #fbfcfc;
+      --pink: #e981aa;
+      --teal: #62aeb1;
+      --green: #c6cd58;
+      --black-fur: #171b21;
+      --black-light: #394550;
+      --white-fur: #f7f6f2;
+      --white-shadow: #cdd6d8;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: #e9edef; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+      background:
+        linear-gradient(rgba(255,255,255,.34) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.34) 1px, transparent 1px),
+        #e9edef;
+      background-size: 32px 32px;
+      letter-spacing: 0;
+    }
+
+    button { font: inherit; }
+    .page { width: min(1440px, 100%); margin: 0 auto; padding: 22px; }
+    .topbar {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 16px;
+    }
+    .eyebrow {
+      margin: 0 0 5px;
+      color: var(--teal);
+      font-size: 11px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: 24px; line-height: 1.15; font-weight: 720; }
+    .subtitle { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
+    .version { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+    .workbench {
+      display: grid;
+      grid-template-columns: minmax(610px, 1.4fr) minmax(340px, .75fr);
+      min-height: 690px;
+      overflow: hidden;
+      border: 1px solid #cbd2d7;
+      background: var(--paper);
+      box-shadow: 0 18px 46px rgba(30, 41, 59, .12);
+    }
+
+    .stage-column { min-width: 0; border-right: 1px solid var(--line); }
+    .toolbar {
+      min-height: 58px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.9);
+    }
+    .tool-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .tool-label { margin-right: 4px; color: var(--muted); font-size: 11px; font-weight: 650; }
+    .segmented {
+      display: inline-flex;
+      padding: 3px;
+      border: 1px solid #d5dadd;
+      background: #edf0f1;
+    }
+    .segmented button, .icon-btn {
+      min-height: 30px;
+      border: 0;
+      color: #5c6670;
+      background: transparent;
+      cursor: pointer;
+    }
+    .segmented button { padding: 0 11px; font-size: 12px; }
+    .segmented button[aria-pressed="true"] { color: #fff; background: #263442; }
+    .icon-btn {
+      width: 32px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #d4d9dc;
+      background: #fff;
+    }
+    .icon-btn:hover, .segmented button:hover { filter: brightness(.97); }
+    .icon-btn svg { width: 15px; height: 15px; fill: currentColor; }
+
+    .stage {
+      --stage-floor: rgba(255,255,255,.025);
+      position: relative;
+      min-height: 565px;
+      overflow: hidden;
+      isolation: isolate;
+      background:
+        linear-gradient(var(--stage-floor), var(--stage-floor)),
+        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px),
+        #29333c;
+      background-size: auto, 36px 36px, 36px 36px, auto;
+      transition: background-color .2s ease;
+    }
+    .stage[data-bg="light"] {
+      --stage-floor: rgba(255,255,255,.78);
+      background-color: #e7e8e5;
+      background-image:
+        linear-gradient(var(--stage-floor), var(--stage-floor)),
+        linear-gradient(rgba(24,32,43,.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(24,32,43,.055) 1px, transparent 1px);
+    }
+    .stage[data-bg="color"] {
+      --stage-floor: rgba(20,31,40,.08);
+      background:
+        linear-gradient(rgba(23,42,50,.16), rgba(23,42,50,.16)),
+        linear-gradient(rgba(255,255,255,.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.055) 1px, transparent 1px),
+        linear-gradient(135deg, #315761 0 48%, #8c6676 48% 100%);
+      background-size: auto, 36px 36px, 36px 36px, auto;
+    }
+    .stage::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 78px;
+      z-index: -1;
+      border-top: 1px solid rgba(255,255,255,.14);
+      background: rgba(17,24,31,.16);
+    }
+    .stage[data-bg="light"]::after { background: rgba(80,88,92,.08); border-color: rgba(24,32,43,.12); }
+
+    .stage-note {
+      position: absolute;
+      left: 18px; top: 17px;
+      color: rgba(255,255,255,.73);
+      font-size: 11px;
+      line-height: 1.55;
+      pointer-events: none;
+    }
+    .stage[data-bg="light"] .stage-note { color: rgba(23,32,43,.65); }
+    .stage-note strong { color: inherit; font-size: 12px; }
+
+    .cat-wrap {
+      position: absolute;
+      left: 50%;
+      bottom: 42px;
+      width: 360px;
+      height: 450px;
+      transform: translateX(-50%);
+      filter: drop-shadow(0 23px 18px rgba(7,13,18,.23));
+    }
+    .cat-wrap::after {
+      content: "";
+      position: absolute;
+      left: 77px; right: 54px; bottom: 2px;
+      height: 18px;
+      border-radius: 50%;
+      z-index: -1;
+      background: rgba(3,8,12,.23);
+      filter: blur(5px);
+    }
+    .cat-svg { width: 100%; height: 100%; overflow: visible; }
+
+    .cat-shadow { fill: rgba(8,12,15,.2); }
+    .black-fur { fill: url(#blackFur); stroke: #0f1318; stroke-width: 1.1; }
+    .white-fur { fill: url(#whiteFur); stroke: #aeb9bc; stroke-width: .75; }
+    .inner-ear { fill: url(#earFill); opacity: .92; }
+    .eye-white { fill: #e4e5bc; stroke: #0a0d10; stroke-width: 3; }
+    .iris { fill: url(#irisFill); }
+    .pupil { fill: #090b0c; }
+    .eye-glint { fill: rgba(255,255,255,.88); }
+    .eyelid { fill: #171b21; transform-box: fill-box; transform-origin: 50% 0; }
+    .nose { fill: #d9949d; stroke: #7d555b; stroke-width: .55; }
+    .mouth { fill: none; stroke: #67464b; stroke-width: 1.25; stroke-linecap: round; }
+    .whisker { fill: none; stroke: rgba(238,242,238,.82); stroke-width: 1.05; stroke-linecap: round; }
+    .collar { fill: none; stroke: #5a999d; stroke-width: 8; stroke-linecap: round; }
+    .tag { fill: #d6e5e2; stroke: #52888c; stroke-width: 1; }
+
+    .head-unit { transform-box: fill-box; transform-origin: 50% 82%; transform: translate(17px, 25px) scale(.91); }
+    .chest-unit, .tag-unit { transform-box: fill-box; transform-origin: 50% 100%; }
+    .ear-left, .ear-right { transform-box: fill-box; transform-origin: 50% 92%; }
+    .tail-tip { transform-box: fill-box; transform-origin: 10% 50%; }
+    .eyes-look { transform-box: fill-box; transform-origin: 50% 50%; }
+
+    .cat-wrap.is-running .chest-unit { animation: breathe 8s ease-in-out infinite; }
+    .cat-wrap.is-running .tag-unit { animation: tag-lag 8s ease-in-out infinite; }
+    .cat-wrap.is-running .ear-left { animation: ear-left 8s ease-in-out infinite; }
+    .cat-wrap.is-running .ear-right { animation: ear-right 8s ease-in-out infinite; }
+    .cat-wrap.is-running .tail-tip { animation: tail-tip 8s ease-in-out infinite; }
+    .cat-wrap.is-running .eyelid { animation: blink 8s linear infinite; }
+
+    @keyframes breathe {
+      0%, 100% { transform: translateY(0) scaleY(1); }
+      21% { transform: translateY(-1.5px) scaleY(1.013); }
+      46% { transform: translateY(.8px) scaleY(.994); }
+      67% { transform: translateY(-1px) scaleY(1.009); }
+    }
+    @keyframes tag-lag {
+      0%, 8%, 100% { transform: rotate(0deg) translateY(0); }
+      28% { transform: rotate(1.8deg) translateY(-.8px); }
+      53% { transform: rotate(-1.1deg) translateY(.5px); }
+      75% { transform: rotate(.7deg) translateY(-.4px); }
+    }
+    @keyframes ear-left {
+      0%, 17%, 25%, 71%, 100% { transform: rotate(0deg); }
+      20% { transform: rotate(-4deg); }
+      22% { transform: rotate(1.5deg); }
+      77% { transform: rotate(-2deg); }
+    }
+    @keyframes ear-right {
+      0%, 44%, 52%, 88%, 100% { transform: rotate(0deg); }
+      47% { transform: rotate(4deg); }
+      49% { transform: rotate(-1deg); }
+      92% { transform: rotate(2deg); }
+    }
+    @keyframes tail-tip {
+      0%, 54%, 100% { transform: rotate(0deg); }
+      62% { transform: rotate(7deg); }
+      70% { transform: rotate(-3deg); }
+      78% { transform: rotate(2deg); }
+    }
+    @keyframes blink {
+      0%, 12%, 12.8%, 55%, 55.8%, 57%, 57.8%, 89%, 89.9%, 100% { transform: scaleY(0); }
+      12.35%, 55.4%, 57.4%, 89.45% { transform: scaleY(1.04); }
+    }
+
+    .guides { display: none; pointer-events: none; }
+    .show-guides .guides { display: block; }
+    .guide-line { stroke: #f0a64a; stroke-width: 1; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+    .guide-dot { fill: #f0a64a; }
+    .guide-text { fill: #f0a64a; font-size: 9px; font-family: "Segoe UI", sans-serif; }
+
+    .compare-strip {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 120px;
+      border-top: 1px solid var(--line);
+      background: #fff;
+    }
+    .compare-item {
+      display: grid;
+      grid-template-columns: 106px 1fr;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      padding: 11px 14px;
+    }
+    .compare-item + .compare-item { border-left: 1px solid var(--line); }
+    .compare-image {
+      width: 94px; height: 94px;
+      display: grid; place-items: center;
+      overflow: hidden;
+      background: #252b31;
+    }
+    .compare-image img { width: 94px; height: 94px; object-fit: contain; }
+    .compare-image .mini-cat { width: 82px; height: 92px; }
+    .compare-copy strong { display: block; margin-bottom: 5px; font-size: 12px; }
+    .compare-copy p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+
+    .spec-panel { min-width: 0; display: flex; flex-direction: column; background: #fbfcfc; }
+    .spec-head { padding: 17px 18px 13px; border-bottom: 1px solid var(--line); }
+    .spec-head h2 { margin: 0; font-size: 15px; }
+    .spec-head p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .spec-scroll { padding: 14px 18px 18px; overflow: auto; }
+
+    .section { padding: 0 0 16px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+    .section:last-child { border-bottom: 0; margin-bottom: 0; }
+    .section h3 { margin: 0 0 10px; font-size: 12px; }
+    .identity-list { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .identity-item {
+      min-height: 56px;
+      padding: 8px;
+      border-left: 3px solid var(--teal);
+      background: var(--soft);
+    }
+    .identity-item strong { display: block; font-size: 10px; }
+    .identity-item span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+
+    .ratio-row { display: grid; grid-template-columns: 82px 1fr 42px; align-items: center; gap: 9px; margin: 9px 0; }
+    .ratio-row span { font-size: 10px; color: var(--muted); }
+    .ratio-row b { color: var(--ink); font-size: 10px; text-align: right; }
+    .meter { height: 5px; background: #e1e5e7; }
+    .meter i { display: block; height: 100%; background: var(--teal); }
+
+    .size-previews { display: flex; align-items: flex-end; justify-content: space-around; gap: 10px; min-height: 150px; padding: 14px 7px 6px; background: #edf0f1; }
+    .size-sample { display: grid; justify-items: center; gap: 7px; color: var(--muted); font-size: 10px; }
+    .sample-cat { display: block; }
+    .sample-64 { width: 51px; height: 64px; }
+    .sample-77 { width: 61px; height: 77px; }
+    .sample-128 { width: 102px; height: 128px; }
+
+    .check-list { display: grid; gap: 8px; }
+    .check-item { display: grid; grid-template-columns: 17px 1fr; gap: 7px; align-items: start; font-size: 10px; line-height: 1.5; color: var(--muted); }
+    .check { width: 15px; height: 15px; display: grid; place-items: center; color: white; background: #438c78; font-size: 9px; }
+    .pending { background: #9a7541; }
+
+    .footnote { padding: 12px 18px; margin-top: auto; border-top: 1px solid var(--line); color: var(--muted); background: #f3f5f6; font-size: 10px; line-height: 1.55; }
+
+    @media (max-width: 960px) {
+      .page { padding: 14px; }
+      .workbench { grid-template-columns: 1fr; }
+      .stage-column { border-right: 0; border-bottom: 1px solid var(--line); }
+      .stage { min-height: 520px; }
+      .spec-scroll { overflow: visible; }
+      .spec-panel { display: block; }
+    }
+    @media (max-width: 620px) {
+      .topbar { align-items: flex-start; flex-direction: column; gap: 8px; }
+      h1 { font-size: 20px; }
+      .toolbar { align-items: flex-start; flex-direction: column; }
+      .stage { min-height: 490px; }
+      .cat-wrap { width: 310px; height: 388px; bottom: 50px; }
+      .compare-strip { grid-template-columns: 1fr; }
+      .compare-item + .compare-item { border-left: 0; border-top: 1px solid var(--line); }
+      .identity-list { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">M7 · P0 character direction</p>
+        <h1>PawDesk 奶牛猫 · 角色母版与基础生命感</h1>
+        <p class="subtitle">真实猫结构与运动规律 70% · 轻度幼态化 30% · 桌面默认显示约 77px</p>
+      </div>
+      <div class="version">概念稿 01 · HTML 动态预览</div>
+    </header>
+
+    <section class="workbench" aria-label="奶牛猫 P0 设计工作台">
+      <div class="stage-column">
+        <div class="toolbar">
+          <div class="tool-group">
+            <span class="tool-label">背景检查</span>
+            <div class="segmented" aria-label="预览背景">
+              <button type="button" data-bg="dark" aria-pressed="true">深色</button>
+              <button type="button" data-bg="light" aria-pressed="false">浅色</button>
+              <button type="button" data-bg="color" aria-pressed="false">彩色</button>
+            </div>
+          </div>
+          <div class="tool-group">
+            <button class="icon-btn" id="motionToggle" type="button" aria-pressed="true" title="暂停动画" aria-label="暂停动画">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path id="motionIcon" d="M7 5h4v14H7zm6 0h4v14h-4z" /></svg>
+            </button>
+            <button class="icon-btn" id="guideToggle" type="button" aria-pressed="false" title="显示结构辅助线" aria-label="显示结构辅助线">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h8V3h2v8h8v2h-8v8h-2v-8H3z" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="stage" id="stage" data-bg="dark">
+          <div class="stage-note"><strong>P0 默认坐姿</strong><br />移动鼠标：眼睛先行，头部延迟跟随<br />脚底锚点保持稳定</div>
+
+          <div class="cat-wrap is-running" id="catWrap">
+            <svg class="cat-svg" viewBox="0 0 360 450" role="img" aria-label="P0 半写实奶牛猫概念形象">
+              <defs>
+                <linearGradient id="blackFur" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#101419" />
+                  <stop offset=".55" stop-color="#1a2027" />
+                  <stop offset="1" stop-color="#34414c" />
+                </linearGradient>
+                <linearGradient id="whiteFur" x1="0" y1="0" x2=".8" y2="1">
+                  <stop offset="0" stop-color="#fffefa" />
+                  <stop offset=".65" stop-color="#edf0ed" />
+                  <stop offset="1" stop-color="#c4ced0" />
+                </linearGradient>
+                <linearGradient id="earFill" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#8a626b" />
+                  <stop offset="1" stop-color="#c49196" />
+                </linearGradient>
+                <radialGradient id="irisFill" cx="36%" cy="30%" r="70%">
+                  <stop offset="0" stop-color="#e3e87a" />
+                  <stop offset=".55" stop-color="#c7d052" />
+                  <stop offset="1" stop-color="#7d8b32" />
+                </radialGradient>
+                <filter id="softFur" x="-20%" y="-20%" width="140%" height="140%">
+                  <feGaussianBlur stdDeviation=".42" />
+                </filter>
+                <clipPath id="leftEyeClip"><path d="M119 132 C128 120 146 120 153 133 C149 150 129 155 118 141 Z" /></clipPath>
+                <clipPath id="rightEyeClip"><path d="M205 131 C214 119 233 121 239 135 C234 151 215 154 205 141 Z" /></clipPath>
+              </defs>
+
+              <ellipse class="cat-shadow" cx="189" cy="427" rx="111" ry="12" />
+
+              <g class="tail-unit">
+                <path class="black-fur" d="M247 342 C306 338 334 365 316 393 C301 416 264 414 242 397 C234 390 235 375 245 370 C261 362 287 378 289 390 C303 379 291 361 253 359 Z" />
+                <path class="tail-tip black-fur" d="M287 389 C304 382 315 387 316 395 C315 407 293 414 273 408 C285 405 293 399 287 389 Z" />
+              </g>
+
+              <g class="body-unit">
+                <path class="black-fur" d="M118 233 C92 261 83 325 93 373 C99 404 122 422 166 423 L254 421 C277 398 281 352 267 303 C256 264 228 238 208 228 Z" />
+                <path class="black-fur" d="M211 269 C246 277 271 316 269 361 C267 394 251 417 225 423 L193 423 C207 393 206 356 194 317 Z" />
+                <path class="white-fur chest-unit" d="M154 229 C154 250 141 267 137 292 C132 324 144 355 161 382 C171 398 187 405 201 393 C217 379 220 348 211 314 C204 286 197 260 204 231 C190 237 170 237 154 229 Z" />
+                <path fill="#b7c3c6" opacity=".35" d="M156 328 C169 341 195 342 211 328 C215 353 208 378 197 390 C185 402 171 393 162 376 C154 360 149 342 156 328 Z" />
+              </g>
+
+              <g class="rear-legs">
+                <path class="black-fur" d="M217 338 C244 342 257 371 249 407 C245 423 224 429 207 420 C196 414 196 400 202 386 Z" />
+                <path class="white-fur" d="M210 405 C222 399 244 402 251 413 C249 427 232 432 214 426 C204 423 200 413 210 405 Z" />
+              </g>
+
+              <g class="front-legs">
+                <path class="black-fur" d="M128 291 C116 324 115 379 122 411 C128 421 145 421 151 411 C154 375 155 328 150 291 Z" />
+                <path class="black-fur" d="M171 294 C163 332 164 383 170 415 C176 424 194 424 200 414 C204 373 202 330 195 294 Z" />
+                <path class="white-fur" d="M121 399 C129 394 145 395 151 405 L150 422 C142 430 125 428 119 420 Z" />
+                <path class="white-fur" d="M168 403 C177 397 193 399 200 409 L199 425 C190 432 173 430 167 422 Z" />
+                <path d="M132 416 L130 423 M142 416 L141 425 M180 418 L179 427 M190 417 L190 426" stroke="#a9b4b6" stroke-width="1" />
+              </g>
+
+              <g class="head-unit" id="headUnit">
+                <g class="ear-left">
+                  <path class="black-fur" d="M107 107 C92 75 95 39 109 20 C133 39 148 65 150 94 Z" />
+                  <path class="inner-ear" d="M109 85 C103 65 105 43 111 34 C126 50 134 67 136 84 Z" />
+                </g>
+                <g class="ear-right">
+                  <path class="black-fur" d="M207 91 C219 58 244 36 267 30 C268 61 256 89 237 108 Z" />
+                  <path class="inner-ear" d="M223 86 C233 63 248 48 258 44 C255 64 247 82 237 95 Z" />
+                </g>
+
+                <path class="black-fur" d="M107 94 C125 74 153 67 182 70 C219 69 248 88 253 124 C260 164 240 204 205 222 C176 237 136 224 113 199 C91 176 87 117 107 94 Z" />
+                <path fill="#3e4a54" opacity=".48" d="M112 101 C132 81 154 79 169 78 C145 94 134 111 130 135 C118 160 111 187 126 207 C98 185 93 130 112 101 Z" />
+
+                <path class="white-fur" d="M156 79 C176 75 197 78 209 91 C204 105 199 119 199 134 C198 154 213 165 212 187 C208 212 188 225 166 222 C139 219 117 204 110 181 C106 162 114 145 123 132 C136 116 147 97 156 79 Z" />
+                <path class="white-fur" d="M99 158 C111 140 129 132 148 137 C158 147 158 169 149 185 C136 202 111 203 99 186 C93 178 93 166 99 158 Z" />
+                <path class="white-fur" d="M178 141 C197 131 221 138 230 157 C237 174 226 194 208 200 C190 206 173 192 169 175 C166 161 169 149 178 141 Z" />
+
+                <g class="eyes-look" id="eyesLook">
+                  <path class="eye-white" d="M118 134 C126 117 147 117 155 132 C153 151 129 158 117 142 Z" />
+                  <ellipse class="iris" cx="137" cy="137" rx="11" ry="14" />
+                  <ellipse class="pupil" cx="137" cy="138" rx="3.1" ry="10" />
+                  <circle class="eye-glint" cx="133" cy="131" r="2.4" />
+                  <path class="eyelid" d="M116 132 C127 117 147 116 157 131 L155 141 C143 132 129 131 117 141 Z" clip-path="url(#leftEyeClip)" />
+
+                  <path class="eye-white" d="M204 133 C213 117 234 119 241 134 C237 153 214 157 203 142 Z" />
+                  <ellipse class="iris" cx="222" cy="138" rx="11" ry="14" />
+                  <ellipse class="pupil" cx="222" cy="139" rx="3.1" ry="10" />
+                  <circle class="eye-glint" cx="218" cy="132" r="2.4" />
+                  <path class="eyelid" d="M202 132 C213 117 233 117 243 133 L240 142 C229 132 216 132 204 141 Z" clip-path="url(#rightEyeClip)" />
+                </g>
+
+                <path class="nose" d="M171 170 C177 166 185 166 191 170 C190 177 185 180 181 180 C176 179 172 176 171 170 Z" />
+                <path class="mouth" d="M181 180 C180 186 175 188 171 190 M181 180 C182 186 187 188 191 190" />
+                <path class="mouth" d="M175 194 C179 197 185 197 189 194" opacity=".65" />
+
+                <path class="whisker" d="M151 177 C128 170 108 171 90 176 M151 185 C126 183 105 189 88 198 M211 177 C233 170 252 171 270 177 M210 186 C233 184 252 191 268 201" />
+                <path d="M154 84 C156 99 158 110 160 120 M205 88 C201 101 199 113 200 124" stroke="rgba(255,255,255,.22)" stroke-width="1.2" fill="none" />
+
+                <path class="collar" d="M135 216 C157 231 202 234 224 214" />
+                <g class="tag-unit">
+                  <circle class="tag" cx="181" cy="229" r="7" />
+                  <circle fill="#fff" opacity=".65" cx="179" cy="227" r="2" />
+                </g>
+              </g>
+
+              <g class="guides">
+                <line class="guide-line" x1="180" y1="18" x2="180" y2="430" />
+                <line class="guide-line" x1="68" y1="430" x2="302" y2="430" />
+                <line class="guide-line" x1="101" y1="225" x2="255" y2="225" />
+                <circle class="guide-dot" cx="180" cy="430" r="3" />
+                <text class="guide-text" x="188" y="425">anchor 180,430</text>
+                <text class="guide-text" x="260" y="221">head ≈ 32%</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="compare-strip">
+          <article class="compare-item">
+            <div class="compare-image"><img src="../../assets/pets/cow-cat/idle_blink/000.png" alt="当前奶牛猫坐姿" /></div>
+            <div class="compare-copy"><strong>Before · 当前精灵</strong><p>大圆眼与完全对称前爪偏玩偶；头颈、后腿和尾根结构不够清楚。</p></div>
+          </article>
+          <article class="compare-item">
+            <div class="compare-image"><svg class="mini-cat" viewBox="0 0 360 450" aria-label="P0 新坐姿缩略图"><use href="#catMini" /></svg></div>
+            <div class="compare-copy"><strong>After · P0 方向</strong><p>收窄头身比例，建立肩胸/臀腿体块；前爪错位，尾根与尾巴路径可读。</p></div>
+          </article>
+        </div>
+      </div>
+
+      <aside class="spec-panel">
+        <div class="spec-head"><h2>角色规格</h2><p>此页面用于确认形象与动作语言；正式资产仍需统一模型、逐帧修形与 alpha 验收。</p></div>
+        <div class="spec-scroll">
+          <section class="section">
+            <h3>不可漂移的身份锚点</h3>
+            <div class="identity-list">
+              <div class="identity-item"><strong>不对称面罩</strong><span>左侧黑斑下压，白鼻梁连续到口套。</span></div>
+              <div class="identity-item"><strong>黄绿色杏仁眼</strong><span>缩小眼球，保留竖瞳与清晰眼睑。</span></div>
+              <div class="identity-item"><strong>白胸与白手套</strong><span>胸口倒三角；四爪白毛高度固定。</span></div>
+              <div class="identity-item"><strong>黑尾与青色项圈</strong><span>尾根可见；细项圈与小吊坠只做辅助。</span></div>
+            </div>
+          </section>
+
+          <section class="section">
+            <h3>比例控制</h3>
+            <div class="ratio-row"><span>头部 / 总高</span><div class="meter"><i style="width:32%"></i></div><b>32%</b></div>
+            <div class="ratio-row"><span>真实结构</span><div class="meter"><i style="width:70%"></i></div><b>70%</b></div>
+            <div class="ratio-row"><span>轻度幼态</span><div class="meter"><i style="width:30%; background:var(--pink)"></i></div><b>30%</b></div>
+            <div class="ratio-row"><span>默认窗缩放</span><div class="meter"><i style="width:60%"></i></div><b>60%</b></div>
+          </section>
+
+          <section class="section">
+            <h3>实际桌面尺寸</h3>
+            <div class="size-previews">
+              <div class="size-sample"><svg class="sample-cat sample-64" viewBox="0 0 360 450"><use href="#catMini" /></svg><span>64px</span></div>
+              <div class="size-sample"><svg class="sample-cat sample-77" viewBox="0 0 360 450"><use href="#catMini" /></svg><span>77px · 默认</span></div>
+              <div class="size-sample"><svg class="sample-cat sample-128" viewBox="0 0 360 450"><use href="#catMini" /></svg><span>128px</span></div>
+            </div>
+          </section>
+
+          <section class="section">
+            <h3>P0 检查</h3>
+            <div class="check-list">
+              <div class="check-item"><span class="check">✓</span><span>默认正头位；歪头变成偶发好奇动作。</span></div>
+              <div class="check-item"><span class="check">✓</span><span>呼吸只影响胸腔，脚底和尾根不漂移。</span></div>
+              <div class="check-item"><span class="check">✓</span><span>眨眼、耳转、尾尖与吊坠错开时间。</span></div>
+              <div class="check-item"><span class="check">✓</span><span>眼睛先看目标，头部约 140ms 后跟随。</span></div>
+              <div class="check-item"><span class="check pending">!</span><span>正式 PNG 需再做毛发细化、逐帧身份锁定与三背景 alpha 清理。</span></div>
+            </div>
+          </section>
+        </div>
+        <div class="footnote">概念边界：SVG 用于快速评审比例、花纹与动作层级，不代表最终渲染风格。确认后应以统一 3D/2.5D 角色烘焙为 256×256 RGBA 帧序列。</div>
+      </aside>
+    </section>
+  </main>
+
+  <svg width="0" height="0" style="position:absolute; overflow:hidden" aria-hidden="true">
+    <symbol id="catMini" viewBox="0 0 360 450">
+      <defs>
+        <linearGradient id="miniBlack" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#11161b"/><stop offset="1" stop-color="#35424c"/></linearGradient>
+        <linearGradient id="miniWhite" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fffefa"/><stop offset="1" stop-color="#c5cfd1"/></linearGradient>
+      </defs>
+      <ellipse cx="188" cy="426" rx="104" ry="10" fill="rgba(7,12,16,.2)"/>
+      <path d="M246 344 C305 338 333 366 316 394 C303 416 265 414 244 397 C234 389 236 373 247 369 C266 362 288 379 289 391 C304 379 290 361 252 360 Z" fill="url(#miniBlack)"/>
+      <path d="M118 232 C93 259 84 326 94 374 C102 410 131 424 171 423 L252 421 C275 395 279 350 265 302 C254 263 228 239 207 228 Z" fill="url(#miniBlack)"/>
+      <path d="M154 230 C152 254 138 276 137 302 C136 340 154 385 173 400 C185 409 200 399 207 381 C218 349 204 292 204 231 C188 239 169 239 154 230 Z" fill="url(#miniWhite)"/>
+      <path d="M128 292 C116 330 116 383 122 411 C128 423 143 424 151 412 C155 370 155 330 150 292 Z" fill="url(#miniBlack)"/>
+      <path d="M171 294 C163 334 164 384 170 415 C177 426 194 425 200 414 C203 373 202 332 195 294 Z" fill="url(#miniBlack)"/>
+      <path d="M121 399 C129 394 145 395 151 405 L150 423 C140 431 125 428 119 420 Z M168 403 C178 397 194 400 200 409 L199 425 C190 432 173 430 167 422 Z" fill="url(#miniWhite)"/>
+      <path d="M107 107 C92 75 95 39 109 20 C133 39 148 65 150 94 Z M207 91 C219 58 244 36 267 30 C268 61 256 89 237 108 Z" fill="url(#miniBlack)"/>
+      <path d="M107 94 C125 74 153 67 182 70 C219 69 248 88 253 124 C260 164 240 204 205 222 C176 237 136 224 113 199 C91 176 87 117 107 94 Z" fill="url(#miniBlack)"/>
+      <path d="M156 79 C176 75 197 78 209 91 C198 119 196 137 210 172 C220 199 197 224 169 223 C141 223 117 205 110 181 C104 158 120 139 132 122 C143 106 149 91 156 79 Z" fill="url(#miniWhite)"/>
+      <path d="M99 158 C112 139 131 132 149 138 C158 153 156 174 146 189 C132 205 108 200 99 186 C93 176 93 166 99 158 Z M178 141 C197 132 220 138 230 157 C237 174 226 194 208 200 C189 206 172 191 169 174 C166 160 170 148 178 141 Z" fill="url(#miniWhite)"/>
+      <path d="M118 134 C126 117 147 117 155 132 C153 151 129 158 117 142 Z M204 133 C213 117 234 119 241 134 C237 153 214 157 203 142 Z" fill="#ced562" stroke="#0c1013" stroke-width="3"/>
+      <ellipse cx="137" cy="138" rx="3" ry="10" fill="#090b0c"/><ellipse cx="222" cy="139" rx="3" ry="10" fill="#090b0c"/>
+      <path d="M171 170 C178 166 185 166 191 170 C190 177 185 180 181 180 C176 179 172 176 171 170 Z" fill="#d9949d"/>
+      <path d="M135 216 C158 232 201 234 224 214" fill="none" stroke="#5a999d" stroke-width="8"/>
+      <circle cx="181" cy="229" r="7" fill="#d6e5e2" stroke="#52888c"/>
+    </symbol>
+  </svg>
+
+  <script>
+    const stage = document.getElementById('stage');
+    const catWrap = document.getElementById('catWrap');
+    const headUnit = document.getElementById('headUnit');
+    const eyesLook = document.getElementById('eyesLook');
+    const motionToggle = document.getElementById('motionToggle');
+    const guideToggle = document.getElementById('guideToggle');
+    const motionIcon = document.getElementById('motionIcon');
+    let headX = 0;
+    let headY = 0;
+    let targetX = 0;
+    let targetY = 0;
+    let motionEnabled = true;
+    let followFrame = null;
+
+    document.querySelectorAll('[data-bg]').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('[data-bg]').forEach((item) => item.setAttribute('aria-pressed', 'false'));
+        button.setAttribute('aria-pressed', 'true');
+        stage.dataset.bg = button.dataset.bg;
+      });
+    });
+
+    motionToggle.addEventListener('click', () => {
+      motionEnabled = !motionEnabled;
+      catWrap.classList.toggle('is-running', motionEnabled);
+      motionToggle.setAttribute('aria-pressed', String(motionEnabled));
+      motionToggle.setAttribute('aria-label', motionEnabled ? '暂停动画' : '播放动画');
+      motionToggle.title = motionEnabled ? '暂停动画' : '播放动画';
+      motionIcon.setAttribute('d', motionEnabled ? 'M7 5h4v14H7zm6 0h4v14h-4z' : 'M8 5v14l11-7z');
+    });
+
+    guideToggle.addEventListener('click', () => {
+      const active = catWrap.classList.toggle('show-guides');
+      guideToggle.setAttribute('aria-pressed', String(active));
+      guideToggle.title = active ? '隐藏结构辅助线' : '显示结构辅助线';
+      guideToggle.setAttribute('aria-label', guideToggle.title);
+    });
+
+    stage.addEventListener('pointermove', (event) => {
+      const rect = stage.getBoundingClientRect();
+      targetX = Math.max(-1, Math.min(1, (event.clientX - rect.left) / rect.width * 2 - 1));
+      targetY = Math.max(-1, Math.min(1, (event.clientY - rect.top) / rect.height * 2 - 1));
+      eyesLook.style.transform = `translate(${targetX * 3.5}px, ${targetY * 2.2}px)`;
+      if (!followFrame) followHead();
+    });
+
+    stage.addEventListener('pointerleave', () => {
+      targetX = 0;
+      targetY = 0;
+      eyesLook.style.transform = 'translate(0, 0)';
+      if (!followFrame) followHead();
+    });
+
+    function followHead() {
+      headX += (targetX - headX) * 0.075;
+      headY += (targetY - headY) * 0.075;
+      headUnit.style.transform = `translate(17px, 25px) scale(.91) translate(${headX * 5}px, ${headY * 2.5}px) rotate(${headX * 2.1}deg)`;
+      if (Math.abs(targetX - headX) + Math.abs(targetY - headY) > 0.008) {
+        followFrame = requestAnimationFrame(followHead);
+      } else {
+        followFrame = null;
+      }
+    }
+  </script>
+</body>
+</html>

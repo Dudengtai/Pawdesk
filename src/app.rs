@@ -28,7 +28,11 @@ use crate::render::menu_ui::{
     blit_rgba, compose_menu_frame, compose_settings_frame, hit_settings, MenuChromeState,
     SettingsHit, SETTINGS_H, SETTINGS_W,
 };
-use crate::render::reminder_ui::{client_to_layout, compose_reminder_frame, food_button_layout};
+use crate::render::reminder_ui::{
+    client_to_layout, compose_reminder_card_frame, compose_reminder_frame, food_button_layout,
+    load_reminder_card, ReminderCard,
+};
+use crate::render::yawn_bubble::{compose_yawn_frame, place_yawn_bubble, YawnPlacement};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
 // Attaching a DXGI/Vulkan swapchain to a WS_EX_LAYERED window breaks per-pixel alpha.
 use crate::shortcut::{
@@ -90,6 +94,8 @@ pub struct App {
     scale_factor: f64,
     /// True while expanded reminder window is showing UI.
     reminder_ui_active: bool,
+    /// Whole-image reminder card (tishi.png mockup), None → composed fallback.
+    reminder_card: Option<ReminderCard>,
     /// Feed completed this session cycle; persist once when return starts.
     feed_persist_pending: bool,
     /// M4 shortcuts.
@@ -98,6 +104,8 @@ pub struct App {
     shortcut_icons: HashMap<PathBuf, Option<Arc<IconRgba>>>,
     /// Expanded radial menu UI.
     menu_ui_active: bool,
+    /// Low-level mouse hook while the launcher is open (outside click → close).
+    menu_outside_guard: Option<platform::OutsideClickGuard>,
     /// Suppress re-opening launcher immediately after close (accidental double-click).
     menu_reopen_after: Option<Instant>,
     /// Expanded settings list UI.
@@ -122,6 +130,10 @@ pub struct App {
     settings_transition: Option<SettingsTransition>,
     /// Overlay window top-left (physical) for atomic layered present during settings transition.
     settings_present_pos: Option<(i32, i32)>,
+    /// Expanded comic-bubble window while `idle_yawn` plays.
+    yawn_ui_active: bool,
+    yawn_place: Option<YawnPlacement>,
+    yawn_present_pos: Option<(i32, i32)>,
     /// Pet position before menu/settings expand (window top-left, physical).
     overlay_origin: Option<Point>,
     /// Current pet frame RGBA for alpha hit-testing (normal pet size).
@@ -148,6 +160,15 @@ impl App {
         );
         scheduler.apply_startup_catchup(config.reminder.last_completed_at.as_deref(), now);
         let shortcuts = ShortcutRepository::from_items(config.shortcuts.clone());
+        let reminder_card = load_reminder_card(
+            &assets_dir.join("ui/reminder_card.png"),
+            REMINDER_WINDOW_W,
+            REMINDER_WINDOW_H,
+        );
+        match &reminder_card {
+            Some(_) => info!("reminder card loaded (tishi.png mockup)"),
+            None => warn!("reminder card image missing; using composed reminder UI"),
+        }
 
         Self {
             window: None,
@@ -168,10 +189,12 @@ impl App {
             last_clip_name: String::new(),
             scale_factor: 1.0,
             reminder_ui_active: false,
+            reminder_card,
             feed_persist_pending: false,
             shortcuts,
             shortcut_icons: HashMap::new(),
             menu_ui_active: false,
+            menu_outside_guard: None,
             menu_reopen_after: None,
             settings_ui_active: false,
             menu_layout: None,
@@ -185,6 +208,9 @@ impl App {
             settings_highlight_row: None,
             settings_transition: None,
             settings_present_pos: None,
+            yawn_ui_active: false,
+            yawn_place: None,
+            yawn_present_pos: None,
             overlay_origin: None,
             hit_rgba: Vec::new(),
             hit_size: (128, 128),
@@ -593,13 +619,21 @@ impl App {
                     | PetState::Reminder(ReminderStage::Feeding)
             )
         {
+            let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
+            if let Some(card) = &self.reminder_card {
+                let (w, h, composed) = compose_reminder_card_frame(card, feeding);
+                self.sprite_logical = (w, h);
+                self.hit_rgba = composed;
+                self.hit_size = (w, h);
+                self.texture_dirty = false;
+                return;
+            }
             let clip = pet.active_clip();
             let pet_rgba = pet.display_rgba();
             let pulse = {
                 let t = Instant::now().elapsed().as_secs_f32();
                 1.0 + 0.05 * (t * std::f32::consts::TAU / 1.2).sin()
             };
-            let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
             let (w, h, composed) = compose_reminder_frame(
                 &pet_rgba,
                 clip.frame_width,
@@ -613,6 +647,32 @@ impl App {
             self.hit_size = (w, h);
             self.texture_dirty = false;
             return;
+        }
+
+        if self.yawn_ui_active {
+            if let Some(place) = self.yawn_place {
+                let clip = pet.active_clip();
+                let pet_rgba = pet.display_rgba();
+                let dpr = snap_dpr(self.scale_factor);
+                let pet_phys = logical_to_physical(self.pet_size(), dpr) as u32;
+                let (w, h, composed) = compose_yawn_frame(
+                    &pet_rgba,
+                    clip.frame_width,
+                    clip.frame_height,
+                    place,
+                    pet_phys,
+                    pet.yawn_bubble_alpha(),
+                    dpr,
+                );
+                self.sprite_logical = (
+                    physical_to_logical_u32(place.window.width, dpr),
+                    physical_to_logical_u32(place.window.height, dpr),
+                );
+                self.hit_rgba = composed;
+                self.hit_size = (w, h);
+                self.texture_dirty = false;
+                return;
+            }
         }
 
         let clip = pet.active_clip();
@@ -643,8 +703,10 @@ impl App {
 
         // Scale content to physical window for layered present.
         let (sw, sh) = self.hit_size;
-        let overlay =
-            self.menu_ui_active || self.settings_ui_active || self.reminder_ui_active;
+        let overlay = self.menu_ui_active
+            || self.settings_ui_active
+            || self.reminder_ui_active
+            || self.yawn_ui_active;
         let drag_scale = if overlay {
             1.0
         } else {
@@ -662,6 +724,8 @@ impl App {
                 self.settings_present_pos
             } else if self.menu_ui_active {
                 self.menu_present_pos
+            } else if self.yawn_ui_active {
+                self.yawn_present_pos
             } else {
                 None
             };
@@ -708,7 +772,11 @@ impl App {
             return;
         };
         // Don't persist temporary overlay positions as home config.
-        if self.reminder_ui_active || self.menu_ui_active || self.settings_ui_active {
+        if self.reminder_ui_active
+            || self.menu_ui_active
+            || self.settings_ui_active
+            || self.yawn_ui_active
+        {
             return;
         }
         if let Ok(pos) = window.outer_position() {
@@ -790,6 +858,84 @@ impl App {
         self.texture_dirty = true;
     }
 
+    fn enter_yawn_ui(&mut self) {
+        if self.menu_ui_active || self.settings_ui_active || self.reminder_ui_active {
+            return;
+        }
+        if self.yawn_ui_active {
+            return;
+        }
+        self.capture_overlay_origin();
+        let dpr = snap_dpr(self.scale_factor);
+        let origin = self.overlay_origin.unwrap_or(Point::new(100.0, 100.0));
+        let pet_phys = logical_to_physical(self.pet_size(), dpr);
+        let pet_rect = platform::Rect {
+            x: origin.x as i32,
+            y: origin.y as i32,
+            width: pet_phys,
+            height: pet_phys,
+        };
+        let pet_cx = pet_rect.x + pet_rect.width / 2;
+        let pet_cy = pet_rect.y + pet_rect.height / 2;
+        let work = platform::work_area_from_point(pet_cx, pet_cy)
+            .map(|m| m.work_area)
+            .ok()
+            .or_else(|| {
+                self.window
+                    .as_ref()
+                    .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
+            })
+            .or_else(|| platform::primary_work_area().ok())
+            .unwrap_or(platform::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
+        let place = place_yawn_bubble(pet_rect, work, dpr);
+        self.yawn_place = Some(place);
+        self.yawn_present_pos = Some((place.window.x, place.window.y));
+        self.yawn_ui_active = true;
+        let win_log_w = physical_to_logical_u32(place.window.width, dpr);
+        let win_log_h = physical_to_logical_u32(place.window.height, dpr);
+        self.resize_pet_window(win_log_w, win_log_h);
+        if let Some(w) = &self.window {
+            w.set_outer_position(PhysicalPosition::new(place.window.x, place.window.y));
+        }
+        self.texture_dirty = true;
+        self.redraw();
+        info!(
+            left = place.bubble_on_left,
+            win = ?(place.window.x, place.window.y, place.window.width, place.window.height),
+            "yawn bubble overlay entered"
+        );
+    }
+
+    fn exit_yawn_ui(&mut self) {
+        if !self.yawn_ui_active {
+            return;
+        }
+        self.yawn_ui_active = false;
+        self.yawn_place = None;
+        self.yawn_present_pos = None;
+        if !self.menu_ui_active && !self.settings_ui_active && !self.reminder_ui_active {
+            self.restore_overlay_origin_window();
+        }
+        self.texture_dirty = true;
+    }
+
+    fn yawn_hit_bubble(&self) -> bool {
+        let Some(p) = self.yawn_place else {
+            return false;
+        };
+        let x = self.cursor_in_window.x as i32;
+        let y = self.cursor_in_window.y as i32;
+        x >= p.bubble_local.0
+            && x < p.bubble_local.0 + p.bubble_w
+            && y >= p.bubble_local.1
+            && y < p.bubble_local.1 + p.bubble_h
+    }
+
     fn capture_overlay_origin(&mut self) {
         if self.overlay_origin.is_some() {
             return;
@@ -807,7 +953,11 @@ impl App {
             .take()
             .unwrap_or(Point::new(100.0, 100.0));
         self.menu_ui_active = false;
+        self.menu_outside_guard = None;
         self.settings_ui_active = false;
+        self.yawn_ui_active = false;
+        self.yawn_place = None;
+        self.yawn_present_pos = None;
         self.menu_layout = None;
         let s = self.pet_size();
         self.resize_pet_window(s, s);
@@ -938,6 +1088,13 @@ impl App {
         // the new size/pos — no WaitUntil delay (this was the main pet flash).
         self.texture_dirty = true;
         self.redraw();
+
+        // Outside-click guard: clicking the desktop / another window closes the dock.
+        let guard = platform::OutsideClickGuard::install(place.window);
+        if guard.is_none() {
+            warn!("outside-click hook unavailable; dock closes via in-window clicks only");
+        }
+        self.menu_outside_guard = guard;
         info!(
             ?place.dir,
             win = ?(place.window.x, place.window.y, place.window.width, place.window.height),
@@ -1101,6 +1258,7 @@ impl App {
                 pet.close_menu(now);
             }
             self.menu_ui_active = false;
+            self.menu_outside_guard = None;
             self.menu_layout = None;
             self.menu_hover = None;
             self.menu_press = None;
@@ -1162,6 +1320,7 @@ impl App {
             }
         }
         self.menu_ui_active = false;
+        self.menu_outside_guard = None;
         self.menu_layout = None;
         self.menu_hover = None;
         self.menu_press = None;
@@ -1879,6 +2038,11 @@ impl ApplicationHandler<UserEvent> for App {
                             self.menu_layout = None;
                             // Keep overlay_origin for restore after drag end.
                         }
+                        if self.yawn_ui_active {
+                            self.yawn_ui_active = false;
+                            self.yawn_place = None;
+                            self.yawn_present_pos = None;
+                        }
                         pet.begin_drag(now);
                     }
                     if self.menu_ui_active || self.settings_ui_active {
@@ -2017,8 +2181,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     client_h,
                                 );
                                 let hit = pet.hit_food_button(lx, ly)
-                                    || ((100.0..=260.0).contains(&lx)
-                                        && (190.0..=250.0).contains(&ly));
+                                    || feed_zone_hit(lx, ly);
                                 if hit {
                                     if let Some(pet) = self.pet.as_mut() {
                                         if pet.on_feed_click(now) {
@@ -2110,22 +2273,29 @@ impl ApplicationHandler<UserEvent> for App {
                         && !self.settings_ui_active
                         && !self.menu_ui_active
                     {
-                        // Debounce: avoid reopen on the same click that closed, or double-tap.
-                        let reopen_ok = self
-                            .menu_reopen_after
-                            .map(|t| now >= t)
-                            .unwrap_or(true);
-                        // Click pet → launcher (Idle base / cute / Watching / edge peek).
-                        let can_open = reopen_ok
-                            && matches!(
-                                self.pet.as_ref().map(|p| &p.state),
-                                Some(PetState::Idle(_))
-                                    | Some(PetState::Watching)
-                                    | Some(PetState::HiddenAtEdge(_))
-                            );
-                        if can_open {
-                            self.menu_reopen_after = None;
-                            self.enter_menu_ui(now);
+                        if self.yawn_ui_active && self.yawn_hit_bubble() {
+                            // Bubble is not a launcher hit target.
+                        } else {
+                            if self.yawn_ui_active {
+                                self.exit_yawn_ui();
+                            }
+                            // Debounce: avoid reopen on the same click that closed, or double-tap.
+                            let reopen_ok = self
+                                .menu_reopen_after
+                                .map(|t| now >= t)
+                                .unwrap_or(true);
+                            // Click pet → launcher (Idle base / cute / Watching / edge peek).
+                            let can_open = reopen_ok
+                                && matches!(
+                                    self.pet.as_ref().map(|p| &p.state),
+                                    Some(PetState::Idle(_))
+                                        | Some(PetState::Watching)
+                                        | Some(PetState::HiddenAtEdge(_))
+                                );
+                            if can_open {
+                                self.menu_reopen_after = None;
+                                self.enter_menu_ui(now);
+                            }
                         }
                     }
                 }
@@ -2324,6 +2494,27 @@ impl ApplicationHandler<UserEvent> for App {
                 self.persist_window_pos();
             }
 
+            // Gaze follows the screen cursor whenever we can see the pet.
+            let cursor_pt = platform::cursor_pos()
+                .ok()
+                .map(|(x, y)| Point::new(x as f64, y as f64));
+            let window_info = self.window.as_ref().and_then(|w| {
+                w.outer_position().ok().map(|pos| {
+                    let size = w.outer_size();
+                    (pos, size)
+                })
+            });
+            if let (Some(cursor), Some((pos, size)), Some(pet)) =
+                (cursor_pt, window_info, self.pet.as_mut())
+            {
+                let pet_center = Point::new(
+                    pos.x as f64 + size.width as f64 / 2.0,
+                    pos.y as f64 + size.height as f64 / 2.0,
+                );
+                let track = !self.drag.dragging && !pet.state.is_reminder();
+                pet.update_gaze(cursor, pet_center, track);
+            }
+
             // Interaction + edge (not while dragging / reminder / menu / settings).
             if !self.drag.dragging {
                 let in_reminder = self
@@ -2333,15 +2524,6 @@ impl ApplicationHandler<UserEvent> for App {
                     .unwrap_or(false);
                 let overlay = self.menu_ui_active || self.settings_ui_active;
                 if !in_reminder && !overlay {
-                    let cursor_pt = platform::cursor_pos()
-                        .ok()
-                        .map(|(x, y)| Point::new(x as f64, y as f64));
-                    let window_info = self.window.as_ref().and_then(|w| {
-                        w.outer_position().ok().map(|pos| {
-                            let size = w.outer_size();
-                            (pos, size)
-                        })
-                    });
                     let work_area = self
                         .window
                         .as_ref()
@@ -2385,6 +2567,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             // Animation + interaction end + feed end.
+            let mut playing_yawn = false;
             if let Some(pet) = self.pet.as_mut() {
                 let prev_clip = pet.player.clip_name().to_string();
                 let prev_f = pet.display_frame_f;
@@ -2397,6 +2580,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.texture_dirty = true;
                     }
                 }
+                playing_yawn = pet.is_playing_yawn();
                 // Dense sprite motion: present *in this tick* (layered windows often
                 // drop/coalesce RedrawRequested, so request_redraw alone can freeze on
                 // frame 0 of a oneshot — log says "action started" but no visible motion).
@@ -2438,6 +2622,13 @@ impl ApplicationHandler<UserEvent> for App {
                     present_now = true;
                 }
             }
+            if playing_yawn {
+                if !self.yawn_ui_active {
+                    self.enter_yawn_ui();
+                }
+            } else if self.yawn_ui_active {
+                self.exit_yawn_ui();
+            }
 
             // Feed animation done → shrink + return + persist.
             let feed_done = self
@@ -2474,10 +2665,47 @@ impl ApplicationHandler<UserEvent> for App {
             self.handle_app_event(event_loop, AppEvent::Tick(now));
         }
 
+        // Launcher outside-click guard: keep the window rect synced and close
+        // the dock when a left click lands outside it (desktop / other apps).
+        let now = Instant::now();
+        // Skip during launcher→settings transition: clicking outside then would
+        // abort the in-flight grow animation (was previously ignored).
+        if self.menu_ui_active && self.settings_transition.is_none() {
+            let outside_clicked = {
+                let guard = self.menu_outside_guard.as_ref();
+                if let (Some(guard), Some(w)) = (guard, &self.window) {
+                    if let Ok(pos) = w.outer_position() {
+                        let size = w.outer_size();
+                        guard.update_rect(platform::Rect {
+                            x: pos.x as i32,
+                            y: pos.y as i32,
+                            width: size.width as i32,
+                            height: size.height as i32,
+                        });
+                    }
+                    platform::OutsideClickGuard::take_outside_click()
+                } else {
+                    false
+                }
+            };
+            if outside_clicked {
+                info!("launcher: outside click -> close");
+                self.exit_menu_ui(now);
+            }
+        }
+
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + self.frame_interval(),
         ));
     }
+}
+
+/// Generous click zone around the bottom-center feed hint pill (layout coords).
+/// Anchored to the pill position so it follows REMINDER_WINDOW size changes.
+fn feed_zone_hit(lx: f64, ly: f64) -> bool {
+    let cx = REMINDER_WINDOW_W as f64 * 0.5;
+    let cy = REMINDER_WINDOW_H as f64 - 44.0;
+    (lx - cx).abs() <= 88.0 && (ly - cy).abs() <= 38.0
 }
 
 /// Resolve assets for both `cargo run` and portable release layouts.

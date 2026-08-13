@@ -6,11 +6,11 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.11**（2026-08-12：设置从「管理」按钮丝滑生长并停靠启动坞旁） |
-| 依据文档 | `prd.md` v0.5、`tech.md` v0.8、`design.md` v0.10 |
+| 当前版本 | **v0.18**（2026-08-13：提醒卡片裁边放大去白边；启动坞窗外点击关闭） |
+| 依据文档 | `prd.md` v0.7、`tech.md` v0.10、`design.md` v0.12 |
 | 环境参考 | `env.md` |
-| 状态 | **M0–M5 可日常使用**；**M6 坞精致化主路径已落地**；**cow-cat 精灵桌面可读性收口**；**PET-A07 阶段 B（cute）已开**；**设置转场已落地**；字体更精致化后期 |
-| **下一步** | 日常观察 `idle_blink` + `idle_cute` + `idle_stretch` 观感；通过后再开 wag/sleep；可选：飞扑重开 / 提醒 wave 视频版 |
+| 状态 | **M0–M6 可日常使用**；**M7**：母版 / 眨眼 / 跟随 / 哈欠已接入；旧 cute/stretch 停调度 |
+| **下一步** | PET-M06 拖拽拎起 + 回坐 |
 
 ### 1.1 使用说明
 
@@ -36,6 +36,13 @@
 | **v0.9** | **2026-08-11** | **精灵 polish**：品红描边 despill、全帧软边 AA、双线性缩放；`idle_stretch` 倒放回坐（去掉 AI 多头幻影）；取消鼠标驱动左右翻转（固定素材朝向）；工具脚本 `despill_pet_edges` / `soften_pet_edges` / `fix_stretch_return`；**文档迁入 `docs/`** 并补根 `README.md` 索引 |
 | **v0.10** | **2026-08-11** | **`idle_cute` yawn 进调度池**（84f@16 无缝 bookend）；stretch/cute 回坐 `smooth_oneshot_returns`；运行时 `go_idle_with_settle`（100ms 书挡）；`reminder_wave` 恢复挥手（yawn 迁 cute）；工具 `pack_idle_cute_seamless` / `gen_reminder_yawn_video` / `smooth_oneshot_returns`；tech **v0.7.2** |
 | **v0.11** | **2026-08-12** | **设置转场**：从「管理」/失效行按钮中心丝滑生长并停靠启动坞旁；启动坞卡层同步淡出；托盘打开设置仍居中；design **v0.10** · tech **v0.8** |
+| **v0.12** | **2026-08-12** | 新增 **§15 奶牛猫形象与动画重构计划**：以“真实猫结构与运动规律 + 半写实插画 + 轻度幼态化”为方向，拆分 P0 角色统一/基础生命感、P1 交互动作、P2 长期陪伴动作与猫式提醒 |
+| **v0.13** | **2026-08-13** | **取消**原奶牛猫 P0–P2 动画重构计划（旧 §15），准备另写新计划 |
+| **v0.14** | **2026-08-13** | **删除**旧 §15 全文；新 **§15** 改为「先定母版」：形象锁当前 `idle_blink` 坐姿，只做细节优化；不依据 `design.md` 改画风 |
+| **v0.15** | **2026-08-13** | 母版改用用户指定角色设定图：漫画线描、大眼、无项圈；**默认坐姿改为正面** |
+| **v0.16** | **2026-08-13** | **母版确认**：正面漫画坐姿写入 `idle_blink`（开/半闭/闭 3 帧）；随机眨眼 + 偶发双眨；停掉旧 cute/stretch 调度；§15.5 指定头眼跟随方案 |
+| **v0.17** | **2026-08-13** | 头眼跟随落地（姿态条 + 虹膜 + 身体锁定）；`idle_yawn` 30fps + 漫画气泡；文档与 prd/tech/design 对齐现状 |
+| **v0.18** | **2026-08-13** | **提醒卡片收口**：窗口 400×300，flood 抠白 244 + 内容裁边 + premultiplied 缩放去白边 + contain-fit 放大填窗；**启动坞窗外点击关闭**（`OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志，不吞点击，不卡鼠标）；prd **v0.7** · tech **v0.10** · design **v0.12** |
 
 ### 1.3 2026-08-11 精灵与呈现收口（已落地）
 
@@ -46,7 +53,7 @@
 | 伸懒腰结束幻影 | [x] | 回坐改为干净前半段倒放 + `smooth_oneshot_returns` settle |
 | 鼠标左右朝向反了 | [x] | 禁用 `mirror_x` 与 cursor `face_dir` 翻转，固定素材朝向 |
 | 文档杂乱 | [x] | `prd/tech/design/task/env` → `docs/`；`docs/README.md` + 根 `README.md` |
-| 撒娇 yawn（cute） | [x] | 视频烘焙 + 无缝首尾；`IDLE_ACTION_ENABLED = ["idle_cute","idle_stretch"]` |
+| 撒娇 yawn（cute） | [x] | 旧视频 clip；**已被 `idle_yawn` 取代，不再调度** |
 | oneshot 进出闪一下 | [x] | 进：从帧 0 sit bookend；出：`go_idle_with_settle` + 精确 ≡ `idle_blink/000` |
 
 ---
@@ -63,6 +70,8 @@
 | **M3** | 提醒闭环 | reminder, pet 提醒态, design 提醒 UI | 定时提醒 + 投喂 + 回位 + 暂停 |
 | **M4** | 快捷访问 | shortcut, radial_menu, settings 快捷管理 | 菜单 + 增删排序启动 + 持久化 |
 | **M5** | 可日常使用 | tray 完整, settings 完整, 性能/测试/发布 | 托盘全能力 + 设置 + 性能达标 + 发布包 |
+| **M6** | 产品质量迭代 | launcher, settings, pet 现有资产 polish | 钉宠启动坞、设置转场与现有精灵可用性收口 |
+| **M7** | 宠物形象重构（先定母版） | assets/cow-cat | 坐姿母版经确认；现网 clip 暂不替换 |
 
 ```text
 M0 ──► M1 ──► M2 ──► M3 ──► M4 ──► M5
@@ -145,6 +154,7 @@ foundation (工程/错误/日志/事件总线)
 | PLAT-05 | 显示器变更时将位置钳制回可用工作区 | M5 | P0 | PLAT-01 | tech §7.1, prd Q5 | [x] |
 | PLAT-06 | 文件选择器（添加快捷方式） | M4 | P0 | FOUND-02 | tech §10.1 | [x] |
 | PLAT-07 | 进程启动封装（非 shell 拼接）与失败原因分类 | M4 | P0 | FOUND-03 | tech §10.3, §14 | [x] |
+| PLAT-08 | 启动坞窗外点击关闭：`WH_MOUSE_LL` 装于**专用钩子线程**（自带消息泵）+ 原子标志，观察型不吞点击、不阻塞渲染线程 | M6 | P1 | PLAT-01 | tech §1.3, §5.3; prd F-SC-10 | [x] |
 
 **完成标准**
 
@@ -185,6 +195,7 @@ foundation (工程/错误/日志/事件总线)
 | RND-05 | 动态刷新率策略：待机 12–24 FPS，移动/菜单提高 | M1 | P1 | RND-02 | tech §8.3 | [x] |
 | RND-06 | 设计 token 色板与浅/深主题（面板用） | M3–M4 | P1 | RND-02 | design §3.2 | [ ] |
 | RND-07 | 无变化时跳过强制重绘 | M5 | P1 | RND-05 | tech §8.3 | [x] |
+| RND-08 | 提醒卡片：tishi 整图 → flood 抠白 244 → 内容 bbox 裁边 → premultiplied 缩放去白边 → contain-fit 放大填窗（400×300）+ 底部药丸 | M6 | P1 | RM-04 | design §6.1, tech §6.2 | [x] |
 
 **完成标准**
 
@@ -219,7 +230,7 @@ foundation (工程/错误/日志/事件总线)
 | --- | --- | --- | --- | --- | --- | --- |
 | PET-01 | `PetState` 枚举与合法转换表（集中状态机，禁止 UI 直改） | M1 | P0 | FOUND-05 | tech §6.1, prd §5.7 | [x] |
 | PET-02 | 动画控制器：基于时间的帧推进、循环、结束回调 | M1 | P0 | RND-03, ASSET-03 | tech §8.2 | [x] |
-| PET-03 | 待机 base 眨眼 + 每 **60s** one-shot（**当前 cute + stretch**；池可扩） | M1 | P0 | PET-02 | tech §6.1/§8.2, design §4.3 | [x] |
+| PET-03 | 待机 base 眨眼 + 每 **60s** one-shot（**当前 `idle_yawn`**） | M1 | P0 | PET-02 | tech §6.1/§8.2, design §4.3 | [x] |
 | PET-04 | `Dragging`：按下移动进入、释放回 Idle；拖动反馈 | M1 | P0 | PET-01, WIN-03 | prd F-UI-02, design §10 | [x] |
 | PET-05 | `HiddenAtEdge`：阈值、隐藏比例、探头命中、点击恢复 | M2 | P0 | PET-01, PLAT-01 | tech §7.2, design §5.2, prd F-AN-03 | [x] |
 | PET-06 | 鼠标距离：`Watching` 已接；**飞扑 `Approaching` 延后**（`ENABLE_MOUSE_POUNCE=false`） | M2 / 后期 | P0 | PET-01 | tech §6.1, prd F-AN-04 | [~] |
@@ -510,9 +521,10 @@ foundation (工程/错误/日志/事件总线)
 | M4 | | | 2026-08-01 | 快捷方式+启动坞菜单+设置管理+ShellExecute启动 |
 | UI-P1 | 2026-08-04 | — | **阶段性完成** | 启动坞 Apple 风初版、中文对齐、HiDPI 锐化 |
 | M5 | 2026-08-04 | 2026-08-04 | 2026-08-04 | 设置提醒+托盘+钳制/降帧+便携包 |
-| **M6** | 2026-08-04 | — | **进行中** | bug → **钉宠 Launcher（§14）** → UI 玻璃；宠物动作/形象**最后** |
+| **M6** | 2026-08-04 | — | **阶段性完成** | bug → 钉宠 Launcher → UI 玻璃；设置转场已落地 |
+| **M7** | 2026-08-13 | — | **进行中** | 母版/眨眼/跟随/哈欠已落地；下一件 PET-M06 拖拽 |
 
-**当前建议下一动作（严格优先级）**：§13 → **§14 钉宠启动坞** 按 L0→L5 执行。
+**当前建议下一动作**：PET-M06 拖拽拎起 + 回坐。
 
 ---
 
@@ -532,7 +544,7 @@ foundation (工程/错误/日志/事件总线)
 | 启动坞 / 设置 UI | ✅ **Appica 精致坞 + 丝滑开合**；**设置转场停靠坞旁**（2026-08-12） | 微调 / 回归 |
 | 提醒面板视觉 | 🟡 功能有，视觉粗 | **M6 后续** |
 | 已知 bug 清单 | 见 §11.2 / §13 | 按优先级 |
-| 宠物动作 / 形象 / 飞扑 | 可用底线；精修延后 | **下一步 PET-A07** |
+| 宠物动作 / 形象 / 飞扑 | 母版 + 眨眼 + 跟随 + 哈欠已接入 | **M7 余下：PET-M06 拖拽** |
 
 ### 11.2 已知问题 backlog（按类）
 
@@ -569,7 +581,7 @@ foundation (工程/错误/日志/事件总线)
 | --- | --- | --- |
 | UI-01 | 启动坞：悬停/按压绘制、空状态与按钮节奏 | ✅ Appica primary/soft/row + chrome 动画 |
 | UI-02 | 设置页：与启动坞同一套间距/字号层级 | [~] 共用 token；可再精修 |
-| UI-03 | 提醒卡 / 食物按钮：对齐 design 或至少更清晰 | [ ] |
+| UI-03 | 提醒卡 / 食物按钮：对齐 design 或至少更清晰 | [x] 提醒已换为 `tishi.png` 整图卡片（`assets/ui/reminder_card.png`）+ 底部投喂药丸 |
 | UI-04 | 窗体切换动画（可选淡入，忌大改） | [~] 坞开合已做；提醒窗切换另议 |
 | UI-05 | 快捷行图标（系统提取 ico 可选） | [ ] |
 
@@ -585,35 +597,13 @@ foundation (工程/错误/日志/事件总线)
 | PET-A04 | 形象重绘 / 瘦版统一 | 用户拍板后再做 | [ ] |
 | PET-A05 | 提醒/投喂动作精修 | 依赖形象定稿 | [ ] |
 | PET-A06 | 宠物大小可调 | 设置 + 托盘；`pet.scale` 持久化 | [x] 2026-08-06 已测 |
-| **PET-A07** | **动画精修** | 阶段 B：blink + cute yawn + stretch | **[~] 调试中** |
-
-#### PET-A07 — 动画精修（进行中）
-
-**当前阶段 B（blink + cute + stretch）**
-
-| Clip | 状态 | 说明 |
-| --- | --- | --- |
-| `idle_blink` | **主调** | 静态坐姿 + 真眨眼 / 轻呼吸 |
-| `idle_cute` | **主调** | 撒娇 yawn；84f@16；首尾 ≡ `idle_blink/000` |
-| `idle_stretch` | **主调** | 侧视朝左、横铺桌面；72f@30 + smooth settle |
-| `idle_tail_wag` / `idle_sleep` | **停调度** | 资源保留；`IDLE_ACTION_ENABLED` 未列入 |
-| watch / drag / peek / reminder | 仍加载 | 非本阶段验收重点 |
-
-**代码开关**：`src/pet/animation.rs` → `IDLE_ACTION_ENABLED = ["idle_cute", "idle_stretch"]`  
-**间隔**：60s（本地可 `PAWDESK_CUTE_SECS=10`）  
-**工具**：  
-- stretch：`gen_stretch_video.py` + `pack_stretch_from_video.py`  
-- cute：`gen_reminder_yawn_video.py` + `pack_idle_cute_seamless.py`  
-- 回坐：`smooth_oneshot_returns.py`  
-- 运行时：`go_idle_with_settle`（`CLIP_CROSSFADE_SECS=0.10` 书挡）
-
-**阶段 C（cute/stretch 验收后再开）**：tail_wag / sleep 写回 `IDLE_ACTION_ENABLED`。
+| **PET-A07** | **动画精修** | 已并入 §15 母版线 | **[x]** 眨眼 / 跟随 / 哈欠 |
 
 ### 11.3 实现备忘（长期有效）
 
 - 代码入口：`src/app.rs`、`src/pet/*`、`src/render/menu_ui.rs`、`src/render/text.rs`、`src/ui/radial_menu.rs`、`src/ui/tray.rs`、`src/platform/windows.rs`、`src/config/*`
-- **待机**：`idle_blink` + **60s `idle_cute` / `idle_stretch`**（wag/sleep 停）；`Watching` 不扑
-- **动画工具**：stretch → `gen_stretch_video.py` / `pack_stretch_from_video.py`；cute → `gen_reminder_yawn_video.py` / `pack_idle_cute_seamless.py`；回坐 → `smooth_oneshot_returns.py`；warp 底 → `build_lively_pet.py`
+- **待机**：`idle_blink` + 头眼跟随 + **60s `idle_yawn`**；`Watching` 不扑
+- **哈欠**：`tools/pack_idle_yawn.py`；气泡 `src/render/yawn_bubble.rs`；间隔 `PAWDESK_CUTE_SECS`
 - **显示大小**：`config.pet.scale` 默认 **0.6**；`pet_logical_size`；设置 `PetScaleDec/Inc`；托盘变大/变小；schema **v3** 迁移
 - **飞扑**：`ENABLE_MOUSE_POUNCE = false`；资源与路径代码保留
 - **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `mockups/launcher-pin-flip.*`
@@ -625,19 +615,17 @@ foundation (工程/错误/日志/事件总线)
 - **构建产物**：`target/debug` 开发 · `target/release` 正式 · `dist/PawDesk` 仅 package 快照（不会随 cargo 自动更新）
 - **便携包**：`tools/package.ps1` → `dist/PawDesk/`（不含 `_master` / `_video`）
 
-### 11.3.1 动作 clip 快照（2026-08-06）
+### 11.3.1 动作 clip 快照（2026-08-13）
 
 | 目录 | 用途 | 约规格 |
 | --- | --- | --- |
-| `idle_blink` | 默认待机（呼吸+真眨眼） | **120f @30 loop** |
-| `idle_cute` | 60s oneshot（撒娇 yawn） | **84f @16**（`video_reminder_yawn_fluid`） |
-| `idle_stretch` | 60s oneshot（伸懒腰） | 72f @30 side-left + smooth settle |
-| `idle_tail_wag` / `idle_sleep` | 不调度 | 资源仍在盘 |
-| `idle_watch` | 中距观察 | 60f @30 loop |
-| `approaching` | 飞扑（运行时关闭） | 48f 进度驱动 |
-| `playing_interaction` | 扑后互动 | 30f loop |
-| `dragging` / `edge_peek` | 拖动 / 边缘 | 30f loop |
-| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | wave 30f 挥手（yawn 已迁 cute） |
+| `idle_blink` | 默认待机 | **3f** 开/半闭/闭 |
+| `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 13 / 5 / 4；运行时 yaw 只用偶数关键帧 |
+| `idle_yawn` | 60s oneshot | **77f @30**；峰值气泡 |
+| `idle_cute` / `idle_stretch` / wag / sleep | 不调度 | 旧资源仍在盘 |
+| `approaching` | 飞扑（运行关闭） | |
+| `dragging` / `edge_peek` | 拖动 / 边缘 | |
+| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | |
 
 ### 11.4 透明底注意事项
 
@@ -666,14 +654,14 @@ foundation (工程/错误/日志/事件总线)
 ### 12.2 已交付能力摘要
 
 - 分层真透明桌宠 + 配置持久化 + 托盘完整菜单  
-- **待机真眨眼** + **60s cute yawn / stretch**；距离迟滞 / Watching 驻留  
+- **待机真眨眼** + **头眼跟随** + **60s `idle_yawn`**（漫画气泡）；距离迟滞 / Watching 驻留  
 - **宠物大小可调**（设置步进 + 托盘变大/变小；默认 0.6；schema v3）  
 - 提醒闭环 + 设置内开关/间隔/暂停  
 - 快捷启动坞（钉宠玻璃卡）+ **原生**异步文件选择（虚拟桌面 / 不闪）  
 - 隐藏不抢提醒；显示后 pending；工作区钳制  
-- 便携：`dist/PawDesk/`（需 `package.ps1` 刷新）；单元测试 95 passed  
-- **动画（拍板）**：**blink + cute + stretch 日常验收**；`IDLE_ACTION_ENABLED` 控制池；撒娇 1 分钟一次  
-- **其后 / 并行**：钉宠 Launcher（§14）、飞扑、形象精修
+- 便携：`dist/PawDesk/`（需 `package.ps1` 刷新）  
+- **动画（当前）**：`IDLE_ACTION_ENABLED = ["idle_yawn"]`；旧 cute/stretch 停  
+- **其后**：PET-M06 拖拽拎起；飞扑仍关
 
 ### 12.3 本地路径
 
@@ -959,3 +947,83 @@ close → restore origin（禁 persist 临时坐标）
 | S4 L4+L5 UI | [x] | 2026-08-04 |
 | S5 L6 精致化+丝滑防闪 | [x] | 2026-08-07 |
 | **S6 L7 可用性收口（字/列表/主按钮）** | **[x]** | **2026-08-07** |
+
+---
+
+## 15. 宠物形象重构（先定母版）
+
+> **母版已确认**：正面漫画坐姿。同一只猫用可叠加微动作过日子，禁止「静帧突然播一段别人的视频」。
+
+### 15.1 目标
+
+1. 默认正面坐姿母版 — **已确认**
+2. 眨眼 — **已接入**
+3. 头眼跟随鼠标 — **已接入**
+4. 哈欠 + 气泡 — **已接入**
+5. 拖拽拎起 — **下一步（PET-M06）**
+6. 伸懒腰 / 提醒精修：仍须从这张母版出发、回到这张母版
+
+### 15.2 身份锁定（相对观察者）
+
+以 `docs/mockups/pet-master-ref-sheet.png` 左侧主坐姿为准：
+
+| 项 | 锁定 |
+| --- | --- |
+| 姿势 | **正面坐姿**（默认不偏向左/右，桌面两侧都自然） |
+| 面罩 | 左侧黑、右侧白 |
+| 眼睛 | 圆大、琥珀色虹膜、大高光 |
+| 鼻 / 垫 | 粉色鼻；肉垫粉色（侧/仰视才见） |
+| 胸 / 爪 | 大面白胸；前腿高白袜 |
+| 项圈 | **无** |
+| 尾巴 | 黑色，从身侧低位弯出（正面仍可见，但不作为朝向） |
+| 画风 | 漫画书：墨线粗细变化、白毛排线、黑毛网点、暖米色纸白；**正面坐姿** |
+
+### 15.3 任务
+
+| ID | 任务 | 状态 |
+| --- | --- | --- |
+| PET-M01 | 从用户设定图抽出默认坐姿母版 | [x] |
+| PET-M02 | 用户确认正面漫画母版 | [x] |
+| PET-M03 | 待机真眨眼（开 / 半闭 / 闭） | [x] |
+| PET-M04 | 头眼跟随鼠标（见 §15.5） | [x] |
+| PET-M05 | 跟随条带：yaw 关键帧 + pitch + 对角；虹膜微移；竖耳取消 | [x] 运行时跳过 yaw 光流补帧；身体锁定 |
+| PET-M07 | 哈欠 `idle_yawn` + 气泡「困死我了…」 | [x] 2026-08-13 |
+| PET-M06 | 拖拽拎起 + 回坐 | [ ] |
+
+**母版文件**
+
+- 设定图：`docs/mockups/pet-master-ref-sheet.png`
+- 评审稿：`docs/mockups/pet-master-sit.png`
+- 运行时：`assets/pets/cow-cat/idle_blink/{000,001,002}.png`（开 / 半闭 / 闭）
+- 工作副本：`assets/pets/cow-cat/_master/sit_master.png`
+- 侧坐留档：`docs/mockups/pet-master-sit-threequarter.png`（转头用，不作默认）
+
+### 15.4 眨眼（已落地）
+
+- 3 帧 hold（开 / 半闭 / 闭）
+- 间隔随机 **2.8–6.2s**；一次约 **200ms**；约 **18%** 双眨
+- `Watching` / 开坞时只要还在 `idle_blink` 就会眨
+
+### 15.5 头眼跟随（已落地）
+
+眼睛先动，头再跟，身体几乎不动。禁止整图左右镜像。
+
+- 瞳孔：`look.rs` 在睁/半闭帧上平移虹膜（约 2–4px / 256）
+- 头：`look_yaw` / `look_pitch` / `look_diag` 最近邻选姿态；13 帧 yaw 只用偶数关键帧；下半身锁母版
+- 眨眼不打断跟随（不弹回正面）
+- 侧坐 `pet-master-sit-threequarter.png` 仅留档，不作默认
+
+### 15.6 哈欠（已落地）
+
+- `IDLE_ACTION_ENABLED = ["idle_yawn"]`；约 60s（`PAWDESK_CUTE_SECS` 可缩短）
+- ~77f @30：坐 → 半张 → 大张 hold → 原路回坐；五官贴回母版，外轮廓不换
+- 峰值漫画气泡「困死我了…」（运行时画，默认头右侧）
+- 哈欠中停转头/眨眼；拖动或开坞打断并回坐
+- 旧 `idle_cute` / `idle_stretch` **不调度**
+
+### 15.7 不做
+
+- 不批量重做旧 clip / 不重开飞扑
+- 不用整段图生视频当身份来源
+- 不用两帧透明混合掩盖五官抖动
+- 不整图左右镜像跟随

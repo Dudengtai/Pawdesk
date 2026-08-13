@@ -20,6 +20,10 @@ pub struct AnimationMeta {
     pub r#loop: bool,
     #[serde(default)]
     pub files: Vec<String>,
+    #[serde(default)]
+    pub peak_start: Option<u32>,
+    #[serde(default)]
+    pub peak_end: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -39,6 +43,8 @@ pub struct AnimationClip {
     pub sheet_rgba: Vec<u8>,
     pub sheet_width: u32,
     pub sheet_height: u32,
+    pub peak_start: Option<u32>,
+    pub peak_end: Option<u32>,
 }
 
 impl AnimationClip {
@@ -145,8 +151,12 @@ impl AnimationLibrary {
     pub fn load_idle_set(pet_dir: &Path) -> Self {
         let names = [
             IDLE_BASE,
+            "look_yaw",
+            "look_pitch",
+            "look_diag",
             "idle_stretch",
             "idle_cute",
+            "idle_yawn",
             "idle_tail_wag",
             "idle_sleep",
             "idle_watch",
@@ -235,11 +245,15 @@ impl AnimationLibrary {
     pub fn load_all(pet_dir: &Path) -> Self {
         let mut clips = Vec::new();
 
-        // Idle set: base blink + one-shot actions + watch (for Watching state)
+        // Idle set: base blink + look-yaw strip + one-shot actions
         let names = [
             IDLE_BASE,
+            "look_yaw",
+            "look_pitch",
+            "look_diag",
             "idle_stretch",
             "idle_cute",
+            "idle_yawn",
             "idle_tail_wag",
             "idle_sleep",
             "idle_watch",
@@ -328,6 +342,8 @@ fn load_clip_dir(dir: &Path, fallback_name: &str) -> Result<AnimationClip, AppEr
         sheet_rgba: sheet,
         sheet_width,
         sheet_height,
+        peak_start: meta.peak_start,
+        peak_end: meta.peak_end,
     })
 }
 
@@ -355,6 +371,8 @@ fn procedural_fallback_clip() -> AnimationClip {
         sheet_rgba: sheet,
         sheet_width: size * frames,
         sheet_height: size,
+        peak_start: None,
+        peak_end: None,
     }
 }
 
@@ -382,6 +400,8 @@ fn procedural_style_clip(name: &str, style: &str, frames: u32, fps: f32) -> Anim
         sheet_rgba: sheet,
         sheet_width: size * frames,
         sheet_height: size,
+        peak_start: None,
+        peak_end: None,
     }
 }
 
@@ -618,13 +638,13 @@ pub const IDLE_BASE: &str = "idle_blink";
 /// Product: one cute action about every minute (low-disturbance desktop pet).
 pub const IDLE_ACTION_INTERVAL_SECS: f32 = 60.0;
 
-/// One-shot pool currently enabled for polish.
-///
-/// - `idle_cute`: yawn (撒娇) — continuous video open/close with pink tongue.
-/// - `idle_stretch`: stretch (still available).
-/// Other authored clips (`idle_tail_wag` / `idle_sleep`) stay on disk but are
-/// **not** scheduled until re-listed here.
-pub const IDLE_ACTION_ENABLED: &[&str] = &["idle_cute", "idle_stretch"];
+/// One-shot pool. Empty while the new master sit + blink is the daily look;
+/// old cute/stretch videos are a different cat and would hard-cut into a clip.
+/// Re-enable only after those actions are remade on the confirmed master.
+pub const IDLE_YAWN: &str = "idle_yawn";
+
+/// One-shot pool. Only the remade master yawn; old cute/stretch stay off.
+pub const IDLE_ACTION_ENABLED: &[&str] = &[IDLE_YAWN];
 
 /// Picks one-shot idle actions on a fixed wall-clock interval.
 ///
@@ -783,9 +803,8 @@ mod idle_picker_tests {
     }
 
     #[test]
-    fn enabled_pool_includes_cute_yawn() {
-        assert!(IDLE_ACTION_ENABLED.contains(&"idle_cute"));
-        assert!(IDLE_ACTION_ENABLED.contains(&"idle_stretch"));
+    fn enabled_pool_is_master_yawn() {
+        assert_eq!(IDLE_ACTION_ENABLED, &[IDLE_YAWN]);
     }
 
     #[test]
@@ -819,6 +838,8 @@ mod idle_picker_tests {
             sheet_rgba: vec![0; 4 * 4],
             sheet_width: 4,
             sheet_height: 1,
+            peak_start: None,
+            peak_end: None,
         };
         let t0 = Instant::now();
         let mut player = AnimationPlayer::start(&clip, t0);

@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.8**（2026-08-12：设置从启动坞锚点生长转场 · 停靠启动坞旁） |
-| 依据 | `prd.md` v0.5 · `design.md` v0.10 |
+| 版本 | **v0.10**（2026-08-13：提醒卡片 400×300 裁边放大 + premultiplied 去白边；启动坞窗外点击观察型钩子，专用线程） |
+| 依据 | `prd.md` v0.7 · `design.md` v0.12 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -63,9 +63,11 @@
 ```text
 主线程：事件循环 · 状态机 · 动画时钟 · 合成 present · 托盘命令
 后台：  配置写盘（防抖）· 异步文件选择 · 进程启动校验
+钩子：  启动坞打开期间：WH_MOUSE_LL 专用线程（自带消息泵）→ 原子标志
 ```
 
 - 后台只通过通道 / 事件回主线程，不直接改 UI 状态。  
+- **启动坞窗外点击**（F-SC-10）：`WH_MOUSE_LL` 必须装在**专用空闲线程**（自带 GetMessage 消息泵），winit 渲染线程只每帧轮询原子标志。**禁止把低层钩子装到渲染线程**：每次系统鼠标事件（含移动）都会同步派发到安装线程，渲染忙时全系统鼠标输入被卡住（已踩坑：开坞后鼠标移动卡顿）。  
 - 用户操作进入 `AppEvent` / 状态机，避免隐式交叉修改。
 
 ---
@@ -134,31 +136,24 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 
 | Clip | 用途 | 备注 |
 | --- | --- | --- |
-| `idle_blink` | 默认待机（循环） | 呼吸 + **真眼皮** + 微头位；主调对象之一 |
-| `idle_stretch` | 60s one-shot | 侧视朝左横铺；约 72f@30；`fix_stretch_return_v1` + smooth settle |
-| `idle_cute` | 60s one-shot | 撒娇 yawn；约 84f@16（~5.25s）；`video_reminder_yawn_fluid`；首尾 ≡ `idle_blink/000` |
-| `idle_tail_wag` / `idle_sleep` | 资源在盘，**不调度** | 复开：写入 `IDLE_ACTION_ENABLED` |
-| `idle_watch` | Watching | 无缝 lean；进/出与坐姿对齐 |
-| `approaching` / `playing_interaction` | 飞扑链路（**运行关闭**） | |
-| `dragging` / `edge_peek` | 拖动 / 边缘 | 拖动态 **持续播帧** |
-| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | wave：挥手（yawn 已迁到 `idle_cute`） |
+| `idle_blink` | 默认待机 | 正面母版坐姿；开 / 半闭 / 闭 3 帧 hold |
+| `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 姿态条；运行时只用手写关键帧 + 身体锁定；虹膜另叠 |
+| `idle_yawn` | 60s one-shot | ~77f @30；母版脸哈欠；峰值画气泡「困死我了…」 |
+| `idle_cute` / `idle_stretch` / `idle_tail_wag` / `idle_sleep` | 资源在盘，**不调度** | 旧猫 / 旧视频，勿写回池 |
+| `idle_watch` | Watching 可加载 | 现网 Watching 仍用 `idle_blink` |
+| `approaching` / `playing_interaction` | 飞扑（**运行关闭**） | |
+| `dragging` / `edge_peek` | 拖动 / 边缘 | |
+| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | 挥手 / 投喂；与哈欠无关 |
 
-**待机规则（调试焦点：静态 + 撒娇 yawn + 伸懒腰）**
+**待机规则**
 
-- Base：`idle_blink`（约 4s @30fps 循环）。  
-- 墙钟约 **60s** 播 **`idle_cute` / `idle_stretch`**（`IDLE_ACTION_ENABLED`）；**Watching / 躲边不饿死** 计时；躲边到点会先 restore。  
-- one-shot 约 2.4–5.3s + settle hold（`ACTION_SETTLE_SECS≈0.20`）；**进入 oneshot 不做 crossfade**，从帧 0 播（sit bookend）。  
-- 呈现：密集 clip **本帧直接 present**（不单靠 `request_redraw`）；`face_dir` 平滑。  
-- 工具链：  
-  - stretch：`harden_pet_face.py` → `gen_stretch_video.py` → `pack_stretch_from_video.py`  
-  - cute yawn：`gen_reminder_yawn_video.py` → `pack_idle_cute_seamless.py`  
-  - 回坐统一：`smooth_oneshot_returns.py`  
-  - 本地加速：`PAWDESK_CUTE_SECS=10`  
-- 脸：**禁止重绘几何粉鼻**；保留原画鼻 RGB，只把 muzzle α 封为 255（`harden_pet_face.py`）。  
-- 播帧 / 缩放：最近邻；禁亚帧混合。普通 clip 切换禁宠体 crossfade；one-shot 回 base 保留约 **100ms** 书挡短过渡（`go_idle_with_settle` + `crossfade_display`）。  
-- Watching：**直接用 `idle_blink`**（关头晃），消灭嘴鼻重影。  
-- 脚底：`FOOT_Y≈224` + 底对齐 present + Show/Occluded 重绑 layered。  
-- `build_lively_pet.py`：**不覆盖** `source: video_stretch*` / `video_reminder_yawn*` / `yawn_keys*` 的已烘焙 clip。
+- Base：`idle_blink`。随机 **2.8–6.2s** 眨一次（约 200ms；约 18% 双眨）。  
+- 头眼：`src/pet/look.rs`。瞳孔先跟（~75ms），头后跟（~155ms）。`look_yaw` 13 帧条带只取偶数关键帧（光流补帧会抖）。下半身锁 `idle_blink/000`。死区外才换姿态条。眨眼时保持转头，不弹回正面。禁止整图镜像。  
+- 墙钟约 **60s** 播 **`idle_yawn`**（`IDLE_ACTION_ENABLED`）。本地可 `PAWDESK_CUTE_SECS`。Watching / 躲边不饿死计时；躲边到点先 restore。哈欠中停转头/眨眼。  
+- 哈欠：`tools/pack_idle_yawn.py` 把五官贴回母版坐姿（不切旧 `idle_cute`）。进场帧 0 书挡；出场 `go_idle_with_settle`。峰值 `src/render/yawn_bubble.rs` 画漫画气泡；窗向右扩（原点不动），贴右屏才 flip 左。  
+- 播帧：最近邻，禁亚帧混合。oneshot 回 base 约 100ms 书挡。  
+- 呈现：密集 clip **本帧直接 present**。缩放预乘双线性。  
+- 飞扑：`ENABLE_MOUSE_POUNCE = false`。
 
 **飞扑**
 
@@ -270,6 +265,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 管理→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
 | 托盘→设置 | `enter_settings_ui` / `enter_settings_ui_highlight`：居中直开，**无** `settings_transition` |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
+| 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定 / 托盘直开设置） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
 卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=4`；**禁止**把产品做成「最多 5 个就装不下」。  
@@ -318,11 +314,20 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 ### 6.2 流程
 
 ```text
-Due → 存原位 → 移中央 → Showing（文案+食物）
-    → 点食物 Feeding → 回原位 Returning → Idle
+Due → 存原位 → 移中央（reminder_wave）
+    → Showing：tishi 整图卡片 400×300（左气泡文案 + 右奶牛猫 + 底部「点击投喂」药丸）
+    → Feeding（~900ms）→ 回原位 Returning → Idle
 ```
 
 拖动中 due → pending；松手后再进。隐藏宠物时 due 可 pending，显示后再出。
+
+**卡片管线**（`render/reminder_ui.rs::load_reminder_card`）
+
+1. 边界 flood 抠白：相邻近白像素（`BG_MIN_RGB=244`，含最浅抗锯齿环）置透明。
+2. 自动裁剪到**内容外框**（+12px 边距），去掉 mockup 四周空白。
+3. **premultiplied 缩放**：颜色先乘 alpha 再缩小、最后除回 → 边缘色只来自画面，无白边/暗晕。
+4. contain-fit 等比放大填窗居中（400×300）：画面占窗口约 50%，醒目不裁切。
+5. 合成底部署「点击投喂」奶油药丸（投喂中变「呼～活力恢复了！」）；点按热区按比例映射（`client_to_layout`）。
 
 ---
 
@@ -434,6 +439,7 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | 动画体积 | 分 clip、按需加载 |
 | 多屏坐标 | work area + 钳制 + 托盘找回 |
 | 长时间时钟 | 单调时钟；休眠后抽测 |
+| 低层鼠标钩子 | `WH_MOUSE_LL` 只装**专用空闲线程**+自有消息泵；回调仅原子操作；不吞点击；卸载走 `PostThreadMessage(WM_QUIT)` + join |
 
 ### 9.2 技术验收（对照 PRD §7）
 
@@ -465,3 +471,5 @@ Due → 存原位 → 移中央 → Showing（文案+食物）
 | v0.7.1 | 2026-08-11 | 文档迁入 `docs/`；§2 目录图补 `README.md` / `docs/` / 资源工具 |
 | v0.7.2 | 2026-08-11 | `idle_cute` yawn 进调度池 · oneshot settle 书挡 |
 | **v0.8** | **2026-08-12** | 设置从启动坞「管理」按钮中心丝滑生长并停靠坞旁（`settings_transition` + `place_settings_near_point` + `settings_rect_at`）；启动坞卡层同步淡出；托盘直开仍居中 |
+| **v0.9** | **2026-08-13** | 正面母版 `idle_blink` 3 帧；头眼跟随（姿态条 + 虹膜）；`idle_yawn` + 漫画气泡；旧 cute/stretch 停调度 |
+| **v0.10** | **2026-08-13** | 提醒卡片 400×300：flood 抠白 244 + 内容裁边 + premultiplied 缩放（去白边）+ contain-fit 放大；启动坞窗外点击关闭（`OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志，不吞点击）；design **v0.12** · prd **v0.7** |

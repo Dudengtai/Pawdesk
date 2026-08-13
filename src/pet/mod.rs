@@ -2,13 +2,15 @@
 
 mod animation;
 mod interaction;
+mod look;
 mod movement;
 mod state;
 
 pub use animation::{
-    AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE,
+    AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE, IDLE_YAWN,
     IDLE_ACTION_INTERVAL_SECS, blend_rgba_premul,
 };
+pub use look::LookController;
 pub use interaction::{DistanceLevel, InteractionDetector};
 pub use movement::{
     approach_duration, return_duration, MovementController, MovementTarget, EDGE_DURATION,
@@ -42,9 +44,17 @@ const FACE_DIR_SPEED: f32 = 12.0;
 /// When `false`, near-range only keeps `Watching` (no leap / fly-to-cursor).
 pub const ENABLE_MOUSE_POUNCE: bool = false;
 
+fn seed_blink_rng(_now: Instant) -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ (d.as_secs() as u32).rotate_left(13))
+        .unwrap_or(0x00C0_FFEE)
+}
+
 /// Reminder UI layout in logical pixels (96 DPI baseline).
-pub const REMINDER_WINDOW_W: u32 = 360;
-pub const REMINDER_WINDOW_H: u32 = 260;
+pub const REMINDER_WINDOW_W: u32 = 400;
+pub const REMINDER_WINDOW_H: u32 = 300;
 /// Design baseline pet window (logical px @ 96 DPI). Actual size = baseline × `pet.scale`.
 pub const PET_WINDOW_SIZE: u32 = 128;
 pub const FOOD_BUTTON_SIZE: f32 = 64.0;
@@ -101,6 +111,13 @@ pub struct PetController {
     crossfade_t: f32,
     /// Whether the captured crossfade is visible (one-shot return only).
     crossfade_display: bool,
+    /// Wait started at this instant; blink fires after [`Self::blink_wait`].
+    blink_anchor: Instant,
+    blink_wait: f32,
+    blink_double: bool,
+    blink_rng: u32,
+    look: LookController,
+    look_last: Instant,
 }
 
 impl PetController {
@@ -160,6 +177,12 @@ impl PetController {
             crossfade_started: None,
             crossfade_t: 1.0,
             crossfade_display: false,
+            blink_anchor: now,
+            blink_wait: 3.2,
+            blink_double: false,
+            blink_rng: seed_blink_rng(now),
+            look: LookController::default(),
+            look_last: now,
         }
     }
 
@@ -171,14 +194,37 @@ impl PetController {
     /// [`AnimationClip::frame_rgba_smooth`].
     pub fn display_rgba(&self) -> Vec<u8> {
         let current = self.active_clip().frame_rgba_smooth(self.display_frame_f);
-        if self.crossfade_display {
+        let blended = if self.crossfade_display {
             if let Some(from) = &self.crossfade_from {
                 if self.crossfade_t < 1.0 {
-                    return blend_rgba_premul(from, &current, self.crossfade_t);
+                    blend_rgba_premul(from, &current, self.crossfade_t)
+                } else {
+                    current
                 }
+            } else {
+                current
             }
+        } else {
+            current
+        };
+        if self.player.clip_name() != IDLE_BASE {
+            return blended;
         }
-        current
+        // Keep the turned pose while blinking. Falling back to idle_blink
+        // snaps the whole head to the front for ~200ms and reads as shake.
+        if let Some(pose) = self.look_pose_rgba() {
+            return pose;
+        }
+        let clip = self.active_clip();
+        look::apply_look(
+            &blended,
+            clip.frame_width,
+            clip.frame_height,
+            self.look.eye,
+            self.look.head,
+            self.current_frame,
+            0.0,
+        )
     }
 
     /// True while a clip crossfade is still visible (caller should keep presenting).
@@ -246,6 +292,7 @@ impl PetController {
             self.menu_closing = false;
         }
         self.movement.cancel();
+        self.look.snap_curious_off();
         if let Ok(s) = try_transition(&self.state, PetState::Dragging) {
             self.state = s;
             self.drag_scale = 1.05;
@@ -387,9 +434,14 @@ impl PetController {
         debug!("pet end drag -> idle base");
     }
 
+    pub fn update_gaze(&mut self, cursor: Point, pet_center: Point, track: bool) {
+        self.look.set_from_cursor(cursor, pet_center, track);
+    }
+
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = self.tick_crossfade(now);
         changed |= self.tick_face_dir(now);
+        changed |= self.tick_look(now);
 
         // Dragging: keep swing clip alive + subtle scale pulse (was frozen before).
         if matches!(self.state, PetState::Dragging) {
@@ -407,19 +459,21 @@ impl PetController {
             return changed;
         }
 
-        let on_base = self.player.clip_name() == IDLE_BASE && self.state.is_idle();
         let on_action = self.state.is_idle()
             && self.player.clip_name() != IDLE_BASE
             && !self.player.is_looping();
+        let on_blink_base = self.player.clip_name() == IDLE_BASE
+            && self.player.frame_count_pub() <= 4
+            && !matches!(self.state, PetState::Dragging);
 
         // Approaching: pose phase = hop progress (coherent pounce).
         // Dense clips (≥8 frames): continuous player / progress sampling at 30fps.
-        // Tiny blink clips (≤4 frames): legacy hold-based blink.
+        // Tiny blink clips (≤4 frames): hold-based blink on the sit master.
         let (frame, finished) = if matches!(self.state, PetState::Approaching { .. })
             && self.movement.is_cursor_approach()
         {
             self.tick_pounce_synced(now)
-        } else if on_base && self.player.frame_count_pub() <= 4 {
+        } else if on_blink_base {
             self.tick_blink_hold(now)
         } else {
             self.tick_continuous(now)
@@ -546,44 +600,151 @@ impl PetController {
         true
     }
 
-    /// `idle_blink` clip layout: [0]=open, [1]=half, [2]=closed (any extra frames ignored).
-    /// Cycle ≈ 4.0s: mostly open, ~200ms blink. Returns `(frame, finished_cycle_unused)`.
+    /// `idle_blink` layout: [0]=open, [1]=half, [2]=closed.
+    /// Wait 2.8–6.2s, then a ~200ms blink; about 1 in 6 is a double blink.
     fn tick_blink_hold(&mut self, now: Instant) -> (u32, bool) {
-        const CYCLE_SECS: f32 = 4.0;
-        const BLINK_AT: f32 = 3.55;
+        const HALF_IN: f32 = 0.06;
+        const CLOSED: f32 = 0.08;
+        const HALF_OUT: f32 = 0.06;
+        const BLINK_LEN: f32 = HALF_IN + CLOSED + HALF_OUT;
+        const DOUBLE_GAP: f32 = 0.10;
+
         let n = self.player.frame_count_pub().max(1);
         let open = 0u32;
         let half = 1u32.min(n - 1);
         let closed = 2u32.min(n - 1);
 
-        let elapsed = now
-            .duration_since(self.player.started_at_pub())
-            .as_secs_f32();
-        let t = elapsed % CYCLE_SECS;
-        let (frame, frac) = if t < BLINK_AT {
-            (open, 0.0)
-        } else if t < BLINK_AT + 0.07 {
-            (open, (t - BLINK_AT) / 0.07)
-        } else if t < BLINK_AT + 0.16 {
-            (half, (t - BLINK_AT - 0.07) / 0.09)
-        } else if t < BLINK_AT + 0.24 {
-            (closed, (t - BLINK_AT - 0.16) / 0.08)
+        let elapsed = now.duration_since(self.blink_anchor).as_secs_f32();
+        if elapsed < self.blink_wait {
+            self.display_frame_f = open as f32;
+            return (open, false);
+        }
+
+        let mut t = elapsed - self.blink_wait;
+        let in_second = self.blink_double && t >= BLINK_LEN + DOUBLE_GAP;
+        if in_second {
+            t -= BLINK_LEN + DOUBLE_GAP;
+        }
+
+        let all_done = if self.blink_double {
+            in_second && t >= BLINK_LEN
         } else {
-            (open, 0.0)
+            t >= BLINK_LEN
         };
-        // Map hold blink onto continuous index between open/half/closed.
-        self.display_frame_f = match frame {
-            f if f == open && t >= BLINK_AT && t < BLINK_AT + 0.07 => {
-                open as f32 + frac * (half as f32 - open as f32)
-            }
-            f if f == half => half as f32 + frac * (closed as f32 - half as f32).max(0.0),
-            f if f == closed => {
-                closed as f32 + frac * (half as f32 - closed as f32)
-            }
-            _ => open as f32,
+        if all_done {
+            self.schedule_next_blink(now);
+            self.display_frame_f = open as f32;
+            return (open, false);
+        }
+
+        let frame = if t < HALF_IN {
+            half
+        } else if t < HALF_IN + CLOSED {
+            closed
+        } else if t < BLINK_LEN {
+            half
+        } else {
+            open
         };
-        let _ = closed;
-        (self.display_frame_f.floor() as u32, false)
+        self.display_frame_f = frame as f32;
+        (frame, false)
+    }
+
+    fn tick_look(&mut self, now: Instant) -> bool {
+        let curious = matches!(self.state, PetState::Watching)
+            && !matches!(self.state, PetState::Dragging)
+            && !self.state.is_reminder();
+        self.look.set_curious(curious);
+        let dt = now.duration_since(self.look_last).as_secs_f32();
+        self.look_last = now;
+        let moved = self.look.tick(dt);
+        let strength = self.look.head.0.abs().max(self.look.head.1.abs());
+        if strength <= look::YAW_STRIP_DEADZONE {
+            self.look.set_last_pose(None);
+        } else {
+            let yaw_n = self
+                .library
+                .get(look::LOOK_YAW)
+                .map(|c| c.frame_count)
+                .unwrap_or(0);
+            let pitch_n = self
+                .library
+                .get(look::LOOK_PITCH)
+                .map(|c| c.frame_count)
+                .unwrap_or(0);
+            let diag_n = self
+                .library
+                .get(look::LOOK_DIAG)
+                .map(|c| c.frame_count)
+                .unwrap_or(0);
+            if yaw_n + pitch_n + diag_n > 0 {
+                let pick = look::pick_look_pose(
+                    self.look.head,
+                    yaw_n,
+                    pitch_n,
+                    diag_n,
+                    self.look.last_pose(),
+                );
+                self.look.set_last_pose(Some(pick));
+            }
+        }
+        moved
+    }
+
+    /// Baked yaw / pitch / diagonal frame for the current head pose.
+    /// Front-equivalent frames fall through so idle_blink + pupils stay in charge.
+    fn look_pose_rgba(&self) -> Option<Vec<u8>> {
+        let strength = self.look.head.0.abs().max(self.look.head.1.abs());
+        if strength <= look::YAW_STRIP_DEADZONE {
+            return None;
+        }
+        let yaw_n = self.library.get(look::LOOK_YAW).map(|c| c.frame_count).unwrap_or(0);
+        let pitch_n = self
+            .library
+            .get(look::LOOK_PITCH)
+            .map(|c| c.frame_count)
+            .unwrap_or(0);
+        let diag_n = self.library.get(look::LOOK_DIAG).map(|c| c.frame_count).unwrap_or(0);
+        if yaw_n + pitch_n + diag_n == 0 {
+            return None;
+        }
+        let pick = self.look.last_pose().unwrap_or_else(|| {
+            look::pick_look_pose(self.look.head, yaw_n, pitch_n, diag_n, None)
+        });
+        let is_front = match pick.strip {
+            look::LookStrip::Yaw => pick.frame == look::yaw_frame_index(0.0, yaw_n),
+            look::LookStrip::Pitch => pick.frame == look::pitch_frame_index(0.0, pitch_n),
+            look::LookStrip::Diag => false,
+        };
+        if is_front {
+            return None;
+        }
+        let clip = match pick.strip {
+            look::LookStrip::Yaw => self.library.get(look::LOOK_YAW)?,
+            look::LookStrip::Pitch => self.library.get(look::LOOK_PITCH)?,
+            look::LookStrip::Diag => self.library.get(look::LOOK_DIAG)?,
+        };
+        let pose = clip.frame_rgba(pick.frame);
+        let master = self.library.get(IDLE_BASE)?;
+        if master.frame_width == clip.frame_width && master.frame_height == clip.frame_height {
+            Some(look::stabilize_look_rgba(
+                &pose,
+                &master.frame_rgba(0),
+                clip.frame_width,
+                clip.frame_height,
+            ))
+        } else {
+            Some(pose)
+        }
+    }
+
+    fn schedule_next_blink(&mut self, now: Instant) {
+        self.blink_anchor = now;
+        self.blink_rng = self.blink_rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let u = ((self.blink_rng >> 8) as f32) / 16_777_216.0;
+        self.blink_wait = 2.8 + u * 3.4;
+        self.blink_rng = self.blink_rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.blink_double = (self.blink_rng % 100) < 18;
     }
 
     /// Map hop progress `t∈[0,1]` onto continuous `approaching` frames (smooth 30fps).
@@ -745,6 +906,35 @@ impl PetController {
         self.state.is_idle()
             && self.player.clip_name() != IDLE_BASE
             && !self.player.is_looping()
+    }
+
+    pub fn is_playing_yawn(&self) -> bool {
+        self.is_playing_cute_action() && self.player.clip_name() == IDLE_YAWN
+    }
+
+    /// 0 = hidden, 1 = full comic bubble. Only while `idle_yawn` is on the peak hold.
+    pub fn yawn_bubble_alpha(&self) -> f32 {
+        if !self.is_playing_yawn() {
+            return 0.0;
+        }
+        let clip = self.active_clip();
+        let n = clip.frame_count.max(1);
+        let last = (n - 1) as f32;
+        let start = clip.peak_start.unwrap_or((n as f32 * 0.18) as u32) as f32;
+        let end = clip.peak_end.unwrap_or((n as f32 * 0.73) as u32) as f32;
+        let fade = (clip.fps * 0.12).clamp(2.0, 6.0);
+        let f = self.display_frame_f.clamp(0.0, last);
+        if f < start {
+            0.0
+        } else if f < start + fade {
+            ((f - start) / fade).clamp(0.0, 1.0)
+        } else if f <= end - fade {
+            1.0
+        } else if f <= end {
+            ((end - f) / fade).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     fn enter_watching_if_base_idle(&mut self, now: Instant) {
@@ -989,6 +1179,7 @@ impl PetController {
     ) -> bool {
         // Cancel competing movement/interaction.
         self.movement.cancel();
+        self.look.snap_curious_off();
         self.interaction_started = None;
         self.home_position = None;
 

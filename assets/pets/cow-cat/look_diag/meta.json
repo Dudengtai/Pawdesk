@@ -1,0 +1,27 @@
+{
+  "name": "look_diag",
+  "frame_width": 256,
+  "frame_height": 256,
+  "frames": 4,
+  "fps": 24.0,
+  "loop": false,
+  "files": [
+    "0.png",
+    "1.png",
+    "2.png",
+    "3.png"
+  ],
+  "look_x": [
+    -0.5,
+    -0.5,
+    0.5,
+    0.5
+  ],
+  "look_y": [
+    -0.75,
+    0.75,
+    -0.75,
+    0.75
+  ],
+  "notes": "Diagonal look: 0 down-left, 1 up-left, 2 down-right, 3 up-right."
+}

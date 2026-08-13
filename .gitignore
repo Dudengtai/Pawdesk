@@ -16,3 +16,7 @@
 /screenshot*.png
 /ScreenShot*.png
 /*.tmp.rs
+
+# Python tool caches
+__pycache__/
+*.pyc

@@ -4,6 +4,7 @@ pub mod easing;
 pub mod menu_ui;
 pub mod reminder_ui;
 pub mod text;
+pub mod yawn_bubble;
 // Kept for future GPU overlays; pet present path is CPU UpdateLayeredWindow only.
 #[allow(dead_code)]
 mod wgpu_renderer;

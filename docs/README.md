@@ -16,7 +16,7 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| [mockups/](./mockups/) | 启动坞 HTML/PNG 原型（`launcher-preview` · `launcher-pin-flip`） |
+| [mockups/](./mockups/) | 启动坞原型；母版坐姿/转头条带评审图 |
 
 ## 阅读顺序（新人）
 

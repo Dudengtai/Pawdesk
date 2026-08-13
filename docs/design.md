@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.10**（2026-08-12：设置从「管理」按钮丝滑生长并停靠启动坞旁） |
-| 依据 | `prd.md` v0.5 · `tech.md` v0.8 |
-| 效果图 | `mockups/launcher-preview.*` · `launcher-pin-flip.*` |
+| 版本 | **v0.12**（2026-08-13：正面母版；头眼跟随；哈欠 + 气泡；提醒 = `tishi.png` 整图卡片 400×300 裁边放大去白边；启动坞点击坞窗外关闭） |
+| 依据 | `prd.md` v0.7 · `tech.md` v0.10 |
+| 效果图 | `mockups/launcher-preview.*` · `launcher-pin-flip.*` · `tishi.png`（提醒卡片） |
 
 ---
 
@@ -125,9 +125,9 @@
 
 | 用户感知 | 状态 | 视觉要点 |
 | --- | --- | --- |
-| 日常待机 | Idle base | **近静坐姿** + **真眨眼**（上眼皮遮虹膜；禁止半透明黑椭圆叠在黄眼上） |
-| 撒娇 | Idle one-shot | **`idle_cute`（打哈欠）+ `idle_stretch`（侧视朝左、横铺桌面）**；轻摇/小睡 **暂停调度** |
-| 在看你 | Watching | 轻晃注视；可朝向光标（水平镜像） |
+| 日常待机 | Idle base | **正面坐姿** + **真眨眼**（上眼皮遮虹膜）+ **头眼跟随**（不整图翻转） |
+| 撒娇 | Idle one-shot | **`idle_yawn`**：同一只母版猫张嘴；峰值漫画气泡「困死我了…」 |
+| 在看你 | Watching | 仍坐姿待机；头眼跟光标；不左右镜像 |
 | 飞扑（后期） | Approaching + Playing | 扑近 + 落地互动 |
 | 被拎起 | Dragging | 后颈枢轴晃动 + 轻微 scale 脉冲 |
 | 躲边 | HiddenAtEdge | 半身 + 探头 |
@@ -138,24 +138,13 @@
 
 ### 3.3 待机节奏（体验）
 
-- 默认有**微生命感**：轻呼吸 + 真眨眼（可双眨）+ 极轻头位；**不以大幅身体 morph 当第二套动画**。  
-- 约 **60s（1 分钟）** 来一次撒娇；鼠标在旁边观察时**不要饿死**这一定时感。  
-- **当前调试焦点（2026-08-11）**：静态待机 `idle_blink` + 撒娇 `idle_cute` + 伸懒腰 `idle_stretch`。  
-  - 调度池：`IDLE_ACTION_ENABLED = ["idle_cute", "idle_stretch"]`（`src/pet/animation.rs`）  
-  - `idle_tail_wag` / `idle_sleep` **资源保留、不进池**  
-- 伸懒腰：侧视、**面朝左**、身体横在桌面；首尾回坐姿。  
-- 撒娇忌「闪一下」；one-shot 末帧短 hold 再回待机。  
-- clip 切换：oneshot **不** sit→sit crossfade；回 base 保留约 **100ms** 书挡短过渡（兜底收尾残余像素，`go_idle_with_settle`）。  
-
-**资源**  
-- 伸懒腰：`python tools/gen_stretch_video.py` → `python tools/pack_stretch_from_video.py`（`video_stretch_v3_side_left`）  
-- 撒娇 yawn：`python tools/gen_reminder_yawn_video.py` → `python tools/pack_idle_cute_seamless.py`（`video_reminder_yawn_fluid`，首尾 ≡ `idle_blink/000`）  
-- 回坐收尾：`python tools/smooth_oneshot_returns.py`（统一 cute/stretch 尾帧 settle）  
-- 脸/脚：`python tools/harden_pet_face.py`（实心鼻/嘴 α=255；待机**无呼吸**只眨眼，防重影）  
-- 其它 warp 底：`tools/build_lively_pet.py`（**不会覆盖** `source: video_stretch*` 的 stretch / `video_reminder_yawn*` 的 cute）  
-
-**呈现**  
-- 宠物纵向 **底对齐**（护脚）；隐藏/最小化恢复时重绑 layered 并立刻 present。
+- 微生命感：真眨眼（可双眨）+ 头眼跟随；**身体钉在母版坐姿**，不靠整段视频换一只猫。  
+- 约 **60s** 打一次哈欠；鼠标在旁边观察时不要饿死计时。  
+- 调度：`IDLE_ACTION_ENABLED = ["idle_yawn"]`。旧 `idle_cute` / `idle_stretch` 资源保留、不进池。  
+- 哈欠：同一只正面猫；峰值奶油色墨线气泡「困死我了…」，默认出在头右侧。拖动 / 开坞可打断并回坐。  
+- oneshot 从坐姿书挡进，回 base 约 **100ms** 书挡（`go_idle_with_settle`）。  
+- 打包哈欠：`python tools/pack_idle_yawn.py`（五官贴回 `idle_blink/000`，外轮廓不换）。  
+- 呈现：宠体底对齐；哈欠扩窗不写 config 位置。
 
 ---
 
@@ -263,6 +252,7 @@
 | Hover | ~100ms `approach` 插值底色 / 阴影 |
 | Press | scale **0.97** + translateY +1px；~80ms 入、松开回弹 |
 | 布局 | **开局锁定 placement**，中途不二次 flip；hit-test 用**最终几何**（视觉偏移不改 hit） |
+| 窗外点击 | 左键点在坞窗矩形外的桌面 / 其他窗口 → 关闭启动坞（`WH_MOUSE_LL` 观察型钩子，不吞点击） |
 | 帧率 | 坞打开期间呈现 **~60fps**（见 tech §5 / §8） |
 
 控件配方：
@@ -305,19 +295,22 @@
 ### 6.1 流程视觉
 
 ```text
-原位 → 移到屏幕中央 → 提醒姿 + 幽默文案
-     → 食物按钮 → 投喂反馈 → 回原位待机
+原位 → 移到屏幕中央 → 提醒卡片（tishi.png 整图）→ 点击投喂 → 回原位待机
 ```
+
+- 提醒窗口 = **整图卡片**（`mockups/tishi.png` → `assets/ui/reminder_card.png`）400×300：左边奶油气泡三行幽默文案、右边奶牛猫；白底按边界 flood-fill 抠成透明，自动裁剪到内容外框 + premultiplied 缩放（去白边）、按比例放大填满窗口（很醒目）。文案固定为图中文字，不再轮换。  
+- 图内无投喂按钮：底部中央叠一枚小奶油药丸（「点击投喂」，投喂中变「呼～活力恢复了！」）；点击区沿用原底部中央热区。
 
 ### 6.2 交互
 
-- 文案幽默、可投喂完成；托盘可暂停。  
+- 可投喂完成；托盘可暂停。  
 - 提醒中拖动：不丢状态，拖完再继续。  
 - 食物按钮命中清晰；主色可用粉强调 `accent.primary`。
 
 ### 6.3 文案
 
-使用 PRD 文案池；可轮换。字号提醒档 20px 级。
+使用 PRD 文案池；可轮换。字号提醒档 20px 级。  
+（整图卡片采用图中固定文案后，代码文案池仅作 fallback 保留。）
 
 ---
 
@@ -425,3 +418,5 @@ assets/tray/icon.png
 | **v0.9** | **2026-08-10** | 添加应用：不闪 z-order；虚拟桌面显示全部快捷方式；tech **v0.7** |
 | v0.9.1 | 2026-08-11 | `idle_cute` yawn + stretch 双 oneshot · 无缝回坐 |
 | **v0.10** | **2026-08-12** | 设置从「管理」按钮中心丝滑生长并停靠启动坞旁；启动坞卡层同步淡出；tech **v0.8** |
+| **v0.11** | **2026-08-13** | 正面母版待机；头眼跟随不镜像；`idle_yawn` + 漫画气泡；tech **v0.9** |
+| **v0.12** | **2026-08-13** | 提醒窗口 **400×300**：卡片自动裁边放大 + premultiplied 去白边；启动坞**点击坞窗外任意位置关闭**（`WH_MOUSE_LL` 观察型钩子、专用线程，不吞点击）；prd **v0.7** · tech **v0.10** |
