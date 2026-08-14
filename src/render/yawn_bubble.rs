@@ -70,6 +70,9 @@ pub fn compose_yawn_frame(
     let h = place.window.height.max(1) as u32;
     let mut out = vec![0u8; (w * h * 4) as usize];
 
+    // Caller must pass a pet buffer already presented at pet_phys×pet_phys
+    // (same letterbox as idle `scale_rgba_centered`). Scaling 256→phys here
+    // without those margins made the sit pop larger for the whole yawn.
     let (pw, ph, scaled) = scale_premul_bilinear(pet_rgba, pet_sw, pet_sh, pet_phys, pet_phys);
     blit_rgba(
         &mut out,

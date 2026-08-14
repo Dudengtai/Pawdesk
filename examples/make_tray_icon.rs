@@ -22,9 +22,8 @@ fn main() {
     }
 
     let candidates = [
-        "assets/pets/cow-cat/idle_blink/00.png",
-        "assets/pets/cow-cat/_master/base_sit.png",
-        "assets/pets/cow-cat/_master/base_sit_128.png",
+        "assets/pets/cow-cat/idle_blink/000.png",
+        "assets/pets/cow-cat/_master/sit_master.png",
     ];
     let mut img = None;
     for c in candidates {

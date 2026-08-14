@@ -655,10 +655,22 @@ impl App {
                 let pet_rgba = pet.display_rgba();
                 let dpr = snap_dpr(self.scale_factor);
                 let pet_phys = logical_to_physical(self.pet_size(), dpr) as u32;
-                let (w, h, composed) = compose_yawn_frame(
+                // Idle present letterboxes the 256 sprite (side/top/paw margins).
+                // Filling the overlay box 1:1 made the cat pop larger on yawn
+                // enter and shrink on exit. Match the idle scaler exactly.
+                let letterboxed = scale_rgba_centered(
                     &pet_rgba,
                     clip.frame_width,
                     clip.frame_height,
+                    pet_phys,
+                    pet_phys,
+                    1.0,
+                    false,
+                );
+                let (w, h, composed) = compose_yawn_frame(
+                    &letterboxed,
+                    pet_phys,
+                    pet_phys,
                     place,
                     pet_phys,
                     pet.yawn_bubble_alpha(),

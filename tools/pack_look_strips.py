@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import cv2
@@ -217,7 +218,20 @@ def pack_pitch(
     )
     frames = [down, slight_down, front, slight_up, up]
     PITCH_DIR.mkdir(parents=True, exist_ok=True)
+    # Prefer the regenerated magenta stills (tools/pack_pitch_from_gen.py).
+    gen_dir = PITCH_DIR / "_gen"
+    if (gen_dir / "0.jpg").exists():
+        print("look_pitch/_gen present — skip legacy pitch pack (use pack_pitch_from_gen.py)")
+        return [load_rgba(PITCH_DIR / f"{i}.png") for i in range(5)]
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from smooth_look_edges import smooth_look_rgba
+    except ImportError:
+        smooth_look_rgba = None  # type: ignore
     for i, f in enumerate(frames):
+        if i != 2 and smooth_look_rgba is not None:
+            f = smooth_look_rgba(f)
+            frames[i] = f
         save_rgba(f, PITCH_DIR / f"{i}.png")
     ys = [-1.0, -0.5, 0.0, 0.5, 1.0]
     meta = {

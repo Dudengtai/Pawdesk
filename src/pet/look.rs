@@ -277,6 +277,18 @@ impl LookController {
 /// Lock paws / tail / lower chest to the front master so authored look keys
 /// don't bounce the sit silhouette when the head steps.
 pub fn stabilize_look_rgba(look: &[u8], master: &[u8], w: u32, h: u32) -> Vec<u8> {
+    stabilize_look_rgba_ex(look, master, w, h, false)
+}
+
+/// `lock_silhouette`: keep the master's sit outline (look-down keys are
+/// face-only; their authored stroke is a jagged chroma-key fringe).
+pub fn stabilize_look_rgba_ex(
+    look: &[u8],
+    master: &[u8],
+    w: u32,
+    h: u32,
+    lock_silhouette: bool,
+) -> Vec<u8> {
     const BODY_Y0: u32 = 160;
     const LOCK_Y: i32 = 158;
     const FEATHER: i32 = 16;
@@ -316,14 +328,67 @@ pub fn stabilize_look_rgba(look: &[u8], master: &[u8], w: u32, h: u32) -> Vec<u8
         };
         for x in 0..w {
             let i = ((y as u32 * w + x) * 4) as usize;
-            for c in 0..4 {
-                let a = out[i + c] as f32;
-                let b = master[i + c] as f32;
-                out[i + c] = (a * (1.0 - t) + b * t).round() as u8;
+            // Premultiplied lerp: straight RGB lerp pulls edge texels toward
+            // black/magenta whenever the two silhouettes disagree.
+            let a0 = out[i + 3] as f32 / 255.0;
+            let b0 = master[i + 3] as f32 / 255.0;
+            let oa = a0 * (1.0 - t) + b0 * t;
+            if oa < 1.0 / 255.0 {
+                out[i] = 0;
+                out[i + 1] = 0;
+                out[i + 2] = 0;
+                out[i + 3] = 0;
+                continue;
+            }
+            for c in 0..3 {
+                let ac = out[i + c] as f32 * a0;
+                let bc = master[i + c] as f32 * b0;
+                out[i + c] = ((ac * (1.0 - t) + bc * t) / oa).round() as u8;
+            }
+            out[i + 3] = (oa * 255.0).round() as u8;
+        }
+    }
+    if lock_silhouette {
+        apply_master_silhouette(&mut out, master, w, h);
+    }
+    out
+}
+
+fn apply_master_silhouette(out: &mut [u8], master: &[u8], w: u32, h: u32) {
+    let wi = w as i32;
+    let hi = h as i32;
+    for y in 0..hi {
+        for x in 0..wi {
+            let i = ((y as u32 * w + x as u32) * 4) as usize;
+            let ma = master[i + 3];
+            if ma < 8 {
+                out[i] = 0;
+                out[i + 1] = 0;
+                out[i + 2] = 0;
+                out[i + 3] = 0;
+                continue;
+            }
+            let mut edge = false;
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let nx = x + dx;
+                let ny = y + dy;
+                if nx < 0 || ny < 0 || nx >= wi || ny >= hi {
+                    edge = true;
+                    break;
+                }
+                let ni = ((ny as u32 * w + nx as u32) * 4 + 3) as usize;
+                if master[ni] < 40 {
+                    edge = true;
+                    break;
+                }
+            }
+            if edge {
+                out[i..i + 4].copy_from_slice(&master[i..i + 4]);
+            } else {
+                out[i + 3] = ma;
             }
         }
     }
-    out
 }
 
 fn body_centroid(rgba: &[u8], w: u32, h: u32, y0: u32) -> Option<(f32, f32)> {
@@ -631,5 +696,59 @@ mod tests {
         let y = 28u32;
         let i = ((y * w + 16) * 4) as usize;
         assert_eq!(&out[i..i + 4], &master[i..i + 4]);
+    }
+
+    #[test]
+    fn stabilize_premul_does_not_blacken_look_edge() {
+        // Tall enough to hit LOCK_Y ± FEATHER (~142..174).
+        let w = 8u32;
+        let h = 180u32;
+        let mut look = vec![0u8; (w * h * 4) as usize];
+        let master = vec![0u8; look.len()];
+        // Opaque cream fur on the look frame at the blend line; master is clear.
+        let y = 158u32;
+        let i = ((y * w + 3) * 4) as usize;
+        look[i] = 220;
+        look[i + 1] = 200;
+        look[i + 2] = 180;
+        look[i + 3] = 255;
+        let out = stabilize_look_rgba(&look, &master, w, h);
+        // Straight RGB lerp would pull (220,200,180) toward 0. Premul keeps hue.
+        assert!(out[i] > 180, "r={}", out[i]);
+        assert!(out[i + 1] > 160, "g={}", out[i + 1]);
+        assert!(out[i + 2] > 140, "b={}", out[i + 2]);
+        assert!(out[i + 3] > 80 && out[i + 3] < 200, "a={}", out[i + 3]);
+    }
+
+    #[test]
+    fn lock_silhouette_drops_look_outline_outside_master() {
+        let w = 16u32;
+        let h = 16u32;
+        let mut master = vec![0u8; (w * h * 4) as usize];
+        let mut look = vec![0u8; master.len()];
+        for y in 4..12 {
+            for x in 4..12 {
+                let i = ((y * w + x) * 4) as usize;
+                master[i] = 30;
+                master[i + 1] = 30;
+                master[i + 2] = 30;
+                master[i + 3] = 255;
+            }
+        }
+        // Jagged look stroke one pixel outside the master.
+        for y in 3..13 {
+            for x in 3..13 {
+                let i = ((y * w + x) * 4) as usize;
+                look[i] = 180;
+                look[i + 1] = 40;
+                look[i + 2] = 80;
+                look[i + 3] = 255;
+            }
+        }
+        let out = stabilize_look_rgba_ex(&look, &master, w, h, true);
+        let outside = ((3u32 * w + 3) * 4) as usize;
+        assert_eq!(out[outside + 3], 0, "look fringe outside master must vanish");
+        let inside = ((8u32 * w + 8) * 4) as usize;
+        assert_eq!(out[inside + 3], 255);
     }
 }

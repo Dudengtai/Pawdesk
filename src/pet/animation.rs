@@ -154,12 +154,7 @@ impl AnimationLibrary {
             "look_yaw",
             "look_pitch",
             "look_diag",
-            "idle_stretch",
-            "idle_cute",
             "idle_yawn",
-            "idle_tail_wag",
-            "idle_sleep",
-            "idle_watch",
         ];
         let mut clips = Vec::new();
         for name in names {
@@ -251,12 +246,7 @@ impl AnimationLibrary {
             "look_yaw",
             "look_pitch",
             "look_diag",
-            "idle_stretch",
-            "idle_cute",
             "idle_yawn",
-            "idle_tail_wag",
-            "idle_sleep",
-            "idle_watch",
         ];
         for name in names {
             let dir = pet_dir.join(name);

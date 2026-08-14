@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.10**（2026-08-13：提醒卡片 400×300 裁边放大 + premultiplied 去白边；启动坞窗外点击观察型钩子，专用线程） |
-| 依据 | `prd.md` v0.7 · `design.md` v0.12 |
+| 版本 | **v0.11**（2026-08-14：`look_pitch` 重画；哈欠 overlay 与待机同 letterbox；旧 cute/stretch/sleep/wag/watch 下盘） |
+| 依据 | `prd.md` v0.7.1 · `design.md` v0.13 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -91,7 +91,7 @@ src/
 
 assets/pets/cow-cat/    分 clip 帧序列 + meta.json
 assets/tray/            托盘图标
-tools/                  抽帧、打包、despill/软边/stretch 重建
+tools/                  抽帧、打包、despill/软边、look_pitch 重打包
 dist/PawDesk/           便携包（package.ps1）
 ```
 
@@ -137,10 +137,8 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | Clip | 用途 | 备注 |
 | --- | --- | --- |
 | `idle_blink` | 默认待机 | 正面母版坐姿；开 / 半闭 / 闭 3 帧 hold |
-| `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 姿态条；运行时只用手写关键帧 + 身体锁定；虹膜另叠 |
+| `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 姿态条；运行时只用手写关键帧 + 身体锁定（预乘混合）；虹膜另叠。`look_pitch` 由母版品红静帧软抠重画（`tools/pack_pitch_from_gen.py`） |
 | `idle_yawn` | 60s one-shot | ~77f @30；母版脸哈欠；峰值画气泡「困死我了…」 |
-| `idle_cute` / `idle_stretch` / `idle_tail_wag` / `idle_sleep` | 资源在盘，**不调度** | 旧猫 / 旧视频，勿写回池 |
-| `idle_watch` | Watching 可加载 | 现网 Watching 仍用 `idle_blink` |
 | `approaching` / `playing_interaction` | 飞扑（**运行关闭**） | |
 | `dragging` / `edge_peek` | 拖动 / 边缘 | |
 | `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | 挥手 / 投喂；与哈欠无关 |
@@ -148,12 +146,14 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 **待机规则**
 
 - Base：`idle_blink`。随机 **2.8–6.2s** 眨一次（约 200ms；约 18% 双眨）。  
-- 头眼：`src/pet/look.rs`。瞳孔先跟（~75ms），头后跟（~155ms）。`look_yaw` 13 帧条带只取偶数关键帧（光流补帧会抖）。下半身锁 `idle_blink/000`。死区外才换姿态条。眨眼时保持转头，不弹回正面。禁止整图镜像。  
+- 头眼：`src/pet/look.rs`。瞳孔先跟（~75ms），头后跟（~155ms）。`look_yaw` 13 帧条带只取偶数关键帧（光流补帧会抖）。下半身锁 `idle_blink/000`（预乘 lerp，避免交界发黑）。死区外才换姿态条。眨眼时保持转头，不弹回正面。禁止整图镜像。  
 - 墙钟约 **60s** 播 **`idle_yawn`**（`IDLE_ACTION_ENABLED`）。本地可 `PAWDESK_CUTE_SECS`。Watching / 躲边不饿死计时；躲边到点先 restore。哈欠中停转头/眨眼。  
-- 哈欠：`tools/pack_idle_yawn.py` 把五官贴回母版坐姿（不切旧 `idle_cute`）。进场帧 0 书挡；出场 `go_idle_with_settle`。峰值 `src/render/yawn_bubble.rs` 画漫画气泡；窗向右扩（原点不动），贴右屏才 flip 左。  
+- 哈欠：`tools/pack_idle_yawn.py` 把五官贴回母版坐姿。进场帧 0 书挡；出场 `go_idle_with_settle`。峰值 `src/render/yawn_bubble.rs` 画漫画气泡；窗向右扩（原点不动），贴右屏才 flip 左。  
+- 哈欠呈现：overlay 里的猫必须先走待机同一套 `scale_rgba_centered` letterbox（左右/顶/爪边距），再 `compose_yawn_frame`。禁止把 256 图铺满 `pet_phys`（进出哈欠会突然放大/缩小）。书挡帧与 `idle_blink/000` 像素一致。  
 - 播帧：最近邻，禁亚帧混合。oneshot 回 base 约 100ms 书挡。  
 - 呈现：密集 clip **本帧直接 present**。缩放预乘双线性。  
-- 飞扑：`ENABLE_MOUSE_POUNCE = false`。
+- 飞扑：`ENABLE_MOUSE_POUNCE = false`。  
+- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` + 互动 clip。旧 `idle_cute` / `idle_stretch` / `idle_tail_wag` / `idle_sleep` / `idle_watch` **已下盘**。
 
 **飞扑**
 
@@ -473,3 +473,4 @@ Due → 存原位 → 移中央（reminder_wave）
 | **v0.8** | **2026-08-12** | 设置从启动坞「管理」按钮中心丝滑生长并停靠坞旁（`settings_transition` + `place_settings_near_point` + `settings_rect_at`）；启动坞卡层同步淡出；托盘直开仍居中 |
 | **v0.9** | **2026-08-13** | 正面母版 `idle_blink` 3 帧；头眼跟随（姿态条 + 虹膜）；`idle_yawn` + 漫画气泡；旧 cute/stretch 停调度 |
 | **v0.10** | **2026-08-13** | 提醒卡片 400×300：flood 抠白 244 + 内容裁边 + premultiplied 缩放（去白边）+ contain-fit 放大；启动坞窗外点击关闭（`OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志，不吞点击）；design **v0.12** · prd **v0.7** |
+| **v0.11** | **2026-08-14** | `look_pitch` 从母版品红静帧软抠重画（`pack_pitch_from_gen.py`）；look 身体锁改预乘；哈欠 overlay 复用待机 letterbox，进出体型不跳；卸载旧 cute/stretch/sleep/wag/watch；design **v0.13** · prd **v0.7.1** |

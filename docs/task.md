@@ -6,8 +6,8 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.18**（2026-08-13：提醒卡片裁边放大去白边；启动坞窗外点击关闭） |
-| 依据文档 | `prd.md` v0.7、`tech.md` v0.10、`design.md` v0.12 |
+| 当前版本 | **v0.19**（2026-08-14：look_pitch 重画；哈欠进出不跳体型；旧 clip 下盘） |
+| 依据文档 | `prd.md` v0.7.1、`tech.md` v0.11、`design.md` v0.13 |
 | 环境参考 | `env.md` |
 | 状态 | **M0–M6 可日常使用**；**M7**：母版 / 眨眼 / 跟随 / 哈欠已接入；旧 cute/stretch 停调度 |
 | **下一步** | PET-M06 拖拽拎起 + 回坐 |
@@ -43,6 +43,7 @@
 | **v0.16** | **2026-08-13** | **母版确认**：正面漫画坐姿写入 `idle_blink`（开/半闭/闭 3 帧）；随机眨眼 + 偶发双眨；停掉旧 cute/stretch 调度；§15.5 指定头眼跟随方案 |
 | **v0.17** | **2026-08-13** | 头眼跟随落地（姿态条 + 虹膜 + 身体锁定）；`idle_yawn` 30fps + 漫画气泡；文档与 prd/tech/design 对齐现状 |
 | **v0.18** | **2026-08-13** | **提醒卡片收口**：窗口 400×300，flood 抠白 244 + 内容裁边 + premultiplied 缩放去白边 + contain-fit 放大填窗；**启动坞窗外点击关闭**（`OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志，不吞点击，不卡鼠标）；prd **v0.7** · tech **v0.10** · design **v0.12** |
+| **v0.19** | **2026-08-14** | **`look_pitch` 重画**（母版品红静帧软抠）；look 身体锁预乘；**哈欠 overlay 复用待机 letterbox**（进出不再突然放大/缩小）；卸载 `idle_cute` / `idle_stretch` / `idle_sleep` / `idle_tail_wag` / `idle_watch`；工具 `pack_pitch_from_gen.py`；prd **v0.7.1** · tech **v0.11** · design **v0.13** |
 
 ### 1.3 2026-08-11 精灵与呈现收口（已落地）
 
@@ -603,7 +604,7 @@ foundation (工程/错误/日志/事件总线)
 
 - 代码入口：`src/app.rs`、`src/pet/*`、`src/render/menu_ui.rs`、`src/render/text.rs`、`src/ui/radial_menu.rs`、`src/ui/tray.rs`、`src/platform/windows.rs`、`src/config/*`
 - **待机**：`idle_blink` + 头眼跟随 + **60s `idle_yawn`**；`Watching` 不扑
-- **哈欠**：`tools/pack_idle_yawn.py`；气泡 `src/render/yawn_bubble.rs`；间隔 `PAWDESK_CUTE_SECS`
+- **哈欠**：`tools/pack_idle_yawn.py`；气泡 `src/render/yawn_bubble.rs`；间隔 `PAWDESK_CUTE_SECS`；overlay 猫先 `scale_rgba_centered` 再合成，与待机同边距
 - **显示大小**：`config.pet.scale` 默认 **0.6**；`pet_logical_size`；设置 `PetScaleDec/Inc`；托盘变大/变小；schema **v3** 迁移
 - **飞扑**：`ENABLE_MOUSE_POUNCE = false`；资源与路径代码保留
 - **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `mockups/launcher-pin-flip.*`
@@ -620,9 +621,8 @@ foundation (工程/错误/日志/事件总线)
 | 目录 | 用途 | 约规格 |
 | --- | --- | --- |
 | `idle_blink` | 默认待机 | **3f** 开/半闭/闭 |
-| `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 13 / 5 / 4；运行时 yaw 只用偶数关键帧 |
-| `idle_yawn` | 60s oneshot | **77f @30**；峰值气泡 |
-| `idle_cute` / `idle_stretch` / wag / sleep | 不调度 | 旧资源仍在盘 |
+| `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 13 / 5 / 4；yaw 只用偶数关键帧；pitch 已按母版重画 |
+| `idle_yawn` | 60s oneshot | **77f @30**；峰值气泡；进出同待机缩放 |
 | `approaching` | 飞扑（运行关闭） | |
 | `dragging` / `edge_peek` | 拖动 / 边缘 | |
 | `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | |
@@ -1009,7 +1009,7 @@ close → restore origin（禁 persist 临时坐标）
 眼睛先动，头再跟，身体几乎不动。禁止整图左右镜像。
 
 - 瞳孔：`look.rs` 在睁/半闭帧上平移虹膜（约 2–4px / 256）
-- 头：`look_yaw` / `look_pitch` / `look_diag` 最近邻选姿态；13 帧 yaw 只用偶数关键帧；下半身锁母版
+- 头：`look_yaw` / `look_pitch` / `look_diag` 最近邻选姿态；13 帧 yaw 只用偶数关键帧；下半身锁母版（预乘）；`look_pitch` 从母版重画
 - 眨眼不打断跟随（不弹回正面）
 - 侧坐 `pet-master-sit-threequarter.png` 仅留档，不作默认
 
@@ -1019,7 +1019,7 @@ close → restore origin（禁 persist 临时坐标）
 - ~77f @30：坐 → 半张 → 大张 hold → 原路回坐；五官贴回母版，外轮廓不换
 - 峰值漫画气泡「困死我了…」（运行时画，默认头右侧）
 - 哈欠中停转头/眨眼；拖动或开坞打断并回坐
-- 旧 `idle_cute` / `idle_stretch` **不调度**
+- 旧 `idle_cute` / `idle_stretch` / sleep / wag / watch **已下盘、不加载**
 
 ### 15.7 不做
 

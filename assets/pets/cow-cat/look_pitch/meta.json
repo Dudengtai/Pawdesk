@@ -26,5 +26,5 @@
     0.5,
     1.0
   ],
-  "notes": "Pitch strip. 0=look down ... 2=front master ... 4=look up."
+  "notes": "Regenerated pitch: 0=look down, 2=front master, 4=look up. Soft-keyed from 1024 magenta stills."
 }
