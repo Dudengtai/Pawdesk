@@ -92,6 +92,16 @@ impl LookController {
         self.curious_target = 0.0;
     }
 
+    /// Instantly face front (reminder hop / hard interrupt).
+    pub fn snap_front(&mut self) {
+        self.target = (0.0, 0.0);
+        self.eye = (0.0, 0.0);
+        self.head = (0.0, 0.0);
+        self.curious = 0.0;
+        self.curious_target = 0.0;
+        self.last_pose = None;
+    }
+
     /// Exponential approach. Returns true if the pose moved enough to redraw.
     pub fn tick(&mut self, dt: f32) -> bool {
         let dt = dt.clamp(0.0, 0.08);

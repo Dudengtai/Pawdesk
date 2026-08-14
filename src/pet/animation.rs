@@ -155,6 +155,7 @@ impl AnimationLibrary {
             "look_pitch",
             "look_diag",
             "idle_yawn",
+            "idle_stretch",
         ];
         let mut clips = Vec::new();
         for name in names {
@@ -233,6 +234,16 @@ impl AnimationLibrary {
                 }
             }
         }
+        // Reminder hop: disk only. Never invent a procedural / old-cat stand-in.
+        match load_clip_dir(&pet_dir.join("reminder_hop"), "reminder_hop") {
+            Ok(clip) => {
+                info!(anim = %clip.name, frames = clip.frame_count, "loaded interaction animation");
+                clips.push(clip);
+            }
+            Err(_) => {
+                info!("reminder_hop missing; travel will keep idle_blink");
+            }
+        }
         clips
     }
 
@@ -247,6 +258,7 @@ impl AnimationLibrary {
             "look_pitch",
             "look_diag",
             "idle_yawn",
+            "idle_stretch",
         ];
         for name in names {
             let dir = pet_dir.join(name);
@@ -632,9 +644,10 @@ pub const IDLE_ACTION_INTERVAL_SECS: f32 = 60.0;
 /// old cute/stretch videos are a different cat and would hard-cut into a clip.
 /// Re-enable only after those actions are remade on the confirmed master.
 pub const IDLE_YAWN: &str = "idle_yawn";
+pub const IDLE_STRETCH: &str = "idle_stretch";
 
-/// One-shot pool. Only the remade master yawn; old cute/stretch stay off.
-pub const IDLE_ACTION_ENABLED: &[&str] = &[IDLE_YAWN];
+/// One-shot pool. Master yawn + stretch; old cute/sleep/wag stay off.
+pub const IDLE_ACTION_ENABLED: &[&str] = &[IDLE_YAWN, IDLE_STRETCH];
 
 /// Picks one-shot idle actions on a fixed wall-clock interval.
 ///
@@ -793,8 +806,38 @@ mod idle_picker_tests {
     }
 
     #[test]
-    fn enabled_pool_is_master_yawn() {
-        assert_eq!(IDLE_ACTION_ENABLED, &[IDLE_YAWN]);
+    fn reminder_hop_loads_from_disk() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pets/cow-cat");
+        let clips = AnimationLibrary::load_interaction_set(&dir);
+        let hop = clips
+            .iter()
+            .find(|c| c.name == "reminder_hop")
+            .expect("reminder_hop must ship on disk");
+        assert!(hop.frame_count >= 20);
+        assert!(!hop.looping);
+    }
+
+    #[test]
+    fn enabled_pool_is_master_yawn_and_stretch() {
+        assert_eq!(IDLE_ACTION_ENABLED, &[IDLE_YAWN, IDLE_STRETCH]);
+    }
+
+    #[test]
+    fn two_action_pool_does_not_repeat_immediately() {
+        let t0 = Instant::now();
+        let mut p = IdlePicker::new(
+            vec![IDLE_YAWN.into(), IDLE_STRETCH.into()],
+            t0,
+        );
+        let a = p.take_action(t0 + Duration::from_secs(61)).unwrap();
+        let b = p
+            .take_action(t0 + Duration::from_secs(122))
+            .unwrap();
+        assert_ne!(a, b);
+        let c = p
+            .take_action(t0 + Duration::from_secs(183))
+            .unwrap();
+        assert_eq!(a, c);
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.11**（2026-08-14：`look_pitch` 重画；哈欠 overlay 与待机同 letterbox；旧 cute/stretch/sleep/wag/watch 下盘） |
-| 依据 | `prd.md` v0.7.1 · `design.md` v0.13 |
+| 版本 | **v0.14**（2026-08-14：提醒 `reminder_hop` 正面轻跃） |
+| 依据 | `prd.md` v0.7.4 · `design.md` v0.16 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -139,21 +139,26 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | `idle_blink` | 默认待机 | 正面母版坐姿；开 / 半闭 / 闭 3 帧 hold |
 | `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 姿态条；运行时只用手写关键帧 + 身体锁定（预乘混合）；虹膜另叠。`look_pitch` 由母版品红静帧软抠重画（`tools/pack_pitch_from_gen.py`） |
 | `idle_yawn` | 60s one-shot | ~77f @30；母版脸哈欠；峰值画气泡「困死我了…」 |
+| `idle_stretch` | 60s one-shot | 110f @50（2.20s，压过 `ACTION_MIN_SECS=2.2`）；7 档 sit→转→下蹲→探→半峰→峰→倒放；峰值眯眼吐舌；无气泡、不拓窗 |
 | `approaching` / `playing_interaction` | 飞扑（**运行关闭**） | |
 | `dragging` / `edge_peek` | 拖动 / 边缘 | |
-| `reminder_wave` / `reminder_feed` | 提醒 / 投喂 | 挥手 / 投喂；与哈欠无关 |
+| `reminder_hop` | 提醒进场 / 回程 | 41f @30；sit→攒劲→起跳→空中→落地→sit；进度锁相；缺文件回退 `idle_blink` |
+| `reminder_wave` / `reminder_feed` | 到位挥手 / 投喂 | 仍为旧猫；旅途不再使用 |
 
 **待机规则**
 
 - Base：`idle_blink`。随机 **2.8–6.2s** 眨一次（约 200ms；约 18% 双眨）。  
 - 头眼：`src/pet/look.rs`。瞳孔先跟（~75ms），头后跟（~155ms）。`look_yaw` 13 帧条带只取偶数关键帧（光流补帧会抖）。下半身锁 `idle_blink/000`（预乘 lerp，避免交界发黑）。死区外才换姿态条。眨眼时保持转头，不弹回正面。禁止整图镜像。  
-- 墙钟约 **60s** 播 **`idle_yawn`**（`IDLE_ACTION_ENABLED`）。本地可 `PAWDESK_CUTE_SECS`。Watching / 躲边不饿死计时；躲边到点先 restore。哈欠中停转头/眨眼。  
+- 墙钟约 **60s** 播 `IDLE_ACTION_ENABLED`（**`idle_yawn` + `idle_stretch` 轮播**）。本地可 `PAWDESK_CUTE_SECS`。Watching / 躲边不饿死计时；躲边到点先 restore。oneshot 中停转头/眨眼。  
 - 哈欠：`tools/pack_idle_yawn.py` 把五官贴回母版坐姿。进场帧 0 书挡；出场 `go_idle_with_settle`。峰值 `src/render/yawn_bubble.rs` 画漫画气泡；窗向右扩（原点不动），贴右屏才 flip 左。  
 - 哈欠呈现：overlay 里的猫必须先走待机同一套 `scale_rgba_centered` letterbox（左右/顶/爪边距），再 `compose_yawn_frame`。禁止把 256 图铺满 `pet_phys`（进出哈欠会突然放大/缩小）。书挡帧与 `idle_blink/000` 像素一致。  
+- 伸懒腰：`tools/pack_idle_stretch.py`。母版 edit-chain 5 键 + sit 书挡 hold；回程倒放去程。帧 0 / 末 sit ≡ `idle_blink/000`。**不拓窗、无气泡**，走普通 letterbox。  
+- 伸懒腰打包：源图 1024 品红软抠 → 去暗晕 → 预乘缩到 256 → 轮廓去品红边。禁止先缩再抠（中间帧会发虚）。禁止整段 i2v 抽帧进盘；禁止把坐姿整脸贴到已离位的头上（会双头）。键须保住母版墨线粗细与毛发排线/网点。  
+- 伸懒腰表情：坐/转/下蹲睁眼；探轻笑；半峰开始眯；峰值开心眯眼 + 张嘴吐舌（参考 `_master/stretch_expr_ref.png`）。  
 - 播帧：最近邻，禁亚帧混合。oneshot 回 base 约 100ms 书挡。  
 - 呈现：密集 clip **本帧直接 present**。缩放预乘双线性。  
 - 飞扑：`ENABLE_MOUSE_POUNCE = false`。  
-- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` + 互动 clip。旧 `idle_cute` / `idle_stretch` / `idle_tail_wag` / `idle_sleep` / `idle_watch` **已下盘**。
+- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` / **`idle_stretch`** + 互动 clip（含 **`reminder_hop`**，缺则跳过、旅途回退坐姿）。旧 `idle_cute` / `idle_tail_wag` / `idle_sleep` / `idle_watch` **已下盘**。`idle_stretch` 为母版新片，不是 v0.19 卸下的旧视频。
 
 **飞扑**
 
@@ -314,9 +319,9 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 ### 6.2 流程
 
 ```text
-Due → 存原位 → 移中央（reminder_wave）
-    → Showing：tishi 整图卡片 400×300（左气泡文案 + 右奶牛猫 + 底部「点击投喂」药丸）
-    → Feeding（~900ms）→ 回原位 Returning → Idle
+Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距跳过；躲边先 snap restore）
+    → Showing：tishi 整图 520×400（猫右侧保持原大小；左侧 22px 大气泡；底部 220×52 投喂胶囊）
+    → Feeding（~900ms）→ reminder_hop 轻跃回原位 → Idle
 ```
 
 拖动中 due → pending；松手后再进。隐藏宠物时 due 可 pending，显示后再出。
@@ -326,8 +331,8 @@ Due → 存原位 → 移中央（reminder_wave）
 1. 边界 flood 抠白：相邻近白像素（`BG_MIN_RGB=244`，含最浅抗锯齿环）置透明。
 2. 自动裁剪到**内容外框**（+12px 边距），去掉 mockup 四周空白。
 3. **premultiplied 缩放**：颜色先乘 alpha 再缩小、最后除回 → 边缘色只来自画面，无白边/暗晕。
-4. contain-fit 等比放大填窗居中（400×300）：画面占窗口约 50%，醒目不裁切。
-5. 合成底部署「点击投喂」奶油药丸（投喂中变「呼～活力恢复了！」）；点按热区按比例映射（`client_to_layout`）。
+4. 猫按高约 300 贴右侧（不跟窗等比放大）；左侧裁掉图里烤死的小气泡。  
+5. 运行时画 22px 三行奶油气泡 + 220×52「点击投喂」胶囊（投喂中变「呼～活力恢复了！」）；热区与胶囊对齐（`client_to_layout`）。
 
 ---
 
@@ -474,3 +479,6 @@ Due → 存原位 → 移中央（reminder_wave）
 | **v0.9** | **2026-08-13** | 正面母版 `idle_blink` 3 帧；头眼跟随（姿态条 + 虹膜）；`idle_yawn` + 漫画气泡；旧 cute/stretch 停调度 |
 | **v0.10** | **2026-08-13** | 提醒卡片 400×300：flood 抠白 244 + 内容裁边 + premultiplied 缩放（去白边）+ contain-fit 放大；启动坞窗外点击关闭（`OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志，不吞点击）；design **v0.12** · prd **v0.7** |
 | **v0.11** | **2026-08-14** | `look_pitch` 从母版品红静帧软抠重画（`pack_pitch_from_gen.py`）；look 身体锁改预乘；哈欠 overlay 复用待机 letterbox，进出体型不跳；卸载旧 cute/stretch/sleep/wag/watch；design **v0.13** · prd **v0.7.1** |
+| **v0.12** | **2026-08-14** | 母版 `idle_stretch`（110f@50，键 hold，不拓窗）进 `IDLE_ACTION_ENABLED` 与哈欠轮播；`pack_idle_stretch.py`；design **v0.14** · prd **v0.7.2** |
+| **v0.13** | **2026-08-14** | 伸懒腰 7 档（转/下蹲/探/半峰/峰）；峰值设定图表情；1024 抠边+去晕+轮廓 despill；design **v0.15** · prd **v0.7.3** |
+| **v0.14** | **2026-08-14** | 提醒进场/回程 `reminder_hop`：攒劲零位移 + ease-in-out 抛物线；`pack_reminder_hop.py`；旅途不再播旧 `reminder_wave`；design **v0.16** · prd **v0.7.4** |

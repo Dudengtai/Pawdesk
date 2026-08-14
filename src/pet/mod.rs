@@ -13,8 +13,8 @@ pub use animation::{
 pub use look::LookController;
 pub use interaction::{DistanceLevel, InteractionDetector};
 pub use movement::{
-    approach_duration, return_duration, MovementController, MovementTarget, EDGE_DURATION,
-    REMINDER_MOVE_DURATION,
+    approach_duration, reminder_hop_duration, return_duration, MovementController, MovementTarget,
+    EDGE_DURATION,
 };
 pub use state::{can_interrupt, try_transition, Edge, PetState, ReminderStage};
 
@@ -53,11 +53,16 @@ fn seed_blink_rng(_now: Instant) -> u32 {
 }
 
 /// Reminder UI layout in logical pixels (96 DPI baseline).
-pub const REMINDER_WINDOW_W: u32 = 400;
-pub const REMINDER_WINDOW_H: u32 = 300;
+/// Wider/taller than the card art so the bubble and feed pill can grow
+/// without scaling the cat up.
+pub const REMINDER_WINDOW_W: u32 = 560;
+pub const REMINDER_WINDOW_H: u32 = 420;
 /// Design baseline pet window (logical px @ 96 DPI). Actual size = baseline × `pet.scale`.
 pub const PET_WINDOW_SIZE: u32 = 128;
+/// Legacy square hit size; the visible control is the feed bowl.
 pub const FOOD_BUTTON_SIZE: f32 = 64.0;
+pub const FEED_BOWL_W: f32 = 120.0;
+pub const FEED_BOWL_H: f32 = 120.0;
 
 /// Logical pet window edge length from config scale (clamped).
 pub fn pet_logical_size(scale: f32) -> u32 {
@@ -466,13 +471,15 @@ impl PetController {
             && self.player.frame_count_pub() <= 4
             && !matches!(self.state, PetState::Dragging);
 
-        // Approaching: pose phase = hop progress (coherent pounce).
+        // Approaching / reminder travel: pose phase = hop progress.
         // Dense clips (≥8 frames): continuous player / progress sampling at 30fps.
         // Tiny blink clips (≤4 frames): hold-based blink on the sit master.
         let (frame, finished) = if matches!(self.state, PetState::Approaching { .. })
             && self.movement.is_cursor_approach()
         {
             self.tick_pounce_synced(now)
+        } else if self.is_reminder_moving() && self.movement.is_reminder_hop() {
+            self.tick_hop_synced(now)
         } else if on_blink_base {
             self.tick_blink_hold(now)
         } else {
@@ -745,6 +752,16 @@ impl PetController {
         self.blink_wait = 2.8 + u * 3.4;
         self.blink_rng = self.blink_rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         self.blink_double = (self.blink_rng % 100) < 18;
+    }
+
+    /// Map reminder-hop progress onto `reminder_hop` frames (gather / flight / land).
+    fn tick_hop_synced(&mut self, now: Instant) -> (u32, bool) {
+        let n = self.player.frame_count_pub().max(1);
+        let t = self.movement.progress(now).unwrap_or(1.0);
+        let f = t * ((n - 1) as f32);
+        self.display_frame_f = f;
+        let frame = f.floor() as u32;
+        (frame.min(n - 1), false)
     }
 
     /// Map hop progress `t∈[0,1]` onto continuous `approaching` frames (smooth 30fps).
@@ -1179,11 +1196,17 @@ impl PetController {
     ) -> bool {
         // Cancel competing movement/interaction.
         self.movement.cancel();
-        self.look.snap_curious_off();
+        self.look.snap_front();
         self.interaction_started = None;
         self.home_position = None;
 
-        self.reminder_origin = Some(current_top_left);
+        let start = if matches!(self.state, PetState::HiddenAtEdge(_)) {
+            self.snap_restore_from_edge(now).unwrap_or(current_top_left)
+        } else {
+            current_top_left
+        };
+
+        self.reminder_origin = Some(start);
         self.reminder_message = message;
         self.pending_reminder = false;
         self.feed_started = None;
@@ -1194,14 +1217,15 @@ impl PetController {
             PetState::Reminder(ReminderStage::MovingToCenter),
         ) {
             self.state = s;
+            let dist = (center_top_left.x - start.x).hypot(center_top_left.y - start.y);
             self.movement.start(
-                current_top_left,
+                start,
                 MovementTarget::ReminderCenter(center_top_left),
                 now,
-                REMINDER_MOVE_DURATION,
+                reminder_hop_duration(dist),
             );
             self.switch_clip_for_state(now);
-            info!("reminder begin: moving to center");
+            info!(dist, "reminder begin: hopping to center");
             true
         } else {
             self.pending_reminder = true;
@@ -1211,25 +1235,24 @@ impl PetController {
     }
 
     fn layout_food_button(&mut self) {
-        // Bottom-center of reminder window.
         let w = REMINDER_WINDOW_W as f32;
         let h = REMINDER_WINDOW_H as f32;
-        let s = FOOD_BUTTON_SIZE;
-        let x = (w - s) * 0.5;
-        let y = h - s - 24.0;
-        self.food_button_rect = Some((x, y, s, s));
+        let pw = FEED_BOWL_W;
+        let ph = FEED_BOWL_H;
+        let x = (w - pw) * 0.5;
+        let y = h - ph - 20.0;
+        self.food_button_rect = Some((x, y, pw, ph));
     }
 
     pub fn hit_food_button(&self, local_x: f64, local_y: f64) -> bool {
         let Some((x, y, w, h)) = self.food_button_rect else {
             return false;
         };
-        // Pad hit box so the control is easy to click (includes "点击投喂" label).
-        let pad = 12.0;
+        let pad = 8.0;
         local_x >= x as f64 - pad
             && local_y >= y as f64 - pad
             && local_x <= (x + w) as f64 + pad
-            && local_y <= (y + h) as f64 + pad + 22.0
+            && local_y <= (y + h) as f64 + pad
     }
 
     pub fn on_feed_click(&mut self, now: Instant) -> bool {
@@ -1270,11 +1293,12 @@ impl PetController {
         if let Ok(s) = try_transition(&self.state, PetState::Reminder(ReminderStage::Returning)) {
             self.state = s;
             self.food_button_rect = None;
+            let dist = (home.x - current.x).hypot(home.y - current.y);
             self.movement.start(
                 current,
                 MovementTarget::ReminderHome(home),
                 now,
-                REMINDER_MOVE_DURATION,
+                reminder_hop_duration(dist),
             );
             self.switch_clip_for_state(now);
             debug!("reminder returning home");
@@ -1391,7 +1415,14 @@ impl PetController {
             PetState::Dragging => "dragging".to_string(),
             PetState::HiddenAtEdge(_) => "edge_peek".to_string(),
             PetState::Reminder(ReminderStage::Feeding) => "reminder_feed".to_string(),
-            PetState::Reminder(_) => "reminder_wave".to_string(),
+            PetState::Reminder(ReminderStage::Showing) => "reminder_wave".to_string(),
+            PetState::Reminder(_) => {
+                if self.library.get("reminder_hop").is_some() {
+                    "reminder_hop".to_string()
+                } else {
+                    IDLE_BASE.to_string()
+                }
+            }
             // Keep the current clip when possible so open doesn't crossfade-flash.
             PetState::MenuOpen => {
                 let cur = self.player.clip_name().to_string();

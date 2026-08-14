@@ -1,9 +1,8 @@
-// Rasterize assets/tray/cat.svg → assets/tray/icon.png
-// Usage:
-//   npm.cmd install --no-save @resvg/resvg-js
-//   node tools/svg_to_tray_icon.js
+// Legacy line-art tray mark. The cow-cat avatar is now packed by:
+//   python tools/pack_tray_icon.py
 //
-// Source of truth: assets/tray/cat.svg
+// This script is kept so the old SVG can still be rasterized for comparison;
+// it writes assets/tray/_gen/icon_from_svg.png and will not overwrite icon.png.
 
 const fs = require("fs");
 const path = require("path");
@@ -12,7 +11,7 @@ const { Resvg } = require("@resvg/resvg-js");
 const root = path.resolve(__dirname, "..");
 const outDir = path.join(root, "assets", "tray");
 const src = path.join(outDir, "cat.svg");
-const outPng = path.join(outDir, "icon.png");
+const outPng = path.join(outDir, "_gen", "icon_from_svg.png");
 
 if (!fs.existsSync(src)) {
   console.error(`missing source SVG: ${src}`);
@@ -38,6 +37,6 @@ const resvg = new Resvg(svg, {
 });
 const png = resvg.render().asPng();
 
-fs.mkdirSync(outDir, { recursive: true });
+fs.mkdirSync(path.dirname(outPng), { recursive: true });
 fs.writeFileSync(outPng, png);
 console.log(`wrote ${outPng} (${png.length} bytes, ${SIZE}px)`);

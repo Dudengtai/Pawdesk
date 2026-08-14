@@ -34,6 +34,17 @@ pub fn ease_in_cubic(t: f32) -> f32 {
     t * t * t
 }
 
+/// Cubic ease-in-out — gather then fly then settle (reminder hop flight).
+pub fn ease_in_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let u = -2.0 * t + 2.0;
+        1.0 - (u * u * u) / 2.0
+    }
+}
+
 /// Appica-like open: light overshoot back ease-out
 /// (approx cubic-bezier(0.175, 0.885, 0.32, 1.5)).
 /// May briefly exceed 1.0 mid-curve for bounce, ends at 1.0.

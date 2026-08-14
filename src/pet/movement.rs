@@ -6,7 +6,14 @@
 use std::time::{Duration, Instant};
 
 use crate::event::Point;
-use crate::render::easing::ease_smooth;
+use crate::render::easing::{ease_in_out_cubic, ease_smooth};
+
+/// Reminder hop: stay put while gathering (matches clip 0.00–0.18).
+pub const REMINDER_GATHER_END: f32 = 0.18;
+/// Reminder hop: land and sit (matches clip 0.88–1.00).
+pub const REMINDER_LAND_START: f32 = 0.88;
+/// Already at destination — skip the hop.
+pub const REMINDER_HOP_NEAR_PX: f64 = 56.0;
 
 /// What the movement is heading towards, so the controller can react on completion.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,21 +137,25 @@ impl MovementController {
             (elapsed.as_secs_f32() / self.duration.as_secs_f32()).min(1.0)
         };
 
-        let eased = ease_smooth(t);
-        let x = self.start.x + (dest.x - self.start.x) * eased as f64;
-        let mut y = self.start.y + (dest.y - self.start.y) * eased as f64;
+        let pos = if matches!(
+            target,
+            MovementTarget::ReminderCenter(_) | MovementTarget::ReminderHome(_)
+        ) {
+            reminder_hop_pos(self.start, dest, t)
+        } else {
+            let eased = ease_smooth(t);
+            let x = self.start.x + (dest.x - self.start.x) * eased as f64;
+            let mut y = self.start.y + (dest.y - self.start.y) * eased as f64;
 
-        // Parabolic hop only for pouncing toward the cursor.
-        if matches!(target, MovementTarget::Cursor(_)) {
-            let dist = ((dest.x - self.start.x).hypot(dest.y - self.start.y)).max(1.0);
-            // Peak height scales with distance, clamped for readability.
-            let arc = (28.0 + dist * 0.08).clamp(24.0, 56.0);
-            // 4t(1-t) peaks at 1.0 when t=0.5
-            let lift = arc * (4.0 * t as f64 * (1.0 - t as f64));
-            y -= lift;
-        }
-
-        let pos = Point::new(x, y);
+            // Parabolic hop only for pouncing toward the cursor.
+            if matches!(target, MovementTarget::Cursor(_)) {
+                let dist = ((dest.x - self.start.x).hypot(dest.y - self.start.y)).max(1.0);
+                let arc = hop_arc_height(dist).min(56.0);
+                let lift = arc * (4.0 * t as f64 * (1.0 - t as f64));
+                y -= lift;
+            }
+            Point::new(x, y)
+        };
         self.last_position = Some(pos);
 
         if t >= 1.0 {
@@ -177,6 +188,38 @@ impl MovementController {
     pub fn is_cursor_approach(&self) -> bool {
         matches!(self.target, Some(MovementTarget::Cursor(_)))
     }
+
+    pub fn is_reminder_hop(&self) -> bool {
+        matches!(
+            self.target,
+            Some(MovementTarget::ReminderCenter(_) | MovementTarget::ReminderHome(_))
+        )
+    }
+}
+
+/// Peak lift in screen px (up = smaller y). Shared by cursor pounce and reminder hop.
+pub fn hop_arc_height(distance: f64) -> f64 {
+    (28.0 + distance * 0.08).clamp(24.0, 64.0)
+}
+
+/// Window path for reminder travel: gather in place, ease-in-out flight, sit on land.
+pub fn reminder_hop_pos(start: Point, dest: Point, t: f32) -> Point {
+    let t = t.clamp(0.0, 1.0);
+    if t <= REMINDER_GATHER_END {
+        return start;
+    }
+    if t >= REMINDER_LAND_START {
+        return dest;
+    }
+    let span = REMINDER_LAND_START - REMINDER_GATHER_END;
+    let u = ((t - REMINDER_GATHER_END) / span).clamp(0.0, 1.0);
+    let eased = ease_in_out_cubic(u) as f64;
+    let x = start.x + (dest.x - start.x) * eased;
+    let mut y = start.y + (dest.y - start.y) * eased;
+    let dist = ((dest.x - start.x).hypot(dest.y - start.y)).max(1.0);
+    let lift = hop_arc_height(dist) * (4.0 * u as f64 * (1.0 - u as f64));
+    y -= lift;
+    Point::new(x, y)
 }
 
 /// Suggested duration based on distance (PET-07).
@@ -193,8 +236,23 @@ pub fn return_duration(distance: f64) -> Duration {
 }
 
 pub const EDGE_DURATION: Duration = Duration::from_millis(250);
-/// Move to screen center / return home for reminders (design §6.1).
+/// Legacy alias — prefer [`reminder_hop_duration`].
 pub const REMINDER_MOVE_DURATION: Duration = Duration::from_millis(700);
+
+/// Reminder hop length from window travel distance.
+pub fn reminder_hop_duration(distance: f64) -> Duration {
+    if distance < REMINDER_HOP_NEAR_PX {
+        return Duration::ZERO;
+    }
+    let ms = if distance <= 400.0 {
+        let u = ((distance - REMINDER_HOP_NEAR_PX) / (400.0 - REMINDER_HOP_NEAR_PX)).clamp(0.0, 1.0);
+        550.0 + u * 250.0
+    } else {
+        let u = ((distance - 400.0) / 800.0).clamp(0.0, 1.0);
+        800.0 + u * 300.0
+    };
+    Duration::from_millis(ms.round() as u64)
+}
 
 #[cfg(test)]
 mod tests {
@@ -335,5 +393,61 @@ mod tests {
     fn return_duration_in_range() {
         assert!(return_duration(0.0) >= Duration::from_millis(500));
         assert!(return_duration(500.0) <= Duration::from_millis(800));
+    }
+
+    #[test]
+    fn reminder_gather_stays_at_start() {
+        let start = Point::new(10.0, 100.0);
+        let dest = Point::new(210.0, 100.0);
+        let p = reminder_hop_pos(start, dest, 0.10);
+        assert!((p.x - start.x).abs() < 0.01);
+        assert!((p.y - start.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn reminder_flight_has_arc() {
+        let start = Point::new(0.0, 200.0);
+        let dest = Point::new(400.0, 200.0);
+        let mid_t = (REMINDER_GATHER_END + REMINDER_LAND_START) * 0.5;
+        let mid = reminder_hop_pos(start, dest, mid_t);
+        assert!(mid.y < 200.0, "expected hop lift, y={}", mid.y);
+        assert!(mid.x > 0.0 && mid.x < 400.0);
+        let end = reminder_hop_pos(start, dest, 1.0);
+        assert!((end.x - dest.x).abs() < 0.01);
+        assert!((end.y - dest.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn reminder_land_pins_dest() {
+        let start = Point::new(0.0, 50.0);
+        let dest = Point::new(80.0, 90.0);
+        let p = reminder_hop_pos(start, dest, 0.90);
+        assert!((p.x - dest.x).abs() < 0.01);
+        assert!((p.y - dest.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn reminder_hop_duration_near_is_zero() {
+        assert_eq!(reminder_hop_duration(0.0), Duration::ZERO);
+        assert_eq!(reminder_hop_duration(REMINDER_HOP_NEAR_PX - 1.0), Duration::ZERO);
+        assert!(reminder_hop_duration(80.0) >= Duration::from_millis(550));
+        assert!(reminder_hop_duration(2000.0) <= Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn reminder_home_path_has_arc() {
+        let mut m = MovementController::default();
+        let start = Point::new(0.0, 120.0);
+        let dest = Point::new(300.0, 120.0);
+        let t0 = Instant::now();
+        m.start(
+            start,
+            MovementTarget::ReminderHome(dest),
+            t0,
+            Duration::from_millis(800),
+        );
+        let mid = m.tick(t0 + Duration::from_millis(400)).expect("mid");
+        assert!(mid.y < 120.0, "return hop should arc, y={}", mid.y);
+        assert!(m.is_reminder_hop());
     }
 }

@@ -9,10 +9,17 @@ use std::path::Path;
 use image::imageops::FilterType;
 
 use super::text::rasterize_text;
-use crate::pet::{FOOD_BUTTON_SIZE, REMINDER_WINDOW_H, REMINDER_WINDOW_W};
+use crate::pet::{FEED_BOWL_H, FEED_BOWL_W, REMINDER_WINDOW_H, REMINDER_WINDOW_W};
 
 /// Preprocessed reminder card bitmap (already window-sized RGBA).
 pub struct ReminderCard {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Full kibble bowl used as the feed control.
+pub struct FeedBowl {
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
@@ -24,10 +31,10 @@ pub struct ReminderCard {
 const BG_MIN_RGB: u8 = 244;
 /// Padding (source pixels) kept around the artwork when auto-cropping.
 const CROP_PAD: u32 = 12;
-/// Feed hint pill colors (match the mockup's warm cream / ink brown).
-const HINT_BG: [u8; 4] = [0xFF, 0xF3, 0xE4, 0xCE];
-const HINT_TEXT: [u8; 4] = [0x45, 0x40, 0x36, 0xFF];
-
+/// Comic parchment + ink (same family as the yawn bubble / tishi mockup).
+const PARCHMENT: [u8; 4] = [0xF6, 0xEC, 0xD8, 0xFF];
+const INK: [u8; 4] = [0x2A, 0x22, 0x1C, 0xFF];
+const HINT_TEXT: [u8; 4] = [0x2A, 0x22, 0x1C, 0xFF];
 /// Load and prepare the reminder card image for the reminder window.
 ///
 /// The mockup has no alpha channel: near-white background (as seen from the
@@ -50,12 +57,16 @@ pub fn load_reminder_card(path: &Path, out_w: u32, out_h: u32) -> Option<Reminde
         return None;
     }
 
-    // Contain-fit (aspect-preserving) into the window, centered.
-    let scale = (out_w as f32 / cw as f32).min(out_h as f32 / ch as f32).min(1.0);
+    // Show the whole illustration (bubble + cat + glass). Leave a bottom
+    // strip for the feed bowl; do not crop or cover the artwork.
+    let bowl_reserve = FEED_BOWL_H as u32 + 16;
+    let max_h = out_h.saturating_sub(bowl_reserve).max(1);
+    let max_w = out_w.saturating_sub(8).max(1);
+    let scale = (max_w as f32 / cw as f32).min(max_h as f32 / ch as f32);
     let sw = (cw as f32 * scale).round().max(1.0) as u32;
     let sh = (ch as f32 * scale).round().max(1.0) as u32;
-    let dst_x = (out_w - sw) / 2;
-    let dst_y = (out_h - sh) / 2;
+    let dst_x = (out_w.saturating_sub(sw)) / 2;
+    let dst_y = 8;
 
     let (rgb, alpha) = downscale_card(&src, &mask, iw, x0, y0, cw, ch, sw, sh);
 
@@ -78,27 +89,63 @@ pub fn load_reminder_card(path: &Path, out_w: u32, out_h: u32) -> Option<Reminde
     })
 }
 
-/// Final reminder frame: the card image plus a subtle feed hint pill.
-///
-/// The mockup has no food button, but the feed loop still needs a discoverable
-/// target; a small cream pill keeps the click zone obvious without covering
-/// the artwork.
-pub fn compose_reminder_card_frame(card: &ReminderCard, feeding: bool) -> (u32, u32, Vec<u8>) {
+/// Load the kibble-bowl button and scale it to the feed-control slot.
+pub fn load_feed_bowl(path: &Path) -> Option<FeedBowl> {
+    let img = image::open(path).ok()?.to_rgba8();
+    let (iw, ih) = img.dimensions();
+    if iw == 0 || ih == 0 {
+        return None;
+    }
+    let dw = FEED_BOWL_W.round().max(1.0) as u32;
+    let dh = FEED_BOWL_H.round().max(1.0) as u32;
+    let resized = image::imageops::resize(&img, dw, dh, FilterType::Lanczos3);
+    Some(FeedBowl {
+        w: dw,
+        h: dh,
+        rgba: resized.into_raw(),
+    })
+}
+
+/// Final reminder frame: cat art + comic bubble + kibble bowl.
+pub fn compose_reminder_card_frame(
+    card: &ReminderCard,
+    bowl: Option<&FeedBowl>,
+    feeding: bool,
+) -> (u32, u32, Vec<u8>) {
     let mut out = card.rgba.clone();
     let w = card.w;
     let h = card.h;
-    let label = if feeding { "呼～活力恢复了！" } else { "点击投喂" };
-    if let Some((tw, th, trgba)) = rasterize_text(label, w - 40, 15.0, HINT_TEXT) {
-        let pad_x = 14u32;
-        let pad_y = 6u32;
-        let pw = tw + pad_x * 2;
-        let ph = th + pad_y * 2;
-        let x = ((w as i32 - pw as i32) / 2).max(0) as u32;
-        let y = (h as i32 - ph as i32 - 12).max(0) as u32;
-        fill_round_rect(&mut out, w, h, x, y, pw, ph, (ph / 2) as i32, HINT_BG);
-        blit(&mut out, w, h, &trgba, tw, th, x + pad_x, y + pad_y);
-    }
+    draw_feed_bowl(&mut out, w, h, bowl, feeding);
     (w, h, out)
+}
+
+fn draw_feed_bowl(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    bowl: Option<&FeedBowl>,
+    feeding: bool,
+) {
+    let (px, py, pw, ph) = food_button_layout();
+    let x = px.round().max(0.0) as u32;
+    let y = py.round().max(0.0) as u32;
+    let pw = pw.round().max(1.0) as u32;
+    let ph = ph.round().max(1.0) as u32;
+    if let Some(bowl) = bowl {
+        let dx = x + pw.saturating_sub(bowl.w) / 2;
+        let dy = y + ph.saturating_sub(bowl.h) / 2;
+        blit(out, w, h, &bowl.rgba, bowl.w, bowl.h, dx, dy);
+    } else {
+        fill_round_rect(out, w, h, x, y, pw, ph, 16, PARCHMENT);
+        stroke_round_rect(out, w, h, x, y, pw, ph, 16, INK, 2);
+    }
+    if feeding {
+        if let Some((tw, th, trgba)) = rasterize_text("呼～", 80, 16.0, HINT_TEXT) {
+            let tx = x + pw.saturating_sub(tw) / 2;
+            let ty = y.saturating_sub(th + 2);
+            blit(out, w, h, &trgba, tw, th, tx, ty);
+        }
+    }
 }
 
 /// Border flood-fill over near-white pixels. Returns an alpha mask:
@@ -221,11 +268,7 @@ fn downscale_card(
 
 /// Design tokens (light theme).
 const PANEL: [u8; 4] = [0xFF, 0xF8, 0xF2, 0xF5]; // nearly opaque cream
-const ACCENT: [u8; 4] = [0xFF, 0x6B, 0xA8, 0xFF]; // strong pink
-const ACCENT_RING: [u8; 4] = [0xFF, 0xD0, 0xE4, 0xFF];
 const TEXT: [u8; 4] = [0x3A, 0x35, 0x40, 0xFF];
-const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
-const ON_ACCENT: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 
 /// Build a full-window RGBA for the reminder Showing/Feeding stage.
 pub fn compose_reminder_frame(
@@ -250,50 +293,25 @@ pub fn compose_reminder_frame(
 
     // Message text on panel.
     if !feeding {
-        if let Some((tw, th, trgba)) = rasterize_text(message, w - 40, 15.0, TEXT) {
-            blit(&mut out, w, h, &trgba, tw, th, 20, 132);
+        if let Some((tw, th, trgba)) = rasterize_text(message, w - 40, 22.0, TEXT) {
+            blit(&mut out, w, h, &trgba, tw, th, 20, 140);
         }
-    } else if let Some((tw, th, trgba)) = rasterize_text("呼～活力恢复了！", w - 40, 18.0, TEXT)
+    } else if let Some((tw, th, trgba)) = rasterize_text("呼～活力恢复了！", w - 40, 22.0, TEXT)
     {
         blit(&mut out, w, h, &trgba, tw, th, 20, 150);
     }
 
-    // Large food button (must stay fully inside the bitmap).
-    if !feeding {
-        let (bx, by, bs, _) = food_button_layout();
-        let s = (bs * button_scale).max(40.0) as i32;
-        let cx = (bx + bs * 0.5) as i32;
-        let cy = (by + bs * 0.5) as i32;
-        // Outer ring for visibility
-        fill_circle(&mut out, w, h, cx, cy, s / 2 + 4, ACCENT_RING);
-        fill_circle(&mut out, w, h, cx, cy, s / 2, ACCENT);
-        // Fish / food glyph
-        fill_circle(&mut out, w, h, cx - 6, cy - 2, s / 6, WHITE);
-        fill_circle(&mut out, w, h, cx + 8, cy, s / 8, WHITE);
-        // Label under icon
-        if let Some((tw, th, trgba)) = rasterize_text("点击投喂", 120, 14.0, ON_ACCENT) {
-            let tx = (cx - tw as i32 / 2).max(0) as u32;
-            let ty = (cy + s / 6).max(0) as u32;
-            // Dark label below button for contrast
-            if let Some((tw2, th2, trgba2)) = rasterize_text("点击投喂", 120, 14.0, TEXT) {
-                let tx2 = ((w as i32 - tw2 as i32) / 2).max(0) as u32;
-                let ty2 = (by as u32 + bs as u32 + 4).min(h.saturating_sub(th2));
-                blit(&mut out, w, h, &trgba2, tw2, th2, tx2, ty2);
-            }
-            let _ = (tx, ty, trgba, th);
-        }
-    }
+    let _ = button_scale;
+    draw_feed_bowl(&mut out, w, h, None, feeding);
 
     (w, h, out)
 }
 
-/// Food button rect in reminder layout coordinates (360×260).
+/// Feed-bowl rect in reminder layout coordinates.
 pub fn food_button_layout() -> (f32, f32, f32, f32) {
-    let s = FOOD_BUTTON_SIZE;
-    let x = (REMINDER_WINDOW_W as f32 - s) * 0.5;
-    // Keep fully above the bottom edge so it is never cropped.
-    let y = REMINDER_WINDOW_H as f32 - s - 36.0;
-    (x, y, s, s)
+    let x = (REMINDER_WINDOW_W as f32 - FEED_BOWL_W) * 0.5;
+    let y = REMINDER_WINDOW_H as f32 - FEED_BOWL_H - 12.0;
+    (x, y, FEED_BOWL_W, FEED_BOWL_H)
 }
 
 /// Map a window-client physical pixel into reminder layout space.
@@ -383,20 +401,65 @@ fn fill_round_rect(
     }
 }
 
-fn fill_circle(px: &mut [u8], w: u32, h: u32, cx: i32, cy: i32, radius: i32, c: [u8; 4]) {
-    let r2 = radius * radius;
-    for y in (cy - radius)..(cy + radius + 1) {
-        for x in (cx - radius)..(cx + radius + 1) {
-            if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-                continue;
-            }
-            let dx = x - cx;
-            let dy = y - cy;
-            if dx * dx + dy * dy <= r2 {
-                put(px, w, x, y, c);
+fn stroke_round_rect(
+    px: &mut [u8],
+    w: u32,
+    h: u32,
+    x: u32,
+    y: u32,
+    rw: u32,
+    rh: u32,
+    radius: i32,
+    c: [u8; 4],
+    thick: i32,
+) {
+    let x0 = x as i32;
+    let y0 = y as i32;
+    let x1 = (x + rw) as i32;
+    let y1 = (y + rh).min(h) as i32;
+    let r = radius.max(0);
+    let t = thick.max(1);
+    for py in y0..y1 {
+        for px_ in x0..x1 {
+            let outer = inside_rrect(px_, py, x0, y0, x1, y1, r);
+            let inner = inside_rrect(
+                px_,
+                py,
+                x0 + t,
+                y0 + t,
+                x1 - t,
+                y1 - t,
+                (r - t).max(0),
+            );
+            if outer && !inner {
+                put(px, w, px_, py, c);
             }
         }
     }
+}
+
+fn inside_rrect(x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, r: i32) -> bool {
+    if x < x0 || y < y0 || x >= x1 || y >= y1 {
+        return false;
+    }
+    let r = r.max(0);
+    let cx = if x < x0 + r {
+        x0 + r
+    } else if x >= x1 - r {
+        x1 - 1 - r
+    } else {
+        return true;
+    };
+    let cy = if y < y0 + r {
+        y0 + r
+    } else if y >= y1 - r {
+        y1 - 1 - r
+    } else {
+        return true;
+    };
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= r * r
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -449,17 +512,19 @@ mod card_tests {
         assert!(transparent > 0, "white background should be transparent");
         // …while the bubble + cat + tail remain (matches the mockup artwork).
         let frac = opaque_frac(&card.rgba);
-        assert!(frac > 0.25 && frac < 0.55, "opaque fraction {frac:.2}");
+        assert!(frac > 0.10 && frac < 0.60, "opaque fraction {frac:.2}");
     }
 
     #[test]
     fn card_frame_has_feed_hint() {
         let card = load_reminder_card(&card_path(), REMINDER_WINDOW_W, REMINDER_WINDOW_H).unwrap();
-        let (w, h, frame) = compose_reminder_card_frame(&card, false);
+        let bowl = load_feed_bowl(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ui/feed_bowl.png"),
+        );
+        let (w, h, frame) = compose_reminder_card_frame(&card, bowl.as_ref(), false);
         assert_eq!((w, h), (REMINDER_WINDOW_W, REMINDER_WINDOW_H));
-        assert!(frame != card.rgba, "feed hint pill should alter the frame");
-        // Feeding label must not panic and should also draw.
-        let (_, _, fed) = compose_reminder_card_frame(&card, true);
+        assert!(frame != card.rgba, "feed bowl should alter the frame");
+        let (_, _, fed) = compose_reminder_card_frame(&card, bowl.as_ref(), true);
         assert_ne!(fed, frame);
     }
 
@@ -475,7 +540,11 @@ mod card_tests {
     #[ignore]
     fn dump_card_preview() {
         let card = load_reminder_card(&card_path(), REMINDER_WINDOW_W, REMINDER_WINDOW_H).unwrap();
-        let (w, h, frame) = compose_reminder_card_frame(&card, false);
+        let bowl = load_feed_bowl(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ui/feed_bowl.png"),
+        );
+        assert!(bowl.is_some(), "feed_bowl.png should key and load");
+        let (w, h, frame) = compose_reminder_card_frame(&card, bowl.as_ref(), false);
         let out = {
             let mut img = image::RgbaImage::new(w, h);
             for (i, px) in img.pixels_mut().enumerate() {

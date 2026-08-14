@@ -23,7 +23,8 @@ $strip = @(
     "assets\pets\cow-cat\_video",
     "assets\pets\cow-cat\_master",
     "assets\pets\cow-cat\idle_placeholder.png",
-    "assets\pets\cow-cat\idle_placeholder.json"
+    "assets\pets\cow-cat\idle_placeholder.json",
+    "assets\tray\_gen"
 )
 foreach ($rel in $strip) {
     $p = Join-Path $dist $rel

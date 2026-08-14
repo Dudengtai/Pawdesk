@@ -1,23 +1,19 @@
 //! Generate assets/tray/icon.png.
 //!
-//! Preferred source is `assets/tray/cat.svg` (line-art tray mark).
-//! Prefer the Node helper (needs @resvg/resvg-js once):
+//! Source of truth is the cow-cat head portrait packed by:
 //!
 //! ```text
-//! npm.cmd install --no-save @resvg/resvg-js
-//! node tools/svg_to_tray_icon.js
+//! python tools/pack_tray_icon.py
 //! ```
 //!
-//! Fallback: rasterize a pet sprite frame to 32×32 when SVG tools are unavailable.
+//! This example only rebuilds a crude fallback if icon.png is missing.
 
 use image::imageops::FilterType;
 
 fn main() {
-    if std::path::Path::new("assets/tray/icon.png").exists()
-        && std::path::Path::new("assets/tray/cat.svg").exists()
-    {
-        println!("assets/tray/icon.png already present (from cat.svg pipeline).");
-        println!("To rebuild from assets/tray/cat.svg: node tools/svg_to_tray_icon.js");
+    if std::path::Path::new("assets/tray/icon.png").exists() {
+        println!("assets/tray/icon.png already present (cow-cat avatar).");
+        println!("To rebuild: python tools/pack_tray_icon.py");
         return;
     }
 

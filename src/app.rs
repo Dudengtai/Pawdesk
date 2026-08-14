@@ -30,7 +30,7 @@ use crate::render::menu_ui::{
 };
 use crate::render::reminder_ui::{
     client_to_layout, compose_reminder_card_frame, compose_reminder_frame, food_button_layout,
-    load_reminder_card, ReminderCard,
+    load_feed_bowl, load_reminder_card, FeedBowl, ReminderCard,
 };
 use crate::render::yawn_bubble::{compose_yawn_frame, place_yawn_bubble, YawnPlacement};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
@@ -96,6 +96,8 @@ pub struct App {
     reminder_ui_active: bool,
     /// Whole-image reminder card (tishi.png mockup), None → composed fallback.
     reminder_card: Option<ReminderCard>,
+    /// Kibble bowl used as the feed control.
+    feed_bowl: Option<FeedBowl>,
     /// Feed completed this session cycle; persist once when return starts.
     feed_persist_pending: bool,
     /// M4 shortcuts.
@@ -169,6 +171,11 @@ impl App {
             Some(_) => info!("reminder card loaded (tishi.png mockup)"),
             None => warn!("reminder card image missing; using composed reminder UI"),
         }
+        let feed_bowl = load_feed_bowl(&assets_dir.join("ui/feed_bowl.png"));
+        match &feed_bowl {
+            Some(_) => info!("feed bowl loaded"),
+            None => warn!("feed bowl missing; reminder will use a placeholder"),
+        }
 
         Self {
             window: None,
@@ -190,6 +197,7 @@ impl App {
             scale_factor: 1.0,
             reminder_ui_active: false,
             reminder_card,
+            feed_bowl,
             feed_persist_pending: false,
             shortcuts,
             shortcut_icons: HashMap::new(),
@@ -621,7 +629,8 @@ impl App {
         {
             let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
             if let Some(card) = &self.reminder_card {
-                let (w, h, composed) = compose_reminder_card_frame(card, feeding);
+                let (w, h, composed) =
+                    compose_reminder_card_frame(card, self.feed_bowl.as_ref(), feeding);
                 self.sprite_logical = (w, h);
                 self.hit_rgba = composed;
                 self.hit_size = (w, h);
@@ -1686,6 +1695,18 @@ impl App {
 
         if let Some(pet) = self.pet.as_mut() {
             if pet.begin_reminder(window_pos, center, msg, now) {
+                if let Some(origin) = pet.reminder_origin {
+                    if (origin.x - window_pos.x).abs() > 0.5
+                        || (origin.y - window_pos.y).abs() > 0.5
+                    {
+                        if let Some(w) = &self.window {
+                            w.set_outer_position(PhysicalPosition::new(
+                                origin.x as i32,
+                                origin.y as i32,
+                            ));
+                        }
+                    }
+                }
                 if let Some(s) = self.scheduler.as_mut() {
                     s.consume_due();
                 }
@@ -2478,7 +2499,16 @@ impl ApplicationHandler<UserEvent> for App {
             let mut returned_idle = false;
             if movement_was_active {
                 if let Some(pet) = self.pet.as_mut() {
-                    if let Some(new_pos) = pet.update_movement(now) {
+                    if let Some(mut new_pos) = pet.update_movement(now) {
+                        if pet.is_reminder_moving() {
+                            if let Some(wa) = self
+                                .window
+                                .as_ref()
+                                .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
+                            {
+                                new_pos.y = new_pos.y.max(wa.y as f64);
+                            }
+                        }
                         if let Some(w) = &self.window {
                             w.set_outer_position(PhysicalPosition::new(
                                 new_pos.x as i32,
@@ -2712,12 +2742,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// Generous click zone around the bottom-center feed hint pill (layout coords).
-/// Anchored to the pill position so it follows REMINDER_WINDOW size changes.
+/// Click zone matching the visible feed pill (layout coords).
 fn feed_zone_hit(lx: f64, ly: f64) -> bool {
-    let cx = REMINDER_WINDOW_W as f64 * 0.5;
-    let cy = REMINDER_WINDOW_H as f64 - 44.0;
-    (lx - cx).abs() <= 88.0 && (ly - cy).abs() <= 38.0
+    let (x, y, w, h) = food_button_layout();
+    let pad = 8.0;
+    lx >= (x - pad) as f64
+        && ly >= (y - pad) as f64
+        && lx <= (x + w + pad) as f64
+        && ly <= (y + h + pad) as f64
 }
 
 /// Resolve assets for both `cargo run` and portable release layouts.
