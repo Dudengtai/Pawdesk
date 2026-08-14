@@ -115,19 +115,18 @@ dist/PawDesk/           便携包（package.ps1）
 ```text
 Idle ──60s──> Idle(one-shot) ──完──> Idle
 Idle ──中/近距──> Watching ──远──> Idle
-（关闭）Watching ──飞扑──> Approaching ──> Playing ──> Idle
 * ──提醒──> Reminder(*) ──回位──> Idle
 Idle/Watching/Edge ──单击──> MenuOpen ──关──> Idle
 * ──拖──> Dragging ──放──> Idle
 Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 ```
 
-优先级（高 → 低）：**Dragging &gt; Reminder &gt; MenuOpen &gt; Edge &gt; Playing &gt; Approaching &gt; Watching &gt; Idle**。
+优先级（高 → 低）：**Dragging &gt; Reminder &gt; MenuOpen &gt; Edge &gt; Watching &gt; Idle**。
 
 规则：
 
 - 拖动打断提醒 → 结束后再处理 pending。  
-- 提醒中不进菜单；菜单中不自动扑近。  
+- 提醒中不进菜单。  
 - 开坞前若 `HiddenAtEdge`：`snap_restore_from_edge` 再 place。
 
 ### 3.2 动画资源
@@ -140,10 +139,7 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 姿态条；运行时只用手写关键帧 + 身体锁定（预乘混合）；虹膜另叠。`look_pitch` 由母版品红静帧软抠重画（`tools/pack_pitch_from_gen.py`） |
 | `idle_yawn` | 60s one-shot | ~77f @30；母版脸哈欠；峰值画气泡「困死我了…」 |
 | `idle_stretch` | 60s one-shot | 110f @50（2.20s，压过 `ACTION_MIN_SECS=2.2`）；7 档 sit→转→下蹲→探→半峰→峰→倒放；峰值眯眼吐舌；无气泡、不拓窗 |
-| `approaching` / `playing_interaction` | 飞扑（**运行关闭**） | |
-| `dragging` / `edge_peek` | 拖动 / 边缘 | |
 | `reminder_hop` | 提醒进场 / 回程 | 41f @30；sit→攒劲→起跳→空中→落地→sit；进度锁相；缺文件回退 `idle_blink` |
-| `reminder_wave` / `reminder_feed` | 到位挥手 / 投喂 | 仍为旧猫；旅途不再使用 |
 
 **待机规则**
 
@@ -157,17 +153,11 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 - 伸懒腰表情：坐/转/下蹲睁眼；探轻笑；半峰开始眯；峰值开心眯眼 + 张嘴吐舌（参考 `_master/stretch_expr_ref.png`）。  
 - 播帧：最近邻，禁亚帧混合。oneshot 回 base 约 100ms 书挡。  
 - 呈现：密集 clip **本帧直接 present**。缩放预乘双线性。  
-- 飞扑：`ENABLE_MOUSE_POUNCE = false`。  
-- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` / **`idle_stretch`** + 互动 clip（含 **`reminder_hop`**，缺则跳过、旅途回退坐姿）。旧 `idle_cute` / `idle_tail_wag` / `idle_sleep` / `idle_watch` **已下盘**。`idle_stretch` 为母版新片，不是 v0.19 卸下的旧视频。
-
-**飞扑**
-
-- `ENABLE_MOUSE_POUNCE = false`：近距只 Watching。  
-- 资源与路径代码保留，后期开开关。
+- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` / **`idle_stretch`** + **`reminder_hop`**（缺则跳过、旅途回退坐姿）。拖动 / 贴边 / 提醒卡片到位均保持母版坐姿。旧写实猫 clip 与飞扑路径已下盘。
 
 ### 3.3 移动
 
-`movement`：去光标（抛物线，飞扑用）、回家、去屏幕中心、边缘 hide/restore。缓动见 design `ease.smooth`。
+`movement`：提醒 hop 到屏幕中心 / 回原位、边缘 hide/restore。缓动见 design `ease.smooth`。
 
 ### 3.4 显示缩放（`pet.scale`）
 

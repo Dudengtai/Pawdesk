@@ -237,7 +237,7 @@ foundation (工程/错误/日志/事件总线)
 | PET-03 | 待机 base 眨眼 + 每 **60s** one-shot（**`idle_yawn` / `idle_stretch` 轮播**） | M1 | P0 | PET-02 | tech §6.1/§8.2, design §4.3 | [x] |
 | PET-04 | `Dragging`：按下移动进入、释放回 Idle；拖动反馈 | M1 | P0 | PET-01, WIN-03 | prd F-UI-02, design §10 | [x] |
 | PET-05 | `HiddenAtEdge`：阈值、隐藏比例、探头命中、点击恢复 | M2 | P0 | PET-01, PLAT-01 | tech §7.2, design §5.2, prd F-AN-03 | [x] |
-| PET-06 | 鼠标距离：`Watching` 已接；**飞扑 `Approaching` 延后**（`ENABLE_MOUSE_POUNCE=false`） | M2 / 后期 | P0 | PET-01 | tech §6.1, prd F-AN-04 | [~] |
+| PET-06 | 鼠标距离：`Watching`（中/近距）；飞扑路径已删除 | M2 | P0 | PET-01 | tech §6.1, prd F-AN-04 | [x] |
 | PET-07 | 移动插值与路径（扑近、回位、去中心） | M2–M3 | P0 | PET-01, RND-04 | tech movement, design ease | [x] |
 | PET-08 | 状态优先级：拖动 > 提醒待办延迟；提醒 > 自动扑近；菜单打开抑制扑近 | M2–M3 | P0 | PET-01, RM-*, MENU-* | prd §5.7 | [x] |
 | PET-09 | `Reminder(*)` 子阶段接入（移动/展示/返回） | M3 | P0 | PET-07, RM-02 | tech §9.2 | [x] |
@@ -596,10 +596,10 @@ foundation (工程/错误/日志/事件总线)
 | PET-A01 | 待机 / 状态 clip crossfade | 切换约 140ms 预乘混合 | [x] 2026-08-06 |
 | PET-A01b | 待机真眨眼（非叠层黑斑） | `tools/build_idle_base.py` 虹膜 mask 眼皮 | [x] 2026-08-06 |
 | PET-A01c | 拖动态持续播帧 + scale 脉冲 | 曾错误 `tick` 直接 return | [x] 2026-08-06 |
-| PET-A02 | 飞扑重开与验收 | `ENABLE_MOUSE_POUNCE` | [ ] |
+| PET-A02 | 飞扑重开与验收 | 路径与旧资源已删除；不再保留开关 | [-] |
 | PET-A03 | 新动作 / 视频抽帧补帧 | 工具链已有 | [~] 并入 PET-A07 |
 | PET-A04 | 形象重绘 / 瘦版统一 | 用户拍板后再做 | [ ] |
-| PET-A05 | 提醒/投喂动作精修 | 拆：进场 hop 见 PET-M09；到位挥手 / 投喂 / 卡片猫另议 | [~] |
+| PET-A05 | 提醒/投喂动作精修 | 进场 hop 见 PET-M09；到位 / 投喂用母版坐姿 + `tishi` 卡片 | [x] |
 | PET-A06 | 宠物大小可调 | 设置 + 托盘；`pet.scale` 持久化 | [x] 2026-08-06 已测 |
 | **PET-A07** | **动画精修** | 已并入 §15 母版线 | **[x]** 眨眼 / 跟随 / 哈欠 / 伸懒腰 |
 
@@ -610,11 +610,11 @@ foundation (工程/错误/日志/事件总线)
 - **哈欠**：`tools/pack_idle_yawn.py`；气泡 `src/render/yawn_bubble.rs`；间隔 `PAWDESK_CUTE_SECS`；overlay 猫先 `scale_rgba_centered` 再合成，与待机同边距
 - **伸懒腰**：`tools/pack_idle_stretch.py`；110f@50；7 档；峰值眯眼吐舌；1024 抠边；无气泡、不拓窗；书挡 ≡ `idle_blink/000`
 - **显示大小**：`config.pet.scale` 默认 **0.6**；`pet_logical_size`；设置 `PetScaleDec/Inc`；托盘变大/变小；schema **v3** 迁移
-- **飞扑**：`ENABLE_MOUSE_POUNCE = false`；资源与路径代码保留
+- **飞扑**：已删除（无开关、无 `Approaching` / `playing_interaction`）
 - **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `mockups/launcher-pin-flip.*`
 - **呈现**：CPU RGBA → `UpdateLayeredWindow(ULW_ALPHA)` 预乘 BGRA；禁止宠物 HWND 挂 DXGI/wgpu
 - **色键**：仅品红；**禁止黑键**
-- **工具**：`tools/pack_idle_stretch.py`、`pack_idle_yawn.py`、`pack_pitch_from_gen.py`、`pack_reminder_hop.py`、`despill_pet_edges.py`、`package.ps1`；旧视频管线 `build_lively_pet.py` / `gen_pet_videos.py` 不接回调度
+- **工具**：`tools/pack_idle_stretch.py`、`pack_idle_yawn.py`、`pack_pitch_from_gen.py`、`pack_reminder_hop.py`、`despill_pet_edges.py`、`package.ps1`
 - **配置坑**：勿用 PowerShell `Set-Content`/`ConvertTo-Json` 乱写 `config.json`（易 BOM/非法 JSON → 回退 bak 的旧 scale）
 - **添加应用**：`shortcut/picker.rs` → Windows 原生 `IFileOpenDialog`；`build_pick_context` + 后台 STA；虚拟桌面；不切 z-order（tech §7.4）
 - **构建产物**：`target/debug` 开发 · `target/release` 正式 · `dist/PawDesk` 仅 package 快照（不会随 cargo 自动更新）
@@ -628,10 +628,7 @@ foundation (工程/错误/日志/事件总线)
 | `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 13 / 5 / 4；yaw 只用偶数关键帧；pitch 已按母版重画 |
 | `idle_yawn` | 60s oneshot | **77f @30**；峰值气泡；进出同待机缩放 |
 | `idle_stretch` | 60s oneshot | **110f @50**；7 档；峰值眯眼吐舌；无气泡、不拓窗 |
-| `approaching` | 飞扑（运行关闭） | |
-| `dragging` / `edge_peek` | 拖动 / 边缘 | |
 | `reminder_hop` | 提醒进场 / 回程 | **41f @30**；sit→攒劲→起跳→空中→落地 |
-| `reminder_wave` / `reminder_feed` | 到位挥手 / 投喂 | 旅途已不用 wave |
 
 ### 11.4 透明底注意事项
 

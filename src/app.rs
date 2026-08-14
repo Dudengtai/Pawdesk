@@ -1940,9 +1940,7 @@ impl App {
                 || p.is_crossfading()
                 || matches!(
                     p.state,
-                    PetState::Approaching { .. }
-                        | PetState::PlayingInteraction(_)
-                        | PetState::Reminder(_)
+                    PetState::Reminder(_)
                         | PetState::MenuOpen
                         | PetState::Watching
                         | PetState::Dragging
@@ -2631,11 +2629,9 @@ impl ApplicationHandler<UserEvent> for App {
                     || pet.state.is_idle()
                     || matches!(
                         pet.state,
-                        PetState::Approaching { .. }
-                            | PetState::Watching
+                        PetState::Watching
                             | PetState::Dragging
                             | PetState::HiddenAtEdge(_)
-                            | PetState::PlayingInteraction(_)
                             | PetState::Reminder(_)
                     );
                 if pet_motion {
@@ -2649,19 +2645,11 @@ impl ApplicationHandler<UserEvent> for App {
                             PetState::Watching
                                 | PetState::Dragging
                                 | PetState::HiddenAtEdge(_)
-                                | PetState::Approaching { .. }
-                                | PetState::PlayingInteraction(_)
                         )
                         || pet.state.is_idle()
                     {
                         present_now = true;
                     }
-                }
-                if pet.tick_interaction(now) {
-                    pet.begin_returning(now);
-                    self.texture_dirty = true;
-                    need_redraw = true;
-                    present_now = true;
                 }
             }
             if playing_yawn {

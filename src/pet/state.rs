@@ -1,16 +1,9 @@
 //! Pet state machine (tech §6.1). M2 interaction + M3 reminder.
 
-use std::time::Instant;
-
 use tracing::debug;
-
-use crate::event::Point;
 
 /// Idle animation identifier (string key into animation library).
 pub type IdleAnimation = String;
-
-/// Interaction animation id (M2+).
-pub type InteractionAnimation = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
@@ -32,8 +25,6 @@ pub enum ReminderStage {
 pub enum PetState {
     Idle(IdleAnimation),
     Watching,
-    Approaching { target: Point, started_at: Instant },
-    PlayingInteraction(InteractionAnimation),
     Reminder(ReminderStage),
     MenuOpen,
     Dragging,
@@ -45,8 +36,6 @@ impl PetState {
         match self {
             PetState::Idle(_) => "Idle",
             PetState::Watching => "Watching",
-            PetState::Approaching { .. } => "Approaching",
-            PetState::PlayingInteraction(_) => "PlayingInteraction",
             PetState::Reminder(_) => "Reminder",
             PetState::MenuOpen => "MenuOpen",
             PetState::Dragging => "Dragging",
@@ -70,8 +59,6 @@ pub fn state_priority(state: &PetState) -> u8 {
         PetState::Reminder(_) => 80,
         PetState::MenuOpen => 70,
         PetState::HiddenAtEdge(_) => 50,
-        PetState::PlayingInteraction(_) => 40,
-        PetState::Approaching { .. } => 30,
         PetState::Watching => 20,
         PetState::Idle(_) => 10,
     }
@@ -93,12 +80,7 @@ pub fn try_transition(from: &PetState, to: PetState) -> Result<PetState, PetStat
         // -- M2: mouse interaction --
         (PetState::Idle(_), PetState::Watching) => true,
         (PetState::Watching, PetState::Idle(_)) => true,
-        (PetState::Watching, PetState::Approaching { .. }) => true,
-        // Allow direct pounce if cursor enters near without lingering in medium range.
-        (PetState::Idle(_), PetState::Approaching { .. }) => true,
-        (PetState::Approaching { .. }, PetState::PlayingInteraction(_)) => true,
-        (PetState::PlayingInteraction(_), PetState::Approaching { .. }) => true,
-        (PetState::Approaching { .. }, PetState::Idle(_)) => true,
+        (PetState::Watching, PetState::Dragging) => true,
 
         // -- M2: edge --
         (PetState::Idle(_), PetState::HiddenAtEdge(_)) => true,
@@ -109,10 +91,6 @@ pub fn try_transition(from: &PetState, to: PetState) -> Result<PetState, PetStat
         // -- M3: reminder stages --
         (PetState::Idle(_), PetState::Reminder(ReminderStage::MovingToCenter)) => true,
         (PetState::Watching, PetState::Reminder(ReminderStage::MovingToCenter)) => true,
-        (PetState::Approaching { .. }, PetState::Reminder(ReminderStage::MovingToCenter)) => true,
-        (PetState::PlayingInteraction(_), PetState::Reminder(ReminderStage::MovingToCenter)) => {
-            true
-        }
         (PetState::HiddenAtEdge(_), PetState::Reminder(ReminderStage::MovingToCenter)) => true,
         (
             PetState::Reminder(ReminderStage::MovingToCenter),
@@ -162,30 +140,14 @@ pub fn try_transition(from: &PetState, to: PetState) -> Result<PetState, PetStat
 mod tests {
     use super::*;
 
-    fn now() -> Instant {
-        Instant::now()
-    }
-
-    fn approaching() -> PetState {
-        PetState::Approaching {
-            target: Point::new(100.0, 100.0),
-            started_at: now(),
-        }
-    }
-
     #[test]
     fn idle_to_dragging() {
         assert!(try_transition(&PetState::Idle("x".into()), PetState::Dragging).is_ok());
     }
 
     #[test]
-    fn watching_to_approaching() {
-        assert!(try_transition(&PetState::Watching, approaching()).is_ok());
-    }
-
-    #[test]
-    fn idle_to_approaching() {
-        assert!(try_transition(&PetState::Idle("x".into()), approaching()).is_ok());
+    fn idle_to_watching() {
+        assert!(try_transition(&PetState::Idle("x".into()), PetState::Watching).is_ok());
     }
 
     #[test]
@@ -224,12 +186,8 @@ mod tests {
     }
 
     #[test]
-    fn playing_to_watching_rejected() {
-        assert!(try_transition(
-            &PetState::PlayingInteraction("x".into()),
-            PetState::Watching
-        )
-        .is_err());
+    fn watching_to_dragging() {
+        assert!(try_transition(&PetState::Watching, PetState::Dragging).is_ok());
     }
 
     #[test]

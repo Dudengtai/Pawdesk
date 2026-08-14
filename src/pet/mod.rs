@@ -13,8 +13,7 @@ pub use animation::{
 pub use look::LookController;
 pub use interaction::{DistanceLevel, InteractionDetector};
 pub use movement::{
-    approach_duration, reminder_hop_duration, return_duration, MovementController, MovementTarget,
-    EDGE_DURATION,
+    reminder_hop_duration, MovementController, MovementTarget, EDGE_DURATION,
 };
 pub use state::{can_interrupt, try_transition, Edge, PetState, ReminderStage};
 
@@ -25,7 +24,6 @@ use tracing::{debug, info, warn};
 use crate::event::Point;
 use crate::platform::Rect;
 
-const INTERACTION_DURATION: Duration = Duration::from_millis(1500);
 const FEED_DURATION: Duration = Duration::from_millis(900);
 /// Soft blend when switching clips (UI / non-body). Pet body oneshots rely on
 /// exact sit bookends; the one-shot return uses this as a short residual guard,
@@ -39,10 +37,6 @@ const ACTION_SETTLE_SECS: f32 = 0.20;
 const ACTION_MIN_SECS: f32 = 2.2;
 /// How fast `face_dir` eases toward the cursor facing target (higher = snappier).
 const FACE_DIR_SPEED: f32 = 12.0;
-
-/// Mouse pounce (`Approaching` → cursor) is deferred to a later polish pass.
-/// When `false`, near-range only keeps `Watching` (no leap / fly-to-cursor).
-pub const ENABLE_MOUSE_POUNCE: bool = false;
 
 fn seed_blink_rng(_now: Instant) -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,13 +74,8 @@ pub struct PetController {
     pub drag_scale: f32,
     pub interaction: InteractionDetector,
     pub movement: MovementController,
-    pub home_position: Option<Point>,
     pub pre_edge_position: Option<Point>,
     pub hidden_position: Option<Point>,
-    pub interaction_started: Option<Instant>,
-    pub interaction_duration: Duration,
-    /// Earliest time another mouse approach may start (anti-spam after return).
-    pub next_approach_at: Option<Instant>,
     // ── M3 reminder ──
     pub pending_reminder: bool,
     pub reminder_origin: Option<Point>,
@@ -102,7 +91,7 @@ pub struct PetController {
     pub menu_closing: bool,
     /// `menu_open_t` at the moment close started (for reverse lerp).
     menu_close_from_t: f32,
-    /// Horizontal facing while approaching / watching: -1 = face left, 1 = face right.
+    /// Horizontal facing while watching: -1 = face left, 1 = face right.
     /// Smoothed toward [`Self::face_dir_target`] each tick for soft flips.
     pub face_dir: f32,
     /// Desired facing from cursor / approach direction (-1 or 1).
@@ -160,12 +149,8 @@ impl PetController {
             drag_scale: 1.0,
             interaction: InteractionDetector::default(),
             movement: MovementController::default(),
-            home_position: None,
             pre_edge_position: None,
             hidden_position: None,
-            interaction_started: None,
-            interaction_duration: INTERACTION_DURATION,
-            next_approach_at: None,
             pending_reminder: false,
             reminder_origin: None,
             reminder_message: String::new(),
@@ -311,15 +296,11 @@ impl PetController {
         if self.state.is_reminder() {
             return false;
         }
-        // Dragging / approach / play: don't steal mid-motion into menu.
-        if matches!(
-            self.state,
-            PetState::Dragging | PetState::Approaching { .. } | PetState::PlayingInteraction(_)
-        ) {
+        // Dragging: don't steal mid-motion into menu.
+        if matches!(self.state, PetState::Dragging) {
             return false;
         }
         self.movement.cancel();
-        self.interaction_started = None;
         self.interaction.reset_dwell();
         // Allow opening during cute one-shot (user intent wins).
         if matches!(self.state, PetState::Idle(_)) && !self.is_on_base_idle() {
@@ -448,10 +429,17 @@ impl PetController {
         changed |= self.tick_face_dir(now);
         changed |= self.tick_look(now);
 
-        // Dragging: keep swing clip alive + subtle scale pulse (was frozen before).
+        // Dragging: stay on the master sit. The old `dragging` swing clip is a
+        // different cat and must not flash when the window starts moving.
         if matches!(self.state, PetState::Dragging) {
             let prev_f = self.display_frame_f;
-            let (frame, _) = self.tick_continuous(now);
+            let (frame, _) = if self.player.clip_name() == IDLE_BASE
+                && self.player.frame_count_pub() <= 4
+            {
+                self.tick_blink_hold(now)
+            } else {
+                self.tick_continuous(now)
+            };
             let elapsed = now
                 .duration_since(self.player.started_at_pub())
                 .as_secs_f32();
@@ -471,14 +459,10 @@ impl PetController {
             && self.player.frame_count_pub() <= 4
             && !matches!(self.state, PetState::Dragging);
 
-        // Approaching / reminder travel: pose phase = hop progress.
+        // Reminder travel: pose phase = hop progress.
         // Dense clips (≥8 frames): continuous player / progress sampling at 30fps.
         // Tiny blink clips (≤4 frames): hold-based blink on the sit master.
-        let (frame, finished) = if matches!(self.state, PetState::Approaching { .. })
-            && self.movement.is_cursor_approach()
-        {
-            self.tick_pounce_synced(now)
-        } else if self.is_reminder_moving() && self.movement.is_reminder_hop() {
+        let (frame, finished) = if self.is_reminder_moving() && self.movement.is_reminder_hop() {
             self.tick_hop_synced(now)
         } else if on_blink_base {
             self.tick_blink_hold(now)
@@ -520,11 +504,7 @@ impl PetController {
         }
         if matches!(
             self.state,
-            PetState::Dragging
-                | PetState::MenuOpen
-                | PetState::Reminder(_)
-                | PetState::Approaching { .. }
-                | PetState::PlayingInteraction(_)
+            PetState::Dragging | PetState::MenuOpen | PetState::Reminder(_)
         ) {
             return false;
         }
@@ -764,28 +744,6 @@ impl PetController {
         (frame.min(n - 1), false)
     }
 
-    /// Map hop progress `t∈[0,1]` onto continuous `approaching` frames (smooth 30fps).
-    fn tick_pounce_synced(&mut self, now: Instant) -> (u32, bool) {
-        let n = self.player.frame_count_pub().max(1);
-        let t = self.movement.progress(now).unwrap_or(1.0);
-        // Storyboard aligned with tools/build_coherent_30fps.py pounce phases.
-        let phase = if t < 0.15 {
-            (t / 0.15) * 0.15
-        } else if t < 0.40 {
-            0.15 + ((t - 0.15) / 0.25) * 0.25
-        } else if t < 0.70 {
-            0.40 + ((t - 0.40) / 0.30) * 0.30
-        } else if t < 0.88 {
-            0.70 + ((t - 0.70) / 0.18) * 0.18
-        } else {
-            0.88 + ((t - 0.88) / 0.12) * 0.12
-        };
-        let f = phase * ((n - 1) as f32);
-        self.display_frame_f = f;
-        let frame = f.floor() as u32;
-        (frame.min(n - 1), false)
-    }
-
     /// Time-based continuous sampling for dense clips (idle loop / one-shot actions).
     fn tick_continuous(&mut self, now: Instant) -> (u32, bool) {
         let n = self.player.frame_count_pub().max(1) as f32;
@@ -831,10 +789,7 @@ impl PetController {
 
     // ── Interaction (PET-06) ──
 
-    /// Distance uses pet center; movement uses window top-left.
-    ///
-    /// **Pounce deferred**: near-range no longer starts `Approaching` (see
-    /// [`ENABLE_MOUSE_POUNCE`]). Medium/near both use `Watching` for now.
+    /// Distance uses pet center. Medium and near both watch; no leap-to-cursor.
     ///
     /// Interaction polish:
     /// - hysteresis + dwell before Watching (no threshold flicker)
@@ -848,13 +803,11 @@ impl PetController {
         win_h: f64,
         now: Instant,
     ) -> bool {
-        let _ = (window_top_left, win_w, win_h); // used when pounce re-enabled
+        let _ = (window_top_left, win_w, win_h);
         if matches!(
             self.state,
             PetState::Dragging
                 | PetState::HiddenAtEdge(_)
-                | PetState::PlayingInteraction(_)
-                | PetState::Approaching { .. }
                 | PetState::Reminder(_)
                 | PetState::MenuOpen
         ) {
@@ -872,39 +825,14 @@ impl PetController {
         let prev = self.state.clone();
         let dwell_ok = self.interaction.watch_dwell_ready(level, now);
 
-        // Facing is fixed (no cursor-driven horizontal flip).
-
         match level {
             DistanceLevel::Far => {
                 if matches!(self.state, PetState::Watching) {
                     self.go_idle(now);
                 }
             }
-            DistanceLevel::Medium => {
+            DistanceLevel::Medium | DistanceLevel::Near => {
                 if dwell_ok {
-                    self.enter_watching_if_base_idle(now);
-                }
-            }
-            DistanceLevel::Near => {
-                if ENABLE_MOUSE_POUNCE {
-                    if self.is_on_base_idle() || matches!(self.state, PetState::Watching) {
-                        if let Some(until) = self.next_approach_at {
-                            if now < until {
-                                return self.state != prev;
-                            }
-                        }
-                        if can_interrupt(
-                            &self.state,
-                            &PetState::Approaching {
-                                target: cursor,
-                                started_at: now,
-                            },
-                        ) {
-                            self.begin_approaching(cursor, window_top_left, win_w, win_h, now);
-                        }
-                    }
-                } else if dwell_ok {
-                    // Deferred: treat near like watch-only (no pounce).
                     self.enter_watching_if_base_idle(now);
                 }
             }
@@ -966,72 +894,6 @@ impl PetController {
                 self.switch_clip_for_state(now);
             }
         }
-    }
-
-    fn begin_approaching(
-        &mut self,
-        cursor: Point,
-        window_top_left: Point,
-        win_w: f64,
-        win_h: f64,
-        now: Instant,
-    ) {
-        if !ENABLE_MOUSE_POUNCE {
-            return;
-        }
-        // Store and move using window top-left (not center).
-        self.home_position = Some(window_top_left);
-        let dest = Point::new(cursor.x - win_w * 0.5, cursor.y - win_h * 0.5);
-        let dist = InteractionDetector::compute_distance(window_top_left, dest);
-        let dur = approach_duration(dist);
-        if let Ok(s) = try_transition(
-            &self.state,
-            PetState::Approaching {
-                target: dest,
-                started_at: now,
-            },
-        ) {
-            self.state = s;
-            self.movement
-                .start(window_top_left, MovementTarget::Cursor(dest), now, dur);
-            self.switch_clip_for_state(now);
-        }
-    }
-
-    pub fn begin_returning(&mut self, now: Instant) {
-        let Some(home) = self.home_position else {
-            self.go_idle(now);
-            return;
-        };
-        let current = self.movement.last_position().unwrap_or(home);
-        let dist = InteractionDetector::compute_distance(current, home);
-        let dur = return_duration(dist);
-        if let Ok(s) = try_transition(
-            &self.state,
-            PetState::Approaching {
-                target: home,
-                started_at: now,
-            },
-        ) {
-            self.state = s;
-            self.movement
-                .start(current, MovementTarget::Home(home), now, dur);
-            self.switch_clip_for_state(now);
-        }
-    }
-
-    pub fn tick_interaction(&mut self, now: Instant) -> bool {
-        if !matches!(self.state, PetState::PlayingInteraction(_)) {
-            return false;
-        }
-        if let Some(started) = self.interaction_started {
-            // Always use the fixed play duration for the interaction clip.
-            if now.duration_since(started) >= INTERACTION_DURATION {
-                self.interaction_started = None;
-                return true;
-            }
-        }
-        false
     }
 
     // ── Edge (PET-05) ──
@@ -1146,19 +1008,8 @@ impl PetController {
         };
 
         match target {
-            MovementTarget::Cursor(_) => {
-                let anim = "playing_interaction".to_string();
-                if let Ok(s) = try_transition(&self.state, PetState::PlayingInteraction(anim)) {
-                    self.state = s;
-                    self.interaction_started = Some(now);
-                    self.switch_clip_for_state(now);
-                    debug!("reached cursor -> playing interaction");
-                    return true;
-                }
-            }
-            MovementTarget::Home(_) | MovementTarget::EdgeRestore(_) => {
+            MovementTarget::EdgeRestore(_) => {
                 self.go_idle(now);
-                self.next_approach_at = Some(now + Duration::from_millis(600));
                 return true;
             }
             MovementTarget::EdgeHide(_) => {
@@ -1197,8 +1048,6 @@ impl PetController {
         // Cancel competing movement/interaction.
         self.movement.cancel();
         self.look.snap_front();
-        self.interaction_started = None;
-        self.home_position = None;
 
         let start = if matches!(self.state, PetState::HiddenAtEdge(_)) {
             self.snap_restore_from_edge(now).unwrap_or(current_top_left)
@@ -1379,7 +1228,6 @@ impl PetController {
                 self.current_frame = 0;
                 self.display_frame_f = 0.0;
             }
-            self.home_position = None;
             self.drag_scale = 1.0;
             debug!("pet -> idle base {target_name}");
             return;
@@ -1399,7 +1247,6 @@ impl PetController {
                 self.current_frame = 0;
                 self.display_frame_f = 0.0;
             }
-            self.home_position = None;
             self.drag_scale = 1.0;
             debug!("pet -> idle base {target_name}");
         }
@@ -1410,12 +1257,10 @@ impl PetController {
             PetState::Idle(name) => name.clone(),
             // Use base sit+blink (not warped watch) — head-sway clips caused double nose/mouth.
             PetState::Watching => IDLE_BASE.to_string(),
-            PetState::Approaching { .. } => "approaching".to_string(),
-            PetState::PlayingInteraction(name) => name.clone(),
-            PetState::Dragging => "dragging".to_string(),
-            PetState::HiddenAtEdge(_) => "edge_peek".to_string(),
-            PetState::Reminder(ReminderStage::Feeding) => "reminder_feed".to_string(),
-            PetState::Reminder(ReminderStage::Showing) => "reminder_wave".to_string(),
+            PetState::Dragging => IDLE_BASE.to_string(),
+            PetState::HiddenAtEdge(_) => IDLE_BASE.to_string(),
+            PetState::Reminder(ReminderStage::Feeding) => IDLE_BASE.to_string(),
+            PetState::Reminder(ReminderStage::Showing) => IDLE_BASE.to_string(),
             PetState::Reminder(_) => {
                 if self.library.get("reminder_hop").is_some() {
                     "reminder_hop".to_string()
@@ -1452,5 +1297,56 @@ impl PetController {
             self.display_frame_f = 0.0;
             debug!(clip = %clip_name, "switched clip for state {}", self.state.name());
         }
+    }
+}
+
+#[cfg(test)]
+mod master_identity_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn load_pet(now: Instant) -> PetController {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pets/cow-cat");
+        PetController::new(AnimationLibrary::load_all(&dir), now)
+    }
+
+    #[test]
+    fn drag_keeps_master_sit() {
+        let now = Instant::now();
+        let mut pet = load_pet(now);
+        assert_eq!(pet.player.clip_name(), IDLE_BASE);
+        pet.begin_drag(now);
+        assert!(matches!(pet.state, PetState::Dragging));
+        assert_eq!(
+            pet.player.clip_name(),
+            IDLE_BASE,
+            "drag must stay on the master sit"
+        );
+    }
+
+    #[test]
+    fn edge_hide_keeps_master_sit() {
+        let now = Instant::now();
+        let mut pet = load_pet(now);
+        pet.begin_edge_hide(Edge::Right, Point::new(100.0, 100.0), 128, now);
+        assert!(matches!(pet.state, PetState::HiddenAtEdge(_)));
+        assert_eq!(
+            pet.player.clip_name(),
+            IDLE_BASE,
+            "edge hide must stay on the master sit"
+        );
+    }
+
+    #[test]
+    fn reminder_showing_keeps_master_sit() {
+        let now = Instant::now();
+        let mut pet = load_pet(now);
+        assert!(pet.begin_reminder(Point::new(0.0, 0.0), Point::new(0.0, 0.0), "hi".into(), now));
+        assert!(pet.on_movement_complete(now + std::time::Duration::from_millis(1)));
+        assert!(matches!(
+            pet.state,
+            PetState::Reminder(ReminderStage::Showing)
+        ));
+        assert_eq!(pet.player.clip_name(), IDLE_BASE);
     }
 }

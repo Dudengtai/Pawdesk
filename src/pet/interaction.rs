@@ -13,7 +13,7 @@ use crate::platform::Rect;
 
 /// Beyond this distance the pet ignores the cursor (Far).
 pub const FAR_THRESHOLD: f64 = 300.0;
-/// Within this distance the pet starts approaching (Near).
+/// Within this distance the pet is in the near watch band.
 pub const MEDIUM_THRESHOLD: f64 = 120.0;
 /// Extra distance required to *leave* Watching (exit hysteresis, px).
 pub const FAR_EXIT_HYSTERESIS: f64 = 48.0;
@@ -38,7 +38,7 @@ pub enum DistanceLevel {
     Far,
     /// 120–300 px — Watching.
     Medium,
-    /// < 120 px — Approaching.
+    /// < 120 px — closer watch band (same Watching state as Medium).
     Near,
 }
 

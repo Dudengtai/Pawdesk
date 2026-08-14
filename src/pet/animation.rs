@@ -205,36 +205,9 @@ impl AnimationLibrary {
         &self.clips[0]
     }
 
-    /// Load interaction / movement animation clips (M2: ASSET-04, ASSET-05).
-    /// Tries disk first, falls back to procedural generation.
+    /// Load travel clips. Disk only — never invent a stand-in identity.
     pub fn load_interaction_set(pet_dir: &Path) -> Vec<AnimationClip> {
-        let specs = [
-            ("approaching", "approaching", 8u32, 12f32),
-            ("playing_interaction", "playing", 6, 10.0),
-            ("edge_peek", "edge_peek", 4, 4.0),
-            ("dragging", "dragging", 4, 8.0),
-            ("reminder_wave", "reminder", 6, 8.0),
-            ("reminder_feed", "feed", 6, 10.0),
-        ];
-
         let mut clips = Vec::new();
-        for (dir_name, style, frames, fps) in specs {
-            let dir = pet_dir.join(dir_name);
-            match load_clip_dir(&dir, dir_name) {
-                Ok(clip) => {
-                    info!(anim = %clip.name, frames = clip.frame_count, "loaded interaction animation");
-                    clips.push(clip);
-                }
-                Err(_) => {
-                    info!(
-                        anim = dir_name,
-                        "interaction dir not found; generating procedural clip"
-                    );
-                    clips.push(procedural_style_clip(dir_name, style, frames, fps));
-                }
-            }
-        }
-        // Reminder hop: disk only. Never invent a procedural / old-cat stand-in.
         match load_clip_dir(&pet_dir.join("reminder_hop"), "reminder_hop") {
             Ok(clip) => {
                 info!(anim = %clip.name, frames = clip.frame_count, "loaded interaction animation");
@@ -355,7 +328,7 @@ fn procedural_fallback_clip() -> AnimationClip {
     let mut sheet = vec![0u8; (size * frames * size * 4) as usize];
     for f in 0..frames {
         let phase = f as f32 / frames as f32;
-        let frame = draw_cow_frame(size, "fallback", phase);
+        let frame = draw_cow_frame(size, phase);
         for y in 0..size as usize {
             let src = y * size as usize * 4;
             let dst = (y * (size * frames) as usize + f as usize * size as usize) * 4;
@@ -378,66 +351,15 @@ fn procedural_fallback_clip() -> AnimationClip {
     }
 }
 
-/// Generate a procedural clip for a specific interaction style (M2 ASSET-04/05).
-fn procedural_style_clip(name: &str, style: &str, frames: u32, fps: f32) -> AnimationClip {
-    let size = 128u32;
-    let mut sheet = vec![0u8; (size * frames * size * 4) as usize];
-    for f in 0..frames {
-        let phase = f as f32 / frames as f32;
-        let frame = draw_cow_frame(size, style, phase);
-        for y in 0..size as usize {
-            let src = y * size as usize * 4;
-            let dst = (y * (size * frames) as usize + f as usize * size as usize) * 4;
-            sheet[dst..dst + size as usize * 4]
-                .copy_from_slice(&frame[src..src + size as usize * 4]);
-        }
-    }
-    AnimationClip {
-        name: name.to_string(),
-        frame_width: size,
-        frame_height: size,
-        frame_count: frames,
-        fps,
-        looping: true,
-        sheet_rgba: sheet,
-        sheet_width: size * frames,
-        sheet_height: size,
-        peak_start: None,
-        peak_end: None,
-    }
-}
-
-/// Shared procedural cow-cat frame for tooling / fallback.
-pub fn draw_cow_frame(size: u32, style: &str, phase: f32) -> Vec<u8> {
+/// Last-resort sit blob if no on-disk clips load.
+fn draw_cow_frame(size: u32, phase: f32) -> Vec<u8> {
     let mut data = vec![0u8; (size * size * 4) as usize];
     let s = size as i32;
     let wobble = (phase * std::f32::consts::TAU).sin();
-
-    let (stretch_y, ear_boost, eye_closed, eye_dx, tail_wobble, blush) = match style {
-        "tail_wag" => (1.0, 0, false, 0, (wobble * 10.0) as i32, false),
-        "stretch" => (1.0 + wobble.abs() * 0.15, 0, false, 0, 0, false),
-        "cute" => (1.0, 4, false, 0, 0, true),
-        "sleep" => (0.9, -2, true, 0, 0, false),
-        "watch" => (1.0, 0, false, (wobble * 6.0) as i32, 0, false),
-        // M2 interaction styles
-        "approaching" => (
-            0.95,
-            2,
-            false,
-            (wobble * 3.0) as i32,
-            (-wobble.abs() * 12.0) as i32,
-            false,
-        ),
-        "playing" => (0.92, 6, false, 0, (wobble * 8.0) as i32, true),
-        "edge_peek" => (1.0, 0, wobble < 0.0, 0, 0, false),
-        "dragging" => (1.05, -1, false, 0, (wobble * 6.0) as i32, false),
-        "reminder" => (1.0, 4, false, 0, (wobble * 6.0) as i32, false),
-        "feed" => (0.95, 2, false, 0, 0, true),
-        _ => (1.0, 0, false, 0, (wobble * 4.0) as i32, false),
-    };
+    let tail_wobble = (wobble * 4.0) as i32;
 
     let cx = s / 2 + tail_wobble / 3;
-    let cy = (s as f32 / 2.0 + 8.0 * stretch_y) as i32;
+    let cy = s / 2 + 8;
 
     for y in 0..s {
         for x in 0..s {
@@ -447,11 +369,11 @@ pub fn draw_cow_frame(size: u32, style: &str, phase: f32) -> Vec<u8> {
             let mut b = 0u8;
 
             let dx = x - cx;
-            let dy = ((y - cy) as f32 / stretch_y) as i32;
+            let dy = y - cy;
             let head_r = s * 38 / 100;
             let in_head = dx * dx + dy * dy <= head_r * head_r;
 
-            let ear_y = cy - s * 32 / 100 - ear_boost;
+            let ear_y = cy - s * 32 / 100;
             let left_ear = {
                 let ex = x - (cx - s * 22 / 100);
                 let ey = y - ear_y;
@@ -463,7 +385,7 @@ pub fn draw_cow_frame(size: u32, style: &str, phase: f32) -> Vec<u8> {
                 ex * ex + ey * ey <= (s * 12 / 100) * (s * 12 / 100)
             };
 
-            let body_cy = cy + (s as f32 * 0.28 * stretch_y) as i32;
+            let body_cy = cy + (s as f32 * 0.28) as i32;
             let in_body = {
                 let bx = x - cx;
                 let by = y - body_cy;
@@ -477,15 +399,7 @@ pub fn draw_cow_frame(size: u32, style: &str, phase: f32) -> Vec<u8> {
                 tx * tx + ty * ty <= (s * 8 / 100) * (s * 8 / 100)
             };
 
-            // edge_peek: only draw head + ears (body is hidden off-screen).
-            let suppress_body = style == "edge_peek";
-
-            if in_head
-                || left_ear
-                || right_ear
-                || (in_body && !suppress_body)
-                || (in_tail && !suppress_body)
-            {
+            if in_head || left_ear || right_ear || in_body || in_tail {
                 let spot = ((x * 13 + y * 7) % 47 < 12) || (dx.abs() < s / 10 && dy.abs() < s / 8);
                 if spot {
                     r = 0x2B;
@@ -499,18 +413,12 @@ pub fn draw_cow_frame(size: u32, style: &str, phase: f32) -> Vec<u8> {
 
                 // Eyes
                 let eye_y = cy - 4;
-                let left_eye = (x - (cx - 10 + eye_dx)).abs() <= 2 && (y - eye_y).abs() <= 2;
-                let right_eye = (x - (cx + 10 + eye_dx)).abs() <= 2 && (y - eye_y).abs() <= 2;
+                let left_eye = (x - (cx - 10)).abs() <= 2 && (y - eye_y).abs() <= 2;
+                let right_eye = (x - (cx + 10)).abs() <= 2 && (y - eye_y).abs() <= 2;
                 if left_eye || right_eye {
-                    if eye_closed {
-                        r = 0x2B;
-                        g = 0x2B;
-                        b = 0x2E;
-                    } else {
-                        r = 0x1A;
-                        g = 0x1A;
-                        b = 0x1E;
-                    }
+                    r = 0x1A;
+                    g = 0x1A;
+                    b = 0x1E;
                 }
 
                 // Nose
@@ -518,28 +426,6 @@ pub fn draw_cow_frame(size: u32, style: &str, phase: f32) -> Vec<u8> {
                     r = 0xFF;
                     g = 0xB6;
                     b = 0xC1;
-                }
-
-                // Blush for cute
-                if blush {
-                    let bl = (x - (cx - 16)).abs() <= 3 && (y - (cy + 4)).abs() <= 2;
-                    let br = (x - (cx + 16)).abs() <= 3 && (y - (cy + 4)).abs() <= 2;
-                    if bl || br {
-                        r = 0xFF;
-                        g = 0x9E;
-                        b = 0xC4;
-                    }
-                }
-
-                // Sleep Z
-                if style == "sleep" && phase > 0.3 {
-                    let zx = cx + 28;
-                    let zy = cy - 28 - (phase * 10.0) as i32;
-                    if (x - zx).abs() <= 4 && (y - zy).abs() <= 1 {
-                        r = 0x8E;
-                        g = 0xD1;
-                        b = 0xD6;
-                    }
                 }
 
                 a = 255;
@@ -779,7 +665,7 @@ mod idle_picker_tests {
     fn initial_is_base_blink() {
         let t0 = Instant::now();
         let mut p = IdlePicker::new(
-            vec!["idle_stretch".into(), "idle_cute".into()],
+            vec!["idle_stretch".into(), "idle_yawn".into()],
             t0,
         );
         assert_eq!(p.pick_initial(t0), IDLE_BASE);

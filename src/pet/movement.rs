@@ -1,7 +1,7 @@
 //! Position interpolation for pet movement (PET-07).
 //!
-//! Drives smooth window-position transitions for approaching the cursor,
-//! returning home, hiding at edge, and restoring from edge.
+//! Drives smooth window-position transitions for hiding at an edge,
+//! restoring from edge, and reminder hops to/from center.
 
 use std::time::{Duration, Instant};
 
@@ -18,17 +18,13 @@ pub const REMINDER_HOP_NEAR_PX: f64 = 56.0;
 /// What the movement is heading towards, so the controller can react on completion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MovementTarget {
-    /// Moving towards the cursor (will enter PlayingInteraction on arrival).
-    Cursor(Point),
-    /// Returning to the saved home position (will enter Idle on arrival).
-    Home(Point),
     /// Sliding partially off-screen to hide at an edge.
     EdgeHide(Point),
     /// Sliding back from a hidden edge position.
     EdgeRestore(Point),
-    /// Reminder: slide to work-area center (window top-left).
+    /// Reminder: hop to work-area center (window top-left).
     ReminderCenter(Point),
-    /// Reminder: return to origin after feed.
+    /// Reminder: hop back to origin after feed.
     ReminderHome(Point),
 }
 
@@ -36,9 +32,7 @@ impl MovementTarget {
     /// The destination point for this target.
     pub fn destination(&self) -> Point {
         match self {
-            MovementTarget::Cursor(p)
-            | MovementTarget::Home(p)
-            | MovementTarget::EdgeHide(p)
+            MovementTarget::EdgeHide(p)
             | MovementTarget::EdgeRestore(p)
             | MovementTarget::ReminderCenter(p)
             | MovementTarget::ReminderHome(p) => *p,
@@ -101,7 +95,7 @@ impl MovementController {
     ///
     /// Kept after `active` flips to false so the app can call `on_movement_complete`
     /// on the finishing frame (previously `target_kind` returned `None` when
-    /// inactive, leaving the pet stuck in `Approaching`).
+    /// inactive, leaving the pet stuck in the finishing movement state).
     pub fn target_kind(&self) -> Option<&MovementTarget> {
         self.target.as_ref()
     }
@@ -121,8 +115,7 @@ impl MovementController {
     /// while moving, or the final position when the movement just completed (and
     /// `is_active` becomes `false`). Returns `None` when idle.
     ///
-    /// Cursor approaches use a **parabolic hop arc** so the pet feels like it
-    /// pounces rather than sliding.
+    /// Reminder travel uses a **parabolic hop arc**; edge hide/restore slides.
     pub fn tick(&mut self, now: Instant) -> Option<Point> {
         if !self.active {
             return None;
@@ -145,15 +138,7 @@ impl MovementController {
         } else {
             let eased = ease_smooth(t);
             let x = self.start.x + (dest.x - self.start.x) * eased as f64;
-            let mut y = self.start.y + (dest.y - self.start.y) * eased as f64;
-
-            // Parabolic hop only for pouncing toward the cursor.
-            if matches!(target, MovementTarget::Cursor(_)) {
-                let dist = ((dest.x - self.start.x).hypot(dest.y - self.start.y)).max(1.0);
-                let arc = hop_arc_height(dist).min(56.0);
-                let lift = arc * (4.0 * t as f64 * (1.0 - t as f64));
-                y -= lift;
-            }
+            let y = self.start.y + (dest.y - self.start.y) * eased as f64;
             Point::new(x, y)
         };
         self.last_position = Some(pos);
@@ -172,8 +157,8 @@ impl MovementController {
 
     /// Normalized progress of the current movement in `[0, 1]`.
     ///
-    /// Returns `None` when no movement is active. Used to drive pounce sprite
-    /// frames in lockstep with the hop arc (pose phase = motion phase).
+    /// Returns `None` when no movement is active. Used to drive reminder-hop
+    /// sprite frames in lockstep with the hop arc (pose phase = motion phase).
     pub fn progress(&self, now: Instant) -> Option<f32> {
         if !self.active {
             return None;
@@ -183,10 +168,6 @@ impl MovementController {
         }
         let elapsed = now.duration_since(self.started_at);
         Some((elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0))
-    }
-
-    pub fn is_cursor_approach(&self) -> bool {
-        matches!(self.target, Some(MovementTarget::Cursor(_)))
     }
 
     pub fn is_reminder_hop(&self) -> bool {
@@ -223,18 +204,7 @@ pub fn reminder_hop_pos(start: Point, dest: Point, t: f32) -> Point {
 }
 
 /// Suggested duration based on distance (PET-07).
-/// Approaching: 400–600 ms. Returning: 500–800 ms. Edge hide/restore: 250 ms.
-pub fn approach_duration(distance: f64) -> Duration {
-    // Map 0–500 px to 400–600 ms.
-    let ms = 400.0 + (distance / 500.0).clamp(0.0, 1.0) * 200.0;
-    Duration::from_millis(ms as u64)
-}
-
-pub fn return_duration(distance: f64) -> Duration {
-    let ms = 500.0 + (distance / 500.0).clamp(0.0, 1.0) * 300.0;
-    Duration::from_millis(ms as u64)
-}
-
+/// Edge hide/restore: 250 ms.
 pub const EDGE_DURATION: Duration = Duration::from_millis(250);
 /// Legacy alias — prefer [`reminder_hop_duration`].
 pub const REMINDER_MOVE_DURATION: Duration = Duration::from_millis(700);
@@ -264,7 +234,7 @@ mod tests {
         let mut mc = MovementController::default();
         mc.start(
             Point::new(0.0, 0.0),
-            MovementTarget::Cursor(Point::new(100.0, 0.0)),
+            MovementTarget::EdgeRestore(Point::new(100.0, 0.0)),
             now,
             Duration::from_millis(100),
         );
@@ -279,7 +249,7 @@ mod tests {
         let mut mc = MovementController::default();
         mc.start(
             Point::new(0.0, 0.0),
-            MovementTarget::Home(Point::new(100.0, 200.0)),
+            MovementTarget::EdgeRestore(Point::new(100.0, 200.0)),
             now,
             Duration::from_millis(100),
         );
@@ -291,11 +261,11 @@ mod tests {
         // Target must remain available after finish so completion handlers can run.
         assert_eq!(
             mc.target_kind(),
-            Some(&MovementTarget::Home(Point::new(100.0, 200.0)))
+            Some(&MovementTarget::EdgeRestore(Point::new(100.0, 200.0)))
         );
         assert_eq!(
             mc.take_target(),
-            Some(MovementTarget::Home(Point::new(100.0, 200.0)))
+            Some(MovementTarget::EdgeRestore(Point::new(100.0, 200.0)))
         );
         assert!(mc.target_kind().is_none());
     }
@@ -306,7 +276,7 @@ mod tests {
         let mut mc = MovementController::default();
         mc.start(
             Point::new(0.0, 0.0),
-            MovementTarget::Home(Point::new(100.0, 0.0)),
+            MovementTarget::EdgeRestore(Point::new(100.0, 0.0)),
             now,
             Duration::from_millis(100),
         );
@@ -331,7 +301,7 @@ mod tests {
         let mut mc = MovementController::default();
         mc.start(
             Point::new(0.0, 0.0),
-            MovementTarget::Cursor(Point::new(100.0, 0.0)),
+            MovementTarget::EdgeRestore(Point::new(100.0, 0.0)),
             now,
             Duration::from_millis(100),
         );
@@ -357,42 +327,14 @@ mod tests {
     }
 
     #[test]
-    fn approach_duration_in_range() {
-        assert!(approach_duration(0.0) >= Duration::from_millis(400));
-        assert!(approach_duration(500.0) <= Duration::from_millis(600));
-    }
-
-    #[test]
-    fn cursor_path_has_arc_lift() {
+    fn edge_restore_path_no_arc() {
         let mut m = MovementController::default();
         let start = Point::new(0.0, 100.0);
         let dest = Point::new(200.0, 100.0);
         let t0 = Instant::now();
-        m.start(start, MovementTarget::Cursor(dest), t0, Duration::from_millis(500));
-        // Midpoint of ease_smooth is not exactly 0.5 time, but around 250ms still has lift.
+        m.start(start, MovementTarget::EdgeRestore(dest), t0, Duration::from_millis(500));
         let mid = m.tick(t0 + Duration::from_millis(250)).expect("mid");
-        // Without arc, y would stay 100; with arc, y must be lower (screen-up).
-        assert!(mid.y < 100.0, "expected hop arc, y={}", mid.y);
-        let end = m.tick(t0 + Duration::from_millis(500)).expect("end");
-        assert!((end.y - 100.0).abs() < 1.0);
-        assert!((end.x - 200.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn home_path_no_arc() {
-        let mut m = MovementController::default();
-        let start = Point::new(0.0, 100.0);
-        let dest = Point::new(200.0, 100.0);
-        let t0 = Instant::now();
-        m.start(start, MovementTarget::Home(dest), t0, Duration::from_millis(500));
-        let mid = m.tick(t0 + Duration::from_millis(250)).expect("mid");
-        assert!((mid.y - 100.0).abs() < 0.5, "home should not hop, y={}", mid.y);
-    }
-
-    #[test]
-    fn return_duration_in_range() {
-        assert!(return_duration(0.0) >= Duration::from_millis(500));
-        assert!(return_duration(500.0) <= Duration::from_millis(800));
+        assert!((mid.y - 100.0).abs() < 0.5, "edge restore should not hop, y={}", mid.y);
     }
 
     #[test]
