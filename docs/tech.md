@@ -257,13 +257,13 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **线性** 0..1；开 **380ms** / 关 **240ms** |
 | 视觉曲线 | compose：`ease_out_quint` scale 0.90→1；`ease_out_cubic` fade 略领先；子项 `stagger_t` |
 | 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t }`；`app` 每帧 `approach` 插值 |
-| 管理→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
+| 齿轮→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
 | 托盘→设置 | `enter_settings_ui` / `enter_settings_ui_highlight`：居中直开，**无** `settings_transition` |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
 | 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定 / 托盘直开设置） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
-卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=4`；**禁止**把产品做成「最多 5 个就装不下」。  
+卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=5`；右上角齿轮进设置；**禁止**把产品做成「最多 5 个就装不下」。  
 设置：失效项可 `settings_highlight_row` 高亮列表行；设置面板共用同一 token。
 
 ### 5.4 呈现与防闪（重要）
@@ -273,7 +273,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
 | 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
-| 设置转场 | 点击「管理」/失效行 → `begin_settings_from_launcher`：锚点 = 按钮中心，`place_settings_near_point` 钳制最终矩形；`settings_transition` 线性 340ms，60fps，union(启动坞, 当前设置) 合成 + `update_layered_rgba_ex(screen_pos)` 原子 present；前 40% 启动坞卡层与宠物淡出，设置层 `scale_rgba_around_anchor` 从 15% 生长（`ease_out_quint` + `ease_out_cubic`），t=1 后 `finish_settings_transition` 同步 winit 几何 |
+| 设置转场 | 点击齿轮 / 失效行 → `begin_settings_from_launcher`：锚点 = 控件中心，`place_settings_near_point` 钳制最终矩形；`settings_transition` 线性 340ms，60fps，union(启动坞, 当前设置) 合成 + `update_layered_rgba_ex(screen_pos)` 原子 present；前 40% 启动坞卡层与宠物淡出，设置层 `scale_rgba_around_anchor` 从 15% 生长（`ease_out_quint` + `ease_out_cubic`），t=1 后 `finish_settings_transition` 同步 winit 几何 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
 | 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
 | 转场命中 | 生长期间 **不**接 settings hit；t=1 后 `finish_settings_transition` 再开 |

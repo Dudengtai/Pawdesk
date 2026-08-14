@@ -94,7 +94,6 @@ pub fn compose_menu_frame(
     pet_w: u32,
     pet_h: u32,
     layout: &RadialLayout,
-    reminder_paused: bool,
     dpr: f32,
     chrome: MenuChromeState,
 ) -> (u32, u32, Vec<u8>) {
@@ -215,6 +214,15 @@ pub fn compose_menu_frame(
     // Title: soft fade with card (no extra vertical jump).
     let title_a = t_fade;
     if title_a > 0.02 {
+        let gear_left = layout
+            .items
+            .iter()
+            .find(|i| matches!(i.entry, MenuEntry::Manage))
+            .map(|i| dpi.s(i.x) - dpi.s(8.0));
+        let title_max = gear_left
+            .map(|gx| (gx - content_x).max(dpi.s(80.0)))
+            .unwrap_or_else(|| (content_w - dpi.s(36.0)).max(dpi.s(80.0)))
+            as u32;
         blit_text(
             &mut out,
             w,
@@ -222,7 +230,7 @@ pub fn compose_menu_frame(
             "快捷启动",
             content_x,
             dpi.s(layout.card_y + 15.0),
-            dpi.su(220),
+            title_max,
             dpi.px(17.0),
             with_alpha(LABEL, title_a),
         );
@@ -233,7 +241,7 @@ pub fn compose_menu_frame(
             "打开常用应用",
             content_x,
             dpi.s(layout.card_y + 36.0),
-            dpi.su(220),
+            title_max,
             dpi.px(12.5),
             with_alpha(SECONDARY, title_a),
         );
@@ -308,7 +316,7 @@ pub fn compose_menu_frame(
                 );
             }
             MenuEntry::Manage => {
-                draw_soft_btn(
+                draw_gear_btn(
                     &mut out,
                     w,
                     h,
@@ -317,32 +325,6 @@ pub fn compose_menu_frame(
                     y,
                     bw,
                     bh,
-                    radius,
-                    "管理",
-                    LABEL,
-                    hover_w,
-                    press_w,
-                    reveal,
-                );
-            }
-            MenuEntry::PauseReminder => {
-                let label = if reminder_paused {
-                    "恢复提醒"
-                } else {
-                    "暂停提醒"
-                };
-                draw_soft_btn(
-                    &mut out,
-                    w,
-                    h,
-                    dpi,
-                    x,
-                    y,
-                    bw,
-                    bh,
-                    radius,
-                    label,
-                    LABEL,
                     hover_w,
                     press_w,
                     reveal,
@@ -397,7 +379,12 @@ pub fn compose_menu_frame(
             format!("↑ 滚轮回到顶部 · 共 {} 个", layout.list_total)
         };
         let _ = more;
-        let hy = dpi.s(layout.list_bottom + 4.0).max(dpi.s(layout.card_y + layout.card_h - 20.0));
+        let hy = dpi.s(
+            layout.card_y + layout.card_h
+                - crate::ui::radial_menu::CARD_MARGIN
+                - crate::ui::radial_menu::SCROLL_HINT_H
+                + 2.0,
+        );
         blit_text(
             &mut out,
             w,
@@ -405,7 +392,7 @@ pub fn compose_menu_frame(
             &hint,
             content_x,
             hy,
-            dpi.su(280),
+            content_w.max(dpi.s(80.0)) as u32,
             dpi.px(11.0),
             with_alpha(TERTIARY, t_fade * 0.95),
         );
@@ -483,7 +470,7 @@ fn draw_primary_btn(
     );
 }
 
-fn draw_soft_btn(
+fn draw_gear_btn(
     out: &mut [u8],
     w: u32,
     h: u32,
@@ -492,21 +479,21 @@ fn draw_soft_btn(
     y: f32,
     bw: f32,
     bh: f32,
-    radius: f32,
-    label: &str,
-    text: [u8; 4],
     hover_w: f32,
     press_w: f32,
     reveal: f32,
 ) {
-    let bg0 = FILL_OPAQUE;
-    let bg1 = FILL_HOVER;
-    let bg2 = GROUPED_PRESS;
-    let bg = with_alpha(
-        lerp_rgba(lerp_rgba(bg0, bg1, hover_w), bg2, press_w),
+    let _ = dpi;
+    let r = bw.min(bh) * 0.5;
+    let plate = with_alpha(
+        lerp_rgba(
+            lerp_rgba(FILL_OPAQUE, FILL_HOVER, hover_w),
+            GROUPED_PRESS,
+            press_w,
+        ),
         reveal,
     );
-    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, radius, bg);
+    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, r, plate);
     stroke_rrect_aa(
         out,
         w,
@@ -515,37 +502,73 @@ fn draw_soft_btn(
         y + 0.5,
         x + bw - 0.5,
         y + bh - 0.5,
-        radius,
-        with_alpha(SOFT_BORDER, reveal),
+        r,
+        with_alpha(SOFT_BORDER, reveal * (0.50 + 0.35 * hover_w)),
         1.0,
     );
-    // Soft top highlight on hover
-    if hover_w > 0.05 {
-        fill_rrect_aa(
-            out,
-            w,
-            h,
-            x + dpi.s(2.0),
-            y + dpi.s(1.0),
-            x + bw - dpi.s(2.0),
-            y + dpi.s(4.0),
-            dpi.s(3.0),
-            with_alpha(INNER_HL, reveal * hover_w * 0.7),
-        );
+
+    let cx = x + bw * 0.5;
+    let cy = y + bh * 0.5;
+    let s = bw.min(bh);
+    let ink = with_alpha(LABEL, reveal * (0.82 + 0.18 * hover_w));
+    // Fill most of the plate so the cog reads as a settings control at 32px.
+    draw_settings_cog(out, w, h, cx, cy, s * 0.40, ink);
+}
+
+/// Six-tooth settings cog: round body, square teeth, round hole.
+/// Oriented-box teeth stay readable at toolbar size (unlike a soft polar blob).
+fn draw_settings_cog(out: &mut [u8], w: u32, h: u32, cx: f32, cy: f32, radius: f32, ink: [u8; 4]) {
+    let ring_outer = radius * 0.70;
+    let hole = radius * 0.30;
+    let tooth_out = radius * 0.92;
+    let tooth_half_w = radius * 0.19;
+    let tooth_overlap = radius * 0.12;
+    let aa = 0.55_f32;
+
+    let r_max = radius + aa + 1.0;
+    let min_x = (cx - r_max).floor().max(0.0) as i32;
+    let min_y = (cy - r_max).floor().max(0.0) as i32;
+    let max_x = (cx + r_max).ceil().min(w as f32) as i32;
+    let max_y = (cy + r_max).ceil().min(h as f32) as i32;
+
+    for py in min_y..max_y {
+        for px in min_x..max_x {
+            let dx = px as f32 + 0.5 - cx;
+            let dy = py as f32 + 0.5 - cy;
+            let d = (dx * dx + dy * dy).sqrt();
+            let mut sd_teeth = f32::MAX;
+            for i in 0..6 {
+                // One tooth at 12 o'clock, then every 60°.
+                let a = -std::f32::consts::FRAC_PI_2 + i as f32 * (std::f32::consts::PI / 3.0);
+                let (sa, ca) = (a.sin(), a.cos());
+                let lx = dx * ca + dy * sa;
+                let ly = -dx * sa + dy * ca;
+                let mid = (ring_outer + tooth_out) * 0.5;
+                let hx = (tooth_out - ring_outer) * 0.5 + tooth_overlap;
+                sd_teeth = sd_teeth.min(sd_box(lx - mid, ly, hx, tooth_half_w));
+            }
+            let sd_body = d - ring_outer;
+            let sd_outer = sd_body.min(sd_teeth);
+            let sd = sd_outer.max(hole - d);
+            let cov = (aa - sd).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            let mut col = ink;
+            col[3] = ((ink[3] as f32) * cov) as u8;
+            if col[3] > 0 {
+                put(out, w, px, py, col);
+            }
+        }
     }
-    blit_text_centered(
-        out,
-        w,
-        h,
-        label,
-        x,
-        y,
-        bw,
-        bh,
-        dpi.px(13.5),
-        with_alpha(text, reveal),
-        dpi,
-    );
+}
+
+fn sd_box(px: f32, py: f32, hx: f32, hy: f32) -> f32 {
+    let dx = px.abs() - hx;
+    let dy = py.abs() - hy;
+    let ax = dx.max(0.0);
+    let ay = dy.max(0.0);
+    (ax * ax + ay * ay).sqrt() + dx.min(0.0).max(dy.min(0.0))
 }
 
 fn draw_list_row(
@@ -945,7 +968,8 @@ fn draw_empty_state(
 fn content_x_from(layout: &RadialLayout) -> f32 {
     layout
         .items
-        .first()
+        .iter()
+        .find(|i| matches!(i.entry, MenuEntry::AddShortcut | MenuEntry::Shortcut { .. }))
         .map(|i| i.x)
         .unwrap_or(layout.card_x + 16.0)
 }
@@ -953,7 +977,8 @@ fn content_x_from(layout: &RadialLayout) -> f32 {
 fn content_w_from(layout: &RadialLayout) -> f32 {
     layout
         .items
-        .first()
+        .iter()
+        .find(|i| matches!(i.entry, MenuEntry::AddShortcut | MenuEntry::Shortcut { .. }))
         .map(|i| i.w)
         .unwrap_or((layout.card_w - 32.0).max(80.0))
 }
@@ -2088,5 +2113,65 @@ fn blit_icon_tile(
             }
             put(out, w, ox + x, oy + y, c);
         }
+    }
+}
+
+#[cfg(test)]
+mod gear_preview {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    #[ignore]
+    fn dump_settings_gear() {
+        let dpr = 2.0;
+        let logical = crate::ui::radial_menu::GEAR_SIZE;
+        let size = (logical * dpr).round() as u32;
+        let pad = 16u32;
+        let w = size * 3 + pad * 4;
+        let h = size + pad * 2;
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // Cream / white / dark plates so the cog silhouette is checkable.
+        let plates = [
+            ([0xFF, 0xFB, 0xFA, 0xFF], pad),
+            ([0xFF, 0xFF, 0xFF, 0xFF], pad * 2 + size),
+            ([0x2A, 0x22, 0x1C, 0xFF], pad * 3 + size * 2),
+        ];
+        for (bg, x0) in plates {
+            fill_rrect_aa(
+                &mut rgba,
+                w,
+                h,
+                x0 as f32,
+                pad as f32,
+                (x0 + size) as f32,
+                (pad + size) as f32,
+                8.0,
+                bg,
+            );
+            draw_gear_btn(
+                &mut rgba,
+                w,
+                h,
+                Dpi::new(dpr),
+                x0 as f32,
+                pad as f32,
+                size as f32,
+                size as f32,
+                0.0,
+                0.0,
+                1.0,
+            );
+        }
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/_settings_gear.png");
+        image::save_buffer(
+            &path,
+            &rgba,
+            w,
+            h,
+            image::ColorType::Rgba8,
+        )
+        .expect("write gear preview");
+        assert!(path.is_file());
     }
 }

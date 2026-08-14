@@ -474,11 +474,6 @@ impl App {
                         // Pet and card share the early crossfade window, so removing
                         // the launcher layer never snaps a half-visible pet away.
                         fade_rgba_alpha(&mut pet_rgba, 1.0 - ease_in_cubic(menu_t));
-                        let paused = self
-                            .scheduler
-                            .as_ref()
-                            .map(|s| s.is_paused())
-                            .unwrap_or(false);
                         let mut l = layout.clone();
                         // Start from the launcher's current open state and crossfade
                         // the card away during the early handoff window.
@@ -488,7 +483,6 @@ impl App {
                             clip.frame_width,
                             clip.frame_height,
                             &l,
-                            paused,
                             dpr,
                             MenuChromeState {
                                 hover: None,
@@ -546,14 +540,8 @@ impl App {
         if self.menu_ui_active && pet.is_menu_open() {
             let clip = pet.active_clip();
             let pet_rgba = pet.display_rgba();
-            let paused = self
-                .scheduler
-                .as_ref()
-                .map(|s| s.is_paused())
-                .unwrap_or(false);
             let entries = build_entries(
                 self.shortcuts.list_enabled_sorted().as_slice(),
-                paused,
                 |s| menu_icons.get(&s.id).cloned().flatten(),
             );
             let total = count_shortcuts(&entries);
@@ -607,7 +595,6 @@ impl App {
                 clip.frame_width,
                 clip.frame_height,
                 &layout,
-                paused,
                 dpr,
                 chrome,
             );
@@ -1067,14 +1054,8 @@ impl App {
             physical_to_logical(place.card_local.height, dpr),
         );
 
-        let paused = self
-            .scheduler
-            .as_ref()
-            .map(|s| s.is_paused())
-            .unwrap_or(false);
         let entries = build_entries(
             self.shortcuts.list_enabled_sorted().as_slice(),
-            paused,
             |s| self.shortcut_icon(s),
         );
         self.menu_list_scroll = 0;
@@ -1501,17 +1482,6 @@ impl App {
                     Some(a) => self.begin_settings_from_launcher(a, None, now),
                     None => self.enter_settings_ui(),
                 }
-            }
-            MenuEntry::PauseReminder => {
-                if let Some(s) = self.scheduler.as_mut() {
-                    let paused = s.toggle_paused(now);
-                    self.config.reminder.paused = paused;
-                    if let Some(saver) = self.saver.as_mut() {
-                        saver.mark_dirty();
-                    }
-                    info!(paused, "menu: reminder pause toggled");
-                }
-                self.texture_dirty = true;
             }
             MenuEntry::Shortcut { id, valid, name, .. } => {
                 if !valid {

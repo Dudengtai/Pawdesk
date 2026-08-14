@@ -21,7 +21,7 @@ pub const CARD_LOGICAL_W: u32 = 360;
 pub const CARD_LOGICAL_H: u32 = 360;
 
 /// Rows visible in the dock list without scrolling.
-pub const LIST_VISIBLE_ROWS: usize = 4;
+pub const LIST_VISIBLE_ROWS: usize = 5;
 /// Soft safety cap only (not a product UX limit). Scroll covers the rest.
 pub const MAX_SHORTCUTS: usize = 128;
 /// @deprecated name — kept as alias for call sites / docs.
@@ -35,9 +35,8 @@ pub const TITLE_BAND: f32 = 56.0;
 pub const CARD_MARGIN: f32 = 12.0;
 pub const PRIMARY_H: f32 = 40.0;
 pub const PRIMARY_GAP: f32 = 8.0;
-pub const CHIP_H: f32 = 32.0;
-pub const CHIP_GAP: f32 = 8.0;
-pub const CHIP_AFTER: f32 = 10.0;
+/// Settings gear in the title band (logical px).
+pub const GEAR_SIZE: f32 = 32.0;
 pub const ROW_H: f32 = 42.0;
 pub const ROW_GAP: f32 = 4.0;
 /// Space under list for “滚轮查看更多” hint.
@@ -47,7 +46,6 @@ pub const SCROLL_HINT_H: f32 = 16.0;
 pub enum MenuEntry {
     Manage,
     AddShortcut,
-    PauseReminder,
     Shortcut {
         id: Uuid,
         name: String,
@@ -134,15 +132,9 @@ pub fn clamp_list_scroll(scroll: usize, total: usize) -> usize {
 
 pub fn build_entries(
     shortcuts: &[ShortcutItem],
-    reminder_paused: bool,
     mut icon_of: impl FnMut(&ShortcutItem) -> Option<Arc<IconRgba>>,
 ) -> Vec<MenuEntry> {
-    let mut entries = vec![
-        MenuEntry::AddShortcut,
-        MenuEntry::Manage,
-        MenuEntry::PauseReminder,
-    ];
-    let _ = reminder_paused;
+    let mut entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
     for s in shortcuts
         .iter()
         .filter(|s| s.enabled)
@@ -306,18 +298,11 @@ fn layout_items_in_card(
         y += PRIMARY_H + PRIMARY_GAP;
     }
 
-    let secondary: Vec<&MenuEntry> = entries
-        .iter()
-        .filter(|e| matches!(e, MenuEntry::Manage | MenuEntry::PauseReminder))
-        .collect();
-    if !secondary.is_empty() {
-        let n = secondary.len() as f32;
-        let chip_w = (content_w - CHIP_GAP * (n - 1.0)) / n;
-        for (i, e) in secondary.iter().enumerate() {
-            let x = content_x + i as f32 * (chip_w + CHIP_GAP);
-            items.push(rect_item((*e).clone(), x, y, chip_w, CHIP_H));
-        }
-        y += CHIP_H + CHIP_AFTER;
+    if let Some(e) = entries.iter().find(|e| matches!(e, MenuEntry::Manage)) {
+        let gx = content_x + content_w - GEAR_SIZE;
+        // Sit in the title band, aligned with the two-line header.
+        let gy = card_y + (TITLE_BAND - GEAR_SIZE) * 0.5;
+        items.push(rect_item(e.clone(), gx, gy, GEAR_SIZE, GEAR_SIZE));
     }
 
     let shortcuts: Vec<&MenuEntry> = entries
@@ -404,11 +389,7 @@ mod tests {
     use super::*;
 
     fn chrome_plus_shortcuts(n: usize) -> Vec<MenuEntry> {
-        let mut entries = vec![
-            MenuEntry::AddShortcut,
-            MenuEntry::Manage,
-            MenuEntry::PauseReminder,
-        ];
+        let mut entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
         for i in 0..n {
             entries.push(MenuEntry::Shortcut {
                 id: Uuid::nil(),
@@ -461,6 +442,51 @@ mod tests {
         let lay = layout(&entries, ExpandDir::Right, 1.0);
         let item = &lay.items[0];
         assert!(hit_test(&lay, item.cx, item.cy).is_some());
+    }
+
+    #[test]
+    fn gear_sits_in_title_band_not_over_add() {
+        let entries = chrome_plus_shortcuts(1);
+        let lay = layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 80.0, 128.0, 128.0),
+            (
+                150.0,
+                10.0,
+                CARD_LOGICAL_W as f32,
+                CARD_LOGICAL_H as f32,
+            ),
+            ExpandDir::Right,
+            1.0,
+        );
+        let gear = lay
+            .items
+            .iter()
+            .find(|it| matches!(it.entry, MenuEntry::Manage))
+            .expect("settings gear");
+        let add = lay
+            .items
+            .iter()
+            .find(|it| matches!(it.entry, MenuEntry::AddShortcut))
+            .expect("add button");
+        assert!((gear.w - GEAR_SIZE).abs() < 0.1);
+        assert!(gear.y >= lay.card_y);
+        assert!(gear.y + gear.h <= lay.card_y + TITLE_BAND + 0.5);
+        assert!(gear.x + gear.w <= lay.card_x + lay.card_w + 0.5);
+        assert!(
+            gear.y + gear.h <= add.y + 0.5,
+            "gear must stay in the title band above 添加应用"
+        );
+        assert!(
+            (add.x - lay.card_x).abs() < 24.0,
+            "add/title column stays on the left of the card"
+        );
+        assert!(
+            gear.x > add.x + add.w * 0.5,
+            "gear stays on the right, away from title"
+        );
     }
 
     #[test]
@@ -584,7 +610,7 @@ mod tests {
         for i in 0..10 {
             items.push(ShortcutItem::new(format!("A{i}"), std::path::PathBuf::from("x"), i as u32));
         }
-        let e = build_entries(&items, false, |_| None);
+        let e = build_entries(&items, |_| None);
         assert_eq!(count_shortcuts(&e), 10);
     }
 }
