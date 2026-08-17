@@ -28,9 +28,8 @@ use crate::render::easing::ease_in_out_cubic;
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
     compose_menu_pet_only, compose_settings_card, compose_settings_frame, hit_settings,
-    hit_settings_card, menu_visual_fade, menu_visual_scale, present_menu_cached,
-    settings_card_metrics, settings_card_visible_rows, MenuChromeState, SettingsHit, SAY_FAIL,
-    SETTINGS_H, SETTINGS_W,
+    hit_settings_card, menu_visual_fade, menu_visual_scale, present_menu_cached, MenuChromeState,
+    MenuDragChrome, SettingsHit, SAY_EATEN, SAY_FAIL, SETTINGS_H, SETTINGS_W,
 };
 use crate::render::sample_rgba_bilinear;
 use crate::render::reminder_ui::{
@@ -48,11 +47,15 @@ use crate::ui::launcher_place::{
     logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
     DEFAULT_GAP, DEFAULT_MARGIN,
 };
+use crate::ui::list_drag::{
+    bowl_rect, edge_scroll_delta, insert_index_from_y, pointer_dist, reorder_ids, should_start_drag,
+    ListDrag, SLOP_PX,
+};
 use crate::ui::pet_window::DragState;
 use crate::ui::radial_menu::{
     self, build_entries, clamp_list_scroll, count_shortcuts, hit_center, hit_test_index,
     layout_pinned_scroll, MenuEntry, RadialLayout, CARD_LOGICAL_H, CARD_LOGICAL_W, MENU_WINDOW_H,
-    MENU_WINDOW_W,
+    MENU_WINDOW_W, ROW_GAP, ROW_H,
 };
 use crate::ui::tray::TrayHandle;
 use uuid::Uuid;
@@ -111,7 +114,7 @@ pub struct App {
     menu_outside_guard: Option<platform::OutsideClickGuard>,
     /// Suppress re-opening launcher immediately after close (accidental double-click).
     menu_reopen_after: Option<Instant>,
-    /// Expanded settings list UI.
+    /// Settings overlay (reminder + pet size).
     settings_ui_active: bool,
     /// Last radial layout for hit-testing (menu-local **logical** coords).
     menu_layout: Option<RadialLayout>,
@@ -131,8 +134,12 @@ pub struct App {
     menu_list_scroll: usize,
     /// Rare speech (launch failure). Success closes immediately.
     menu_say: Option<(Instant, &'static str)>,
-    /// Settings list row to emphasize (from invalid launcher item).
-    settings_highlight_row: Option<usize>,
+    /// Long-press reorder / feed-to-delete on the dock list.
+    list_drag: ListDrag,
+    /// Snapshot used to paint the lifted row (name / icon).
+    list_drag_visual: Option<MenuDragChrome>,
+    /// Throttle auto-scroll while dragging near the list edge.
+    list_drag_edge_at: Option<Instant>,
     /// Settings grows from the launcher's Manage button instead of snapping center.
     settings_transition: Option<SettingsTransition>,
     /// Overlay window top-left (physical) for atomic layered present during settings transition.
@@ -141,8 +148,6 @@ pub struct App {
     settings_embed: bool,
     /// Card-sized settings snapshot for the slide.
     settings_card_cache: Option<(u32, u32, Vec<u8>)>,
-    /// First visible row in the embedded settings list.
-    settings_list_scroll: usize,
     /// Expanded comic-bubble window while `idle_yawn` plays.
     yawn_ui_active: bool,
     yawn_place: Option<YawnPlacement>,
@@ -157,10 +162,12 @@ pub struct App {
     event_proxy: Option<EventLoopProxy<UserEvent>>,
     /// True while native file dialog is open on a worker thread.
     file_picker_busy: bool,
+    /// If set, the next file pick repairs this shortcut instead of adding one.
+    file_picker_repair: Option<Uuid>,
 }
 
 impl App {
-    pub fn new(assets_dir: PathBuf, config: AppConfig, saver: DebouncedSaver) -> Self {
+    pub fn new(assets_dir: PathBuf, mut config: AppConfig, mut saver: DebouncedSaver) -> Self {
         let (_bg_tx, bg_rx) = std::sync::mpsc::channel();
         drop(_bg_tx);
         let now = Instant::now();
@@ -172,7 +179,12 @@ impl App {
             now,
         );
         scheduler.apply_startup_catchup(config.reminder.last_completed_at.as_deref(), now);
+        let had_disabled = config.shortcuts.iter().any(|s| !s.enabled);
         let shortcuts = ShortcutRepository::from_items(config.shortcuts.clone());
+        if had_disabled {
+            config.shortcuts = shortcuts.list_sorted();
+            saver.mark_dirty();
+        }
         let reminder_card = load_reminder_card(
             &assets_dir.join("ui/reminder_card.png"),
             REMINDER_WINDOW_W,
@@ -226,12 +238,13 @@ impl App {
             menu_card_cache: None,
             menu_list_scroll: 0,
             menu_say: None,
-            settings_highlight_row: None,
+            list_drag: ListDrag::Idle,
+            list_drag_visual: None,
+            list_drag_edge_at: None,
             settings_transition: None,
             settings_present_pos: None,
             settings_embed: false,
             settings_card_cache: None,
-            settings_list_scroll: 0,
             yawn_ui_active: false,
             yawn_place: None,
             yawn_present_pos: None,
@@ -241,6 +254,7 @@ impl App {
             _bg_rx: Some(bg_rx),
             event_proxy: None,
             file_picker_busy: false,
+            file_picker_repair: None,
         }
     }
 
@@ -455,15 +469,6 @@ impl App {
         }
 
         if self.settings_ui_active {
-            let rows: Vec<(String, bool, bool)> = self
-                .shortcuts
-                .list_sorted()
-                .into_iter()
-                .map(|s| {
-                    let valid = s.is_path_valid();
-                    (s.name, s.enabled, valid)
-                })
-                .collect();
             let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
             let reminder = (
                 self.config.reminder.enabled,
@@ -471,11 +476,9 @@ impl App {
                 self.config.reminder.paused,
             );
             let (sw, sh, settings_rgba) = compose_settings_frame(
-                &rows,
                 reminder,
                 self.config.pet.scale,
                 dpr,
-                self.settings_highlight_row,
             );
             self.sprite_logical = (SETTINGS_W, SETTINGS_H);
             self.hit_rgba = settings_rgba;
@@ -489,7 +492,7 @@ impl App {
             let clip = pet.active_clip();
             let pet_rgba = pet.display_rgba();
             let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
-            if pet.is_menu_animating() {
+            if pet.is_menu_animating() && !self.list_drag.is_dragging() {
                 if let (Some(layout), Some((cw, ch, card))) =
                     (self.menu_layout.as_ref(), self.menu_card_cache.as_ref())
                 {
@@ -591,6 +594,7 @@ impl App {
                 closing: pet.menu_closing,
                 say: self.menu_say.map(|(_, s)| s),
                 reduced_motion: !platform::client_area_animation_enabled(),
+                drag: self.list_drag_visual.clone(),
             };
             let (w, h, composed) = compose_menu_frame(
                 &pet_rgba,
@@ -1084,6 +1088,9 @@ impl App {
         self.menu_press = None;
         self.menu_hover_t = 0.0;
         self.menu_press_t = 0.0;
+        self.list_drag = ListDrag::Idle;
+        self.list_drag_visual = None;
+        self.list_drag_edge_at = None;
         // Atomic layered present target (physical). Avoids empty frames during resize.
         self.menu_present_pos = Some((place.window.x, place.window.y));
 
@@ -1165,6 +1172,9 @@ impl App {
         self.menu_card_cache = None;
         self.menu_list_scroll = 0;
         self.menu_say = None;
+        self.list_drag = ListDrag::Idle;
+        self.list_drag_visual = None;
+        self.list_drag_edge_at = None;
         self.settings_ui_active = false;
         self.settings_embed = false;
         self.settings_transition = None;
@@ -1181,24 +1191,6 @@ impl App {
             return;
         }
         if self.settings_embed && self.settings_ui_active {
-            let total = self.shortcuts.list_sorted().len();
-            let vis = self
-                .menu_layout
-                .as_ref()
-                .map(|l| {
-                    settings_card_visible_rows(&settings_card_metrics(l.card_w, l.card_h))
-                })
-                .unwrap_or(3);
-            let max = total.saturating_sub(vis);
-            let next = (self.settings_list_scroll as i32 - lines).clamp(0, max as i32) as usize;
-            if next != self.settings_list_scroll {
-                self.settings_list_scroll = next;
-                self.settings_card_cache = None;
-                self.texture_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
             return;
         }
         if !self.menu_ui_active {
@@ -1233,14 +1225,13 @@ impl App {
     }
 
     fn enter_settings_ui(&mut self) {
-        self.enter_settings_ui_highlight(None);
+        self.enter_settings_ui_plain();
     }
 
     /// Settings opened from a launcher button: slide in from the card's right.
     fn begin_settings_from_launcher(
         &mut self,
         _anchor: (i32, i32),
-        highlight_row: Option<usize>,
         now: Instant,
     ) {
         if self.reminder_ui_active || !self.menu_ui_active {
@@ -1253,17 +1244,8 @@ impl App {
             return;
         }
         if self.menu_layout.is_none() {
-            self.enter_settings_ui_highlight(highlight_row);
+            self.enter_settings_ui_plain();
             return;
-        }
-        self.settings_highlight_row = highlight_row;
-        self.settings_list_scroll = 0;
-        if let Some(row) = highlight_row {
-            if let Some(layout) = self.menu_layout.as_ref() {
-                let m = settings_card_metrics(layout.card_w, layout.card_h);
-                let vis = settings_card_visible_rows(&m);
-                self.settings_list_scroll = row.saturating_sub(vis.saturating_sub(1));
-            }
         }
         self.settings_ui_active = true;
         self.settings_embed = true;
@@ -1337,15 +1319,6 @@ impl App {
         let Some(layout) = self.menu_layout.as_ref() else {
             return;
         };
-        let rows: Vec<(String, bool, bool)> = self
-            .shortcuts
-            .list_sorted()
-            .into_iter()
-            .map(|s| {
-                let valid = s.is_path_valid();
-                (s.name, s.enabled, valid)
-            })
-            .collect();
         let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
         let reminder = (
             self.config.reminder.enabled,
@@ -1353,14 +1326,11 @@ impl App {
             self.config.reminder.paused,
         );
         let (sw, sh, buf) = compose_settings_card(
-            &rows,
             reminder,
             self.config.pet.scale,
             dpr,
-            self.settings_highlight_row,
             layout.card_w,
             layout.card_h,
-            self.settings_list_scroll,
         );
         self.settings_card_cache = Some((sw, sh, buf));
     }
@@ -1447,29 +1417,17 @@ impl App {
                 }
             }
         } else {
-            let rows: Vec<(String, bool, bool)> = self
-                .shortcuts
-                .list_sorted()
-                .into_iter()
-                .map(|s| {
-                let valid = s.is_path_valid();
-                (s.name, s.enabled, valid)
-            })
-                .collect();
             let reminder = (
                 self.config.reminder.enabled,
                 self.config.reminder.interval_minutes,
                 self.config.reminder.paused,
             );
             let (sw, sh, set) = compose_settings_card(
-                &rows,
                 reminder,
                 self.config.pet.scale,
                 dpr,
-                self.settings_highlight_row,
                 layout.card_w,
                 layout.card_h,
-                self.settings_list_scroll,
             );
             blit_rgba(&mut out, ww, hh, &set, sw, sh, cx.max(0) as u32, cy.max(0) as u32);
         }
@@ -1481,7 +1439,7 @@ impl App {
     }
 
     /// Settings opened without a launcher anchor (tray): centered, no transition.
-    fn enter_settings_ui_highlight(&mut self, highlight_row: Option<usize>) {
+    fn enter_settings_ui_plain(&mut self) {
         if self.reminder_ui_active {
             return;
         }
@@ -1507,7 +1465,6 @@ impl App {
         } else {
             self.capture_overlay_origin();
         }
-        self.settings_highlight_row = highlight_row;
         self.settings_ui_active = true;
         self.resize_pet_window(SETTINGS_W, SETTINGS_H);
         let center = self.work_area_center_top_left(SETTINGS_W as i32, SETTINGS_H as i32);
@@ -1527,7 +1484,6 @@ impl App {
             return;
         }
         self.settings_ui_active = false;
-        self.settings_highlight_row = None;
         self.settings_transition = None;
         self.settings_present_pos = None;
         self.settings_embed = false;
@@ -1565,8 +1521,6 @@ impl App {
         } else {
             self.settings_ui_active = false;
             self.settings_embed = false;
-            self.settings_highlight_row = None;
-            self.settings_list_scroll = 0;
         }
         let _ = now;
         self.texture_dirty = true;
@@ -1606,11 +1560,262 @@ impl App {
         Some((lx, ly))
     }
 
+    fn begin_list_press(&mut self, idx: usize, lx: f32, ly: f32, now: Instant) {
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let Some(item) = layout.items.get(idx) else {
+            return;
+        };
+        let MenuEntry::Shortcut { id, .. } = item.entry else {
+            self.list_drag = ListDrag::Idle;
+            return;
+        };
+        let Some(from) = self
+            .shortcuts
+            .list_enabled_sorted()
+            .iter()
+            .position(|s| s.id == id)
+        else {
+            return;
+        };
+        self.list_drag = ListDrag::Pressing {
+            id,
+            item_idx: idx,
+            from,
+            origin: (lx, ly),
+            armed: true,
+            t0: now,
+        };
+    }
+
+    fn tick_list_drag_hold(&mut self, now: Instant) {
+        let ListDrag::Pressing {
+            id,
+            item_idx,
+            from,
+            origin,
+            armed,
+            t0,
+        } = self.list_drag.clone()
+        else {
+            return;
+        };
+        let Some((lx, ly)) = self.menu_cursor_logical() else {
+            return;
+        };
+        let dist = pointer_dist(origin, (lx, ly));
+        if dist >= SLOP_PX {
+            if let ListDrag::Pressing { armed, .. } = &mut self.list_drag {
+                *armed = false;
+            }
+            return;
+        }
+        if !armed || !should_start_drag(now.saturating_duration_since(t0), dist) {
+            return;
+        }
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let Some(item) = layout.items.get(item_idx) else {
+            return;
+        };
+        let (name, valid, icon) = match &item.entry {
+            MenuEntry::Shortcut {
+                name,
+                valid,
+                icon,
+                ..
+            } => (name.clone(), *valid, icon.clone()),
+            _ => return,
+        };
+        let total = self.shortcuts.list_enabled_sorted().len();
+        let max_insert = total.saturating_sub(1);
+        let insert_at = insert_index_from_y(
+            ly,
+            layout.list_top,
+            ROW_H + ROW_GAP,
+            layout.list_scroll,
+            max_insert,
+        );
+        let bowl = bowl_rect(
+            layout.pet_x,
+            layout.pet_y,
+            layout.pet_w,
+            layout.pet_h,
+            layout.window_w as f32,
+            layout.window_h as f32,
+        );
+        let over_bowl = crate::ui::list_drag::hit_bowl(lx, ly, bowl);
+        self.list_drag = ListDrag::Dragging {
+            id,
+            from,
+            grab_dx: lx - item.x,
+            grab_dy: ly - item.y,
+            pointer: (lx, ly),
+            insert_at,
+            over_bowl,
+            row_w: item.w,
+            row_h: item.h,
+        };
+        self.list_drag_visual = Some(MenuDragChrome {
+            id,
+            name,
+            valid,
+            icon,
+            pointer_x: lx,
+            pointer_y: ly,
+            grab_dx: lx - item.x,
+            grab_dy: ly - item.y,
+            from,
+            insert_at,
+            over_bowl,
+            row_w: item.w,
+            row_h: item.h,
+        });
+        self.menu_card_cache = None;
+        self.texture_dirty = true;
+    }
+
+    fn tick_list_drag_move(&mut self) {
+        let ListDrag::Dragging {
+            id,
+            from,
+            grab_dx,
+            grab_dy,
+            row_w,
+            row_h,
+            ..
+        } = self.list_drag.clone()
+        else {
+            if let ListDrag::Pressing { origin, .. } = &self.list_drag {
+                if let Some((lx, ly)) = self.menu_cursor_logical() {
+                    if pointer_dist(*origin, (lx, ly)) >= SLOP_PX {
+                        if let ListDrag::Pressing { armed, .. } = &mut self.list_drag {
+                            *armed = false;
+                        }
+                    }
+                }
+            }
+            return;
+        };
+        let Some((lx, ly)) = self.menu_cursor_logical() else {
+            return;
+        };
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let total = self.shortcuts.list_enabled_sorted().len();
+        let max_insert = total.saturating_sub(1);
+        let insert_at = insert_index_from_y(
+            ly,
+            layout.list_top,
+            ROW_H + ROW_GAP,
+            layout.list_scroll,
+            max_insert,
+        );
+        let bowl = bowl_rect(
+            layout.pet_x,
+            layout.pet_y,
+            layout.pet_w,
+            layout.pet_h,
+            layout.window_w as f32,
+            layout.window_h as f32,
+        );
+        let over_bowl = crate::ui::list_drag::hit_bowl(lx, ly, bowl);
+        self.list_drag = ListDrag::Dragging {
+            id,
+            from,
+            grab_dx,
+            grab_dy,
+            pointer: (lx, ly),
+            insert_at,
+            over_bowl,
+            row_w,
+            row_h,
+        };
+        if let Some(v) = self.list_drag_visual.as_mut() {
+            v.pointer_x = lx;
+            v.pointer_y = ly;
+            v.insert_at = insert_at;
+            v.over_bowl = over_bowl;
+        }
+        let now = Instant::now();
+        let delta = edge_scroll_delta(ly, layout.list_top, layout.list_bottom);
+        if delta != 0 {
+            let due = self
+                .list_drag_edge_at
+                .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(180))
+                .unwrap_or(true);
+            if due {
+                self.list_drag_edge_at = Some(now);
+                self.scroll_menu_list(delta);
+            }
+        }
+        self.texture_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn drop_list_drag(&mut self, now: Instant) {
+        let ListDrag::Dragging {
+            id,
+            insert_at,
+            over_bowl,
+            ..
+        } = std::mem::replace(&mut self.list_drag, ListDrag::Idle)
+        else {
+            self.list_drag = ListDrag::Idle;
+            self.list_drag_visual = None;
+            return;
+        };
+        self.list_drag_visual = None;
+        self.list_drag_edge_at = None;
+        if over_bowl {
+            self.shortcuts.remove(id);
+            self.shortcut_icons.clear();
+            self.persist_shortcuts();
+            self.menu_say = Some((now, SAY_EATEN));
+            info!(%id, "shortcut fed to the bowl");
+        } else {
+            let ids: Vec<_> = self
+                .shortcuts
+                .list_enabled_sorted()
+                .iter()
+                .map(|s| s.id)
+                .collect();
+            let next = reorder_ids(&ids, id, insert_at);
+            self.shortcuts.reorder(&next);
+            self.persist_shortcuts();
+        }
+        self.menu_card_cache = None;
+        self.texture_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Commit a row only if the pointer is still on it (tap: down highlight, up commit).
     fn commit_menu_press(&mut self, now: Instant) {
+        if self.list_drag.is_dragging() {
+            self.menu_press = None;
+            self.drop_list_drag(now);
+            return;
+        }
+        let was_armed = match &self.list_drag {
+            ListDrag::Pressing { armed, .. } => *armed,
+            _ => true,
+        };
+        self.list_drag = ListDrag::Idle;
+        self.list_drag_visual = None;
         let Some(idx) = self.menu_press.take() else {
             return;
         };
+        if !was_armed {
+            self.texture_dirty = true;
+            return;
+        }
         let still_on = self
             .menu_cursor_logical()
             .and_then(|(lx, ly)| {
@@ -1637,6 +1842,9 @@ impl App {
 
     fn update_menu_hover(&mut self) {
         if self.settings_transition.is_some() {
+            return;
+        }
+        if self.list_drag.is_dragging() {
             return;
         }
         if !self
@@ -1715,13 +1923,25 @@ impl App {
 
     fn on_file_picked(&mut self, path: Option<PathBuf>) {
         self.file_picker_busy = false;
+        let repair = self.file_picker_repair.take();
         if let Some(path) = path {
-            let order = self.shortcuts.items().len() as u32;
-            self.shortcuts.add(ShortcutItem::from_path(&path, order));
-            self.shortcut_icons.clear();
-            self.persist_shortcuts();
-            self.texture_dirty = true;
-            info!(path = %path.display(), "shortcut added (async picker)");
+            if let Some(id) = repair {
+                if self.shortcuts.retarget(id, &path) {
+                    self.shortcut_icons.clear();
+                    self.persist_shortcuts();
+                    self.menu_card_cache = None;
+                    self.texture_dirty = true;
+                    info!(path = %path.display(), "shortcut retargeted (async picker)");
+                }
+            } else {
+                let order = self.shortcuts.items().len() as u32;
+                self.shortcuts.add(ShortcutItem::from_path(&path, order));
+                self.shortcut_icons.clear();
+                self.persist_shortcuts();
+                self.menu_card_cache = None;
+                self.texture_dirty = true;
+                info!(path = %path.display(), "shortcut added (async picker)");
+            }
         } else {
             info!("file picker cancelled");
         }
@@ -1738,23 +1958,17 @@ impl App {
             MenuEntry::Manage => {
                 let anchor = self.menu_anchor_screen_for(item_idx);
                 match anchor {
-                    Some(a) => self.begin_settings_from_launcher(a, None, now),
+                    Some(a) => self.begin_settings_from_launcher(a, now),
                     None => self.enter_settings_ui(),
                 }
             }
             MenuEntry::Shortcut { id, valid, name, .. }
             | MenuEntry::Recent { id, valid, name, .. } => {
                 if !valid {
-                    warn!(%name, "shortcut path invalid — open manager to fix");
-                    let row = self
-                        .shortcuts
-                        .list_sorted()
-                        .iter()
-                        .position(|s| s.id == id);
-                    let anchor = self.menu_anchor_screen_for(item_idx);
-                    match anchor {
-                        Some(a) => self.begin_settings_from_launcher(a, row, now),
-                        None => self.enter_settings_ui_highlight(row),
+                    warn!(%name, "shortcut path invalid — open picker to repair");
+                    if !self.file_picker_busy {
+                        self.file_picker_repair = Some(id);
+                        self.begin_pick_executable();
                     }
                     return;
                 }
@@ -1783,6 +1997,7 @@ impl App {
 
     fn handle_settings_hit(&mut self, hit: SettingsHit) {
         let now = Instant::now();
+        self.settings_card_cache = None;
         match hit {
             SettingsHit::Close => {
                 self.settings_card_cache = None;
@@ -1837,39 +2052,6 @@ impl App {
             }
             SettingsHit::PetScaleInc => {
                 self.nudge_pet_scale(1);
-            }
-            SettingsHit::Add => {
-                self.begin_pick_executable();
-            }
-            SettingsHit::RowToggle(i) => {
-                if let Some(item) = self.shortcuts.list_sorted().get(i).cloned() {
-                    self.shortcuts.set_enabled(item.id, !item.enabled);
-                    self.shortcut_icons.clear();
-                    self.persist_shortcuts();
-                    self.texture_dirty = true;
-                }
-            }
-            SettingsHit::RowUp(i) => {
-                if let Some(item) = self.shortcuts.list_sorted().get(i).cloned() {
-                    self.shortcuts.move_up(item.id);
-                    self.persist_shortcuts();
-                    self.texture_dirty = true;
-                }
-            }
-            SettingsHit::RowDown(i) => {
-                if let Some(item) = self.shortcuts.list_sorted().get(i).cloned() {
-                    self.shortcuts.move_down(item.id);
-                    self.persist_shortcuts();
-                    self.texture_dirty = true;
-                }
-            }
-            SettingsHit::RowDelete(i) => {
-                if let Some(item) = self.shortcuts.list_sorted().get(i).cloned() {
-                    self.shortcuts.remove(item.id);
-                    self.shortcut_icons.clear();
-                    self.persist_shortcuts();
-                    self.texture_dirty = true;
-                }
             }
         }
     }
@@ -2321,9 +2503,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let now = Instant::now();
                 if self.menu_ui_active {
                     self.update_menu_hover();
+                    self.tick_list_drag_move();
                 }
                 // Threshold drag start.
-                if self.menu_press.is_none() && self.drag.consider_drag_start() {
+                if self.menu_press.is_none() && !self.list_drag.is_active() && self.drag.consider_drag_start() {
                     if let Some(pet) = self.pet.as_mut() {
                         if self.menu_ui_active {
                             pet.close_menu(now);
@@ -2342,7 +2525,6 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_ui_active = false;
                         self.settings_transition = None;
                         self.settings_present_pos = None;
-                        self.settings_highlight_row = None;
                         self.menu_present_pos = None;
                         self.menu_card_cache = None;
                         self.menu_list_scroll = 0;
@@ -2360,7 +2542,6 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_ui_active = false;
                         self.settings_transition = None;
                         self.settings_present_pos = None;
-                        self.settings_highlight_row = None;
                         let s = self.pet_size();
                         self.resize_pet_window(s, s);
                     } else if self.overlay_origin.is_some() && !self.menu_ui_active {
@@ -2392,14 +2573,11 @@ impl ApplicationHandler<UserEvent> for App {
                             if let (Some((lx, ly)), Some(layout)) =
                                 (self.menu_cursor_logical(), self.menu_layout.as_ref())
                             {
-                                let n = self.shortcuts.list_sorted().len();
                                 if let Some(hit) = hit_settings_card(
                                     lx - layout.card_x,
                                     ly - layout.card_y,
                                     layout.card_w,
                                     layout.card_h,
-                                    n,
-                                    self.settings_list_scroll,
                                 ) {
                                     self.handle_settings_hit(hit);
                                     if let Some(w) = &self.window {
@@ -2419,8 +2597,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .unwrap_or((SETTINGS_W as f64, SETTINGS_H as f64));
                             let lx = self.cursor_in_window.x / cw.max(1.0) * SETTINGS_W as f64;
                             let ly = self.cursor_in_window.y / ch.max(1.0) * SETTINGS_H as f64;
-                            let n = self.shortcuts.items().len();
-                            if let Some(hit) = hit_settings(lx as f32, ly as f32, n) {
+                            if let Some(hit) = hit_settings(lx as f32, ly as f32) {
                                 self.handle_settings_hit(hit);
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
@@ -2469,6 +2646,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 if let Some(idx) = hit_test_index(&layout, lx, ly) {
                                     self.menu_press = Some(idx);
                                     self.menu_hover = Some(idx);
+                                    self.begin_list_press(idx, lx, ly, now);
                                     self.texture_dirty = true;
                                     if let Some(w) = &self.window {
                                         w.request_redraw();
@@ -2572,7 +2750,7 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // --- Release: click opens menu or ends drag ---
                 if (button, state) == (WinitMouseButton::Left, ElementState::Released) {
-                    if self.menu_ui_active && self.menu_press.is_some() {
+                    if self.menu_ui_active && (self.menu_press.is_some() || self.list_drag.is_active()) {
                         self.commit_menu_press(now);
                     }
                     let was_dragging = self.drag.dragging;
@@ -2752,6 +2930,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             if self.menu_ui_active {
+                self.tick_list_drag_hold(now);
                 let ht = if self.menu_hover.is_some() { 1.0 } else { 0.0 };
                 let pt = if self.menu_press.is_some() && self.menu_hover == self.menu_press {
                     1.0
@@ -3035,7 +3214,10 @@ impl ApplicationHandler<UserEvent> for App {
         let now = Instant::now();
         // Skip during launcher→settings transition: clicking outside then would
         // abort the in-flight grow animation (was previously ignored).
-        if self.menu_ui_active && self.settings_transition.is_none() {
+        if self.menu_ui_active
+            && self.settings_transition.is_none()
+            && !self.list_drag.is_dragging()
+        {
             let outside_clicked = {
                 let guard = self.menu_outside_guard.as_ref();
                 if let (Some(guard), Some(w)) = (guard, &self.window) {

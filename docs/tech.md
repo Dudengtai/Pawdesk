@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.15**（2026-08-17：启动坞「最近启用」条） |
-| 依据 | `prd.md` v0.7.5 · `design.md` v0.18 |
+| 版本 | **v0.16**（2026-08-17：坞内长按拖动 + 喂猫删除） |
+| 依据 | `prd.md` v0.7.6 · `design.md` v0.19 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -208,7 +208,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 宠物 | 128×`pet.scale` 逻辑（默认 ~77） | 日常；用户可调 |
 | 启动坞 | union(宠, 卡) | `place_launcher` |
 | 提醒 | 固定提醒窗 | 居中 |
-| 设置 | 420×640 逻辑 | 启动坞转场后停靠坞旁；托盘直开居中 |
+| 设置 | 420×320 逻辑 | 启动坞转场后停靠坞旁；托盘直开居中 |
 
 `overlay_origin`：进叠层前宠物 top-left；退出恢复；**禁止**把坞临时坐标写入配置。
 
@@ -256,15 +256,16 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium）；开合不重跑 GDI |
 | 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **视觉** 0..1（ease-out 两端）；开 **180ms** / 关 **140ms** |
 | 视觉曲线 | `menu_visual_scale` 0.95→1 绕宠心；`menu_visual_fade` ×1.22 领先；无 stagger |
-| 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t }`；`app` 每帧 `approach` 插值 |
+| 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t, drag }`；`app` 每帧 `approach` 插值 |
+| 列表拖动 | `ui/list_drag.rs`：400ms 长按 + 8px slop → `Dragging`；插入下标按指针 y；空碗命中删条目 |
 | 肉垫印→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
-| 托盘→设置 | `enter_settings_ui` / `enter_settings_ui_highlight`：居中直开，**无** `settings_transition` |
+| 托盘→设置 | `enter_settings_ui`：居中直开，**无** `settings_transition` |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
 | 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定 / 托盘直开设置） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
 卡片：`CARD_LOGICAL_W/H` ≈ **360×450**；`LIST_VISIBLE_ROWS=5`；「再叼一个」与列表之间固定「最近启用」分区（标题 + 整宽圆角框，框内最多 **6** 个图标；`launch_count` 降序，并列 `last_launched_at_ms` 新的在前；空框仍保留）；列表前有「应用列表」标题与之隔离；右上角肉垫印进设置；**禁止**把产品做成「最多 5 个就装不下」。  
-设置：失效项可 `settings_highlight_row` 高亮列表行；设置面板共用同一 token。
+设置卡只含健康提醒 + 宠物大小；快捷方式增删排序在坞内完成。失效行点开文件框换路径。
 
 ### 5.4 呈现与防闪（重要）
 
@@ -273,7 +274,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
 | 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
-| 设置转场 | 点击肉垫印 / 失效行 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。「完成」反转滑回。托盘设置仍居中 420×640 |
+| 设置转场 | 点击肉垫印 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。「完成」反转滑回。托盘设置仍居中 420×320 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
 | 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
 | 转场命中 | 生长期间 **不**接 settings hit；t=1 后 `finish_settings_transition` 再开 |
@@ -475,3 +476,4 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.13** | **2026-08-14** | 伸懒腰 7 档（转/下蹲/探/半峰/峰）；峰值设定图表情；1024 抠边+去晕+轮廓 despill；design **v0.15** · prd **v0.7.3** |
 | **v0.14** | **2026-08-14** | 提醒进场/回程 `reminder_hop`：攒劲零位移 + ease-in-out 抛物线；`pack_reminder_hop.py`；旅途不再播旧 `reminder_wave`；design **v0.16** · prd **v0.7.4** |
 | **v0.15** | **2026-08-17** | 启动坞「最近启用」：`launch_count` / `last_launched_at_ms` + `rank_frequent` + `MenuEntry::Recent`；卡高 **360×450**；design **v0.18** · prd **v0.7.5** |
+| **v0.16** | **2026-08-17** | 坞内长按拖动：`list_drag` + 空碗删除；设置去掉常用应用（420×320）；失效行文件框修复；design **v0.19** · prd **v0.7.6** |

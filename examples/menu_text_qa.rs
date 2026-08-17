@@ -22,14 +22,13 @@ fn main() {
     let font = font.unwrap();
 
     let labels = [
-        ("快捷启动", 17.0),
-        ("打开常用应用", 12.0),
-        ("添加应用", 15.0),
-        ("管理", 14.0),
-        ("暂停提醒", 14.0),
-        ("轻点关闭", 11.0),
-        ("暂无常用应用", 14.0),
-        ("点上方「添加应用」开始", 12.0),
+        ("给你叼来了", 17.0),
+        ("想开哪个？", 12.0),
+        ("再叼一个", 15.0),
+        ("喂给我删除", 12.0),
+        ("拍拍收起", 11.0),
+        ("还没叼来应用", 14.0),
+        ("点「再叼一个」选 exe / 快捷方式", 12.0),
     ];
 
     // Render each label with NEW layout algorithm
@@ -44,17 +43,17 @@ fn main() {
     for (text, px) in labels {
         let (tw, th, rgba) = rasterize(&font, text, 300, px, [0,0,0,255]);
         // center "添加应用" on blue
-        let (dx, dy) = if text == "添加应用" {
+        let (dx, dy) = if text == "再叼一个" {
             (170 + (280 - tw as i32)/2, 70 + (44 - th as i32)/2 + 1)
-        } else if text == "快捷启动" {
+        } else if text == "给你叼来了" {
             (170, 16)
-        } else if text == "打开常用应用" {
+        } else if text == "想开哪个？" {
             (170, 38)
         } else {
             (20i32, y as i32)
         };
         blit(&mut img, &rgba, tw, th, dx.max(0) as u32, dy.max(0) as u32);
-        if text != "添加应用" && text != "快捷启动" && text != "打开常用应用" {
+        if text != "再叼一个" && text != "给你叼来了" && text != "想开哪个？" {
             y += th + 8;
         }
         println!("{text}: {tw}x{th}");

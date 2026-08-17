@@ -16,7 +16,7 @@ fn main() {
         (r"C:\Windows\Fonts\simkai.ttf", 0),
         (r"C:\Windows\Fonts\msyh.ttc", 3),
     ];
-    let texts = ["快捷启动", "添加应用", "管理", "暂停提醒", "轻点关闭", "暂无常用应用", "打开常用应用"];
+    let texts = ["给你叼来了", "想开哪个？", "再叼一个", "喂给我删除", "拍拍收起", "还没叼来应用", "提醒与外观"];
     std::fs::create_dir_all("target/font_probe").ok();
     for &(path, idx) in candidates {
         if !Path::new(path).exists() {

@@ -12,7 +12,15 @@ pub struct ShortcutRepository {
 
 impl ShortcutRepository {
     pub fn from_items(items: Vec<ShortcutItem>) -> Self {
-        let mut items: Vec<_> = items.into_iter().map(|i| i.sanitize()).collect();
+        let mut items: Vec<_> = items
+            .into_iter()
+            .map(|i| {
+                let mut i = i.sanitize();
+                // Settings no longer exposes enable/disable; hidden items would be stuck.
+                i.enabled = true;
+                i
+            })
+            .collect();
         items.sort_by_key(|i| i.sort_order);
         renumber(&mut items);
         Self { items }
@@ -109,6 +117,18 @@ impl ShortcutRepository {
     /// paths and never-launched items are omitted.
     pub fn list_frequent(&self, limit: usize) -> Vec<ShortcutItem> {
         rank_frequent(self.items.iter(), limit)
+    }
+
+    /// Point an existing entry at a new path (repair). Keeps id / launch stats.
+    pub fn retarget(&mut self, id: Uuid, path: &std::path::Path) -> bool {
+        if let Some(i) = self.items.iter_mut().find(|i| i.id == id) {
+            let next = ShortcutItem::from_path(path, i.sort_order);
+            i.name = next.name;
+            i.target_path = next.target_path;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn reorder(&mut self, ordered_ids: &[Uuid]) {
@@ -216,6 +236,28 @@ mod tests {
         repo.reorder(&[ids[2], ids[0], ids[1]]);
         let names: Vec<_> = repo.list_sorted().iter().map(|i| i.name.clone()).collect();
         assert_eq!(names, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn from_items_reenables_disabled() {
+        let mut a = item("a", 0);
+        a.enabled = false;
+        let repo = ShortcutRepository::from_items(vec![a]);
+        assert!(repo.items()[0].enabled);
+        assert_eq!(repo.list_enabled_sorted().len(), 1);
+    }
+
+    #[test]
+    fn retarget_keeps_id_and_stats() {
+        let mut repo = ShortcutRepository::default();
+        repo.add(existing_item("old", 0));
+        let id = repo.items()[0].id;
+        assert!(repo.record_launch(id));
+        assert!(repo.retarget(id, std::path::Path::new("new.exe")));
+        let a = repo.get(id).unwrap();
+        assert_eq!(a.name, "new");
+        assert_eq!(a.target_path, PathBuf::from("new.exe"));
+        assert_eq!(a.launch_count, 1);
     }
 
     #[test]

@@ -10,7 +10,8 @@ use crate::render::easing::lerp;
 use crate::render::rgba::sample_rgba_bilinear;
 use crate::render::text::{center_in_rect, rasterize_text};
 use crate::shortcut::{scale_icon_rgba, IconRgba, IconShape};
-use crate::ui::radial_menu::{ExpandDir, MenuEntry, RadialLayout, RECENT_ICON};
+use crate::ui::list_drag::bowl_rect;
+use crate::ui::radial_menu::{ExpandDir, MenuEntry, RadialLayout, RECENT_ICON, ROW_GAP, ROW_H};
 
 // ── Palette (playful warm glass · design §2 tokens) ───────────────────────
 /// Cream card, a touch rosier than the old near-white.
@@ -21,7 +22,6 @@ const GROUPED_HOVER: [u8; 4] = [0xFF, 0xD6, 0xE2, 0xB8];
 const GROUPED_PRESS: [u8; 4] = [0xF6, 0xD0, 0xDC, 0xD0];
 const INVALID_BG: [u8; 4] = [0xFF, 0xB0, 0x20, 0x30];
 const INVALID_BG_HOVER: [u8; 4] = [0xFF, 0xB0, 0x20, 0x48];
-const HIGHLIGHT_ROW: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x38];
 const SEPARATOR: [u8; 4] = [0xE2, 0xE0, 0xDE, 0x90];
 const BORDER: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x48];
 const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x80];
@@ -38,6 +38,8 @@ const EMPTY_TITLE: &str = "还没叼来应用";
 const EMPTY_HINT: &str = "点「再叼一个」选 exe / 快捷方式";
 pub const SAY_LAUNCH: &str = "收到，马上打开～";
 pub const SAY_FAIL: &str = "这个应用好像搬家了…";
+pub const SAY_EATEN: &str = "唔，吃掉啦";
+const DELETE_HINT: &str = "喂给我删除";
 /// text.intense
 const LABEL: [u8; 4] = [0x0F, 0x17, 0x2B, 0xFF];
 const SECONDARY: [u8; 4] = [0x47, 0x55, 0x69, 0xC8];
@@ -53,7 +55,6 @@ const FILL_OPAQUE: [u8; 4] = [0xF1, 0xEF, 0xED, 0xE8];
 const FILL_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xF0];
 const SOFT_BORDER: [u8; 4] = [0x1E, 0x1B, 0x2E, 0x14];
 const ORANGE: [u8; 4] = [0xC2, 0x71, 0x0A, 0xFF];
-const RED: [u8; 4] = [0xE1, 0x1D, 0x48, 0xFF];
 const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const ACCENT_PINK: [u8; 4] = [0xFF, 0x9E, 0xC4, 0xFF];
 const SHADOW_A: [u8; 4] = [0x0F, 0x17, 0x2B, 0x0A];
@@ -61,8 +62,26 @@ const SHADOW_B: [u8; 4] = [0x0F, 0x17, 0x2B, 0x12];
 const SHADOW_C: [u8; 4] = [0x0F, 0x17, 0x2B, 0x1C];
 const SHADOW_BTN: [u8; 4] = [0x0F, 0x17, 0x2B, 0x28];
 
+/// Live list-drag overlay (not Copy — holds the row snapshot).
+#[derive(Debug, Clone)]
+pub struct MenuDragChrome {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub valid: bool,
+    pub icon: Option<std::sync::Arc<crate::shortcut::IconRgba>>,
+    pub pointer_x: f32,
+    pub pointer_y: f32,
+    pub grab_dx: f32,
+    pub grab_dy: f32,
+    pub from: usize,
+    pub insert_at: usize,
+    pub over_bowl: bool,
+    pub row_w: f32,
+    pub row_h: f32,
+}
+
 /// Hover / press indices into `layout.items` + animated blends (0..1).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MenuChromeState {
     pub hover: Option<usize>,
     pub press: Option<usize>,
@@ -76,6 +95,8 @@ pub struct MenuChromeState {
     pub say: Option<&'static str>,
     /// Windows client-area animation off → fade only, no scale.
     pub reduced_motion: bool,
+    /// Long-press reorder / feed-to-delete overlay.
+    pub drag: Option<MenuDragChrome>,
 }
 
 /// Popover grow start. Never `0` — nothing appears from nothing.
@@ -157,7 +178,7 @@ pub fn compose_menu_frame(
         &layout_scaled
     };
 
-    paint_menu_card(&mut out, w, h, dpi, layout, chrome, t_fade);
+    paint_menu_card(&mut out, w, h, dpi, layout, &chrome, t_fade);
 
     // Pet always full opacity. Plate / close hint fades with the card so the
     // silhouette does not flash into a glass tray on frame 0.
@@ -178,6 +199,10 @@ pub fn compose_menu_frame(
     if let Some(line) = chrome.say {
         draw_say_bubble(&mut out, w, h, dpi, layout, line, t_fade.max(0.85));
     }
+    // After the pet plate so the hint is never tucked under「拍拍收起」.
+    if let Some(drag) = chrome.drag.as_ref() {
+        draw_delete_bowl(&mut out, w, h, dpi, layout, drag, t_fade.max(0.85));
+    }
 
     (w, h, out)
 }
@@ -192,7 +217,7 @@ pub fn compose_menu_card_layer(
     let w = dpi.su(layout.window_w);
     let h = dpi.su(layout.window_h);
     let mut out = vec![0u8; (w * h * 4) as usize];
-    paint_menu_card(&mut out, w, h, dpi, layout, chrome, 1.0);
+    paint_menu_card(&mut out, w, h, dpi, layout, &chrome, 1.0);
     (w, h, out)
 }
 
@@ -271,7 +296,7 @@ fn paint_menu_card(
     h: u32,
     dpi: Dpi,
     layout: &RadialLayout,
-    chrome: MenuChromeState,
+    chrome: &MenuChromeState,
     t_fade: f32,
 ) {
     let t_shadow = (t_fade * t_fade).clamp(0.0, 1.0);
@@ -461,6 +486,8 @@ fn paint_menu_card(
 
     // Tens/day: items fade with the card. No stagger, no extra y.
     let mut saw_shortcut = false;
+    let mut vis_shortcut = 0usize;
+    let stride = ROW_H + ROW_GAP;
     for (i, item) in layout.items.iter().enumerate() {
         let reveal = t_fade;
         if reveal <= 0.01 {
@@ -544,8 +571,32 @@ fn paint_menu_card(
                     reveal,
                 );
             }
-            MenuEntry::Shortcut { name, valid, icon, .. } => {
+            MenuEntry::Shortcut { name, valid, icon, id } => {
                 saw_shortcut = true;
+                let orig = layout.list_scroll + vis_shortcut;
+                vis_shortcut += 1;
+                if chrome.drag.as_ref().is_some_and(|d| d.id == *id) {
+                    continue;
+                }
+                if let Some(drag) = chrome.drag.as_ref() {
+                    let remaining_index = if orig > drag.from { orig - 1 } else { orig };
+                    let visual_index = if remaining_index >= drag.insert_at {
+                        remaining_index + 1
+                    } else {
+                        remaining_index
+                    };
+                    let logical_y = layout.list_top
+                        + (visual_index as f32 - layout.list_scroll as f32) * stride;
+                    if logical_y + item.h < layout.list_top - 2.0
+                        || logical_y > layout.list_bottom + 2.0
+                    {
+                        continue;
+                    }
+                    x = dpi.s(item.x);
+                    y = dpi.s(logical_y);
+                    bw = dpi.s(item.w);
+                    bh = dpi.s(item.h);
+                }
                 draw_list_row(
                     &mut out,
                     w,
@@ -565,6 +616,11 @@ fn paint_menu_card(
                 );
             }
         }
+    }
+
+    if let Some(drag) = chrome.drag.as_ref() {
+        saw_shortcut = true;
+        draw_drag_ghost(&mut out, w, h, dpi, drag, t_fade);
     }
 
     if !saw_shortcut {
@@ -1334,6 +1390,182 @@ fn draw_list_row(
     );
 }
 
+fn draw_drag_ghost(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    drag: &MenuDragChrome,
+    reveal: f32,
+) {
+    let lift = 1.04;
+    let bw = dpi.s(drag.row_w) * lift;
+    let bh = dpi.s(drag.row_h) * lift;
+    let x = dpi.s(drag.pointer_x - drag.grab_dx) - (bw - dpi.s(drag.row_w)) * 0.5;
+    let y = dpi.s(drag.pointer_y - drag.grab_dy) - (bh - dpi.s(drag.row_h)) * 0.5;
+    fill_rrect_aa(
+        out,
+        w,
+        h,
+        x + dpi.s(3.0),
+        y + dpi.s(5.0),
+        x + bw + dpi.s(3.0),
+        y + bh + dpi.s(5.0),
+        dpi.s(14.0),
+        with_alpha(SHADOW_C, reveal * 0.85),
+    );
+    draw_list_row(
+        out,
+        w,
+        h,
+        dpi,
+        x,
+        y,
+        bw,
+        bh,
+        dpi.s(14.0),
+        &drag.name,
+        drag.valid,
+        drag.icon.as_deref(),
+        1.0,
+        0.0,
+        reveal,
+    );
+}
+
+fn draw_delete_bowl(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    layout: &RadialLayout,
+    drag: &MenuDragChrome,
+    reveal: f32,
+) {
+    let (bx, by, bw, bh) = bowl_rect(
+        layout.pet_x,
+        layout.pet_y,
+        layout.pet_w,
+        layout.pet_h,
+        layout.window_w as f32,
+        layout.window_h as f32,
+    );
+    let scale = if drag.over_bowl { 1.08 } else { 1.0 };
+    let cx = bx + bw * 0.5;
+    let cy = by + bh * 0.5;
+    let dw = bw * scale;
+    let dh = bh * scale;
+    let x = cx - dw * 0.5;
+    let y = cy - dh * 0.5;
+    blit_empty_bowl(
+        out,
+        w,
+        h,
+        dpi.s(x),
+        dpi.s(y),
+        dpi.s(dw),
+        dpi.s(dh),
+        reveal,
+    );
+    // Sit under the bowl — above it collides with the pet plate /「拍拍收起」.
+    let hint_color = with_alpha(if drag.over_bowl { PAW_KICKER } else { PAW_INK }, reveal);
+    if let Some((tw, th, t)) =
+        rasterize_text(DELETE_HINT, dpi.su(140), dpi.px(11.0), hint_color)
+    {
+        let mut tx = dpi.s(cx) - tw as f32 * 0.5;
+        let mut ty = dpi.s(y + dh) + dpi.s(2.0);
+        if ty + th as f32 > h as f32 - 2.0 {
+            // No room below: tuck to the side facing the dock card.
+            let toward_card = if layout.card_x + layout.card_w * 0.5 >= layout.pet_x + layout.pet_w * 0.5
+            {
+                1.0
+            } else {
+                -1.0
+            };
+            tx = if toward_card > 0.0 {
+                dpi.s(x + dw) + dpi.s(4.0)
+            } else {
+                dpi.s(x) - tw as f32 - dpi.s(4.0)
+            };
+            ty = dpi.s(cy) - th as f32 * 0.5;
+        }
+        let tx = tx.round().clamp(2.0, (w as f32 - tw as f32 - 2.0).max(2.0)) as u32;
+        let ty = ty.round().clamp(2.0, (h as f32 - th as f32 - 2.0).max(2.0)) as u32;
+        blit(out, w, h, &t, tw, th, tx, ty);
+    }
+}
+
+fn empty_bowl_asset() -> Option<&'static (u32, u32, Vec<u8>)> {
+    static CELL: OnceLock<Option<(u32, u32, Vec<u8>)>> = OnceLock::new();
+    CELL.get_or_init(load_empty_bowl).as_ref()
+}
+
+fn load_empty_bowl() -> Option<(u32, u32, Vec<u8>)> {
+    for dir in settings_paw_dirs() {
+        let path = dir.join("ui").join("empty_feed_bowl.png");
+        let Ok(img) = image::open(&path) else {
+            continue;
+        };
+        let rgba = img.to_rgba8();
+        let (iw, ih) = rgba.dimensions();
+        if iw == 0 || ih == 0 {
+            continue;
+        }
+        return Some((iw, ih, rgba.into_raw()));
+    }
+    None
+}
+
+fn blit_empty_bowl(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    x: f32,
+    y: f32,
+    dw: f32,
+    dh: f32,
+    reveal: f32,
+) {
+    let dest = dw.min(dh).round().max(24.0) as u32;
+    if let Some((sw, sh, src)) = empty_bowl_asset() {
+        let (ow, oh, mut scaled) = scale_rgba_fit(src, *sw, *sh, dest, dest);
+        let fade = reveal.clamp(0.0, 1.0);
+        if fade < 0.999 {
+            for px in scaled.chunks_exact_mut(4) {
+                px[3] = (px[3] as f32 * fade).round() as u8;
+            }
+        }
+        let dx = (x + (dw - ow as f32) * 0.5).round().max(0.0) as u32;
+        let dy = (y + (dh - oh as f32) * 0.5).round().max(0.0) as u32;
+        blit(out, w, h, &scaled, ow, oh, dx, dy);
+        return;
+    }
+    // Fallback: empty cream dish if the PNG is missing.
+    fill_rrect_aa(
+        out,
+        w,
+        h,
+        x,
+        y,
+        x + dw,
+        y + dh,
+        dw.min(dh) * 0.45,
+        with_alpha([0xF6, 0xEC, 0xD8, 0xFF], reveal),
+    );
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        x + 0.5,
+        y + 0.5,
+        x + dw - 0.5,
+        y + dh - 0.5,
+        dw.min(dh) * 0.45,
+        with_alpha(PAW_INK, reveal * 0.7),
+        1.5,
+    );
+}
+
 fn draw_recent_icon(
     out: &mut [u8],
     w: u32,
@@ -1837,10 +2069,7 @@ fn draw_chevron(out: &mut [u8], w: u32, cx: i32, cy: i32, dpi: Dpi, c: [u8; 4]) 
 // ── Settings / Manager (M5: reminder + shortcuts) ─────────────────────────
 
 pub const SETTINGS_W: u32 = 420;
-pub const SETTINGS_H: u32 = 640;
-pub const ROW_H: f32 = 48.0;
-/// Shortcut list starts below reminder + pet-size cards.
-pub const LIST_TOP: f32 = 300.0;
+pub const SETTINGS_H: u32 = 320;
 const REMINDER_CARD_TOP: f32 = 72.0;
 const REMINDER_CARD_H: f32 = 120.0;
 const PET_CARD_TOP: f32 = 204.0;
@@ -1855,22 +2084,14 @@ pub enum SettingsHit {
     TogglePause,
     PetScaleDec,
     PetScaleInc,
-    Add,
-    RowToggle(usize),
-    RowUp(usize),
-    RowDown(usize),
-    RowDelete(usize),
 }
 
 /// `reminder`: (enabled, interval_minutes, paused)
 /// `pet_scale`: relative size vs 128px baseline (e.g. 0.6)
-/// `highlight_row`: optional list index to emphasize (invalid shortcut from launcher).
 pub fn compose_settings_frame(
-    names: &[(String, bool, bool)],
     reminder: (bool, u32, bool),
     pet_scale: f32,
     dpr: f32,
-    highlight_row: Option<usize>,
 ) -> (u32, u32, Vec<u8>) {
     let (enabled, interval_min, paused) = reminder;
     let dpi = Dpi::new(dpr);
@@ -1931,7 +2152,7 @@ pub fn compose_settings_frame(
         &mut out,
         w,
         h,
-        "提醒与常用应用",
+        "提醒与外观",
         dpi.s(24.0),
         dpi.s(46.0),
         dpi.su(240),
@@ -2237,151 +2458,6 @@ pub fn compose_settings_frame(
         TERTIARY,
     );
 
-    // ── Shortcut list ──
-    blit_text(
-        &mut out,
-        w,
-        h,
-        "常用应用",
-        dpi.s(24.0),
-        dpi.s(LIST_TOP - 22.0),
-        dpi.su(160),
-        dpi.px(13.5),
-        SECONDARY,
-    );
-
-    let list_top = dpi.s(LIST_TOP);
-    let list_bottom = hf - dpi.s(88.0);
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(20.0),
-        list_top,
-        wf - dpi.s(20.0),
-        list_bottom,
-        dpi.s(12.0),
-        GROUPED_BG,
-    );
-    stroke_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(20.0) + 0.5,
-        list_top + 0.5,
-        wf - dpi.s(20.0) - 0.5,
-        list_bottom - 0.5,
-        dpi.s(12.0),
-        SOFT_BORDER,
-        1.0,
-    );
-
-    if names.is_empty() {
-        if let Some((tw, th, t)) = rasterize_text("列表为空", dpi.su(160), dpi.px(15.0), LABEL) {
-            blit(
-                &mut out,
-                w,
-                h,
-                &t,
-                tw,
-                th,
-                (w - tw) / 2,
-                (list_top + list_bottom) as u32 / 2 - 12,
-            );
-        }
-    }
-
-    let row_h = dpi.s(ROW_H);
-    for (i, (name, sc_en, valid)) in names.iter().enumerate() {
-        let y = list_top + i as f32 * row_h;
-        if y + row_h > list_bottom - dpi.s(8.0) {
-            break;
-        }
-        if highlight_row == Some(i) {
-            fill_rrect_aa(
-                &mut out,
-                w,
-                h,
-                dpi.s(24.0),
-                y + dpi.s(2.0),
-                wf - dpi.s(24.0),
-                y + row_h - dpi.s(2.0),
-                dpi.s(10.0),
-                HIGHLIGHT_ROW,
-            );
-        }
-        if i > 0 && highlight_row != Some(i) && highlight_row != Some(i - 1) {
-            fill_rect_f(
-                &mut out,
-                w,
-                h,
-                dpi.s(36.0),
-                y,
-                wf - dpi.s(72.0),
-                1.0,
-                SEPARATOR,
-            );
-        }
-        let mark = if !valid {
-            "!"
-        } else if *sc_en {
-            "●"
-        } else {
-            "○"
-        };
-        let color = if *valid { LABEL } else { ORANGE };
-        let label = if *valid {
-            format!("{mark}  {name}")
-        } else {
-            format!("{mark}  {name} · 无法找到程序")
-        };
-        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(180), dpi.px(14.0), color) {
-            let ty = (y + (row_h - th as f32) * 0.5 + dpi.s(0.5)).round() as u32;
-            blit(&mut out, w, h, &t, tw, th, dpi.s(36.0) as u32, ty);
-        }
-        let mid_y = (y + row_h * 0.5 - dpi.s(6.0)) as u32;
-        trailing_btn(&mut out, w, h, w - dpi.su(184), mid_y, "上移", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(136), mid_y, "下移", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(88), mid_y, "启停", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(48), mid_y, "删除", RED, dpi);
-    }
-
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(24.0),
-        hf - dpi.s(70.0),
-        wf - dpi.s(24.0),
-        hf - dpi.s(22.0),
-        dpi.s(12.0),
-        SHADOW_BTN,
-    );
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(24.0),
-        hf - dpi.s(72.0),
-        wf - dpi.s(24.0),
-        hf - dpi.s(24.0),
-        dpi.s(12.0),
-        PRIMARY,
-    );
-    blit_text_centered(
-        &mut out,
-        w,
-        h,
-        "添加应用",
-        dpi.s(24.0),
-        hf - dpi.s(72.0),
-        wf - dpi.s(48.0),
-        dpi.s(48.0),
-        dpi.px(15.0),
-        WHITE,
-        dpi,
-    );
-
     (w, h, out)
 }
 
@@ -2398,10 +2474,6 @@ pub struct SettingsCardMetrics {
     pub pause: (f32, f32, f32, f32),
     pub pet_dec: (f32, f32, f32, f32),
     pub pet_inc: (f32, f32, f32, f32),
-    pub list_top: f32,
-    pub list_bottom: f32,
-    pub row_h: f32,
-    pub add: (f32, f32, f32, f32),
 }
 
 pub fn settings_card_metrics(card_w: f32, card_h: f32) -> SettingsCardMetrics {
@@ -2410,11 +2482,6 @@ pub fn settings_card_metrics(card_w: f32, card_h: f32) -> SettingsCardMetrics {
     let reminder_y = 46.0;
     let reminder_h = 86.0;
     let pet_y = reminder_y + reminder_h + 6.0;
-    let pet_h = 42.0;
-    let list_top = pet_y + pet_h + 22.0;
-    let add_h = 34.0;
-    let add_y = h - 12.0 - add_h;
-    let list_bottom = (add_y - 8.0).max(list_top + 36.0);
     SettingsCardMetrics {
         w,
         h,
@@ -2426,27 +2493,15 @@ pub fn settings_card_metrics(card_w: f32, card_h: f32) -> SettingsCardMetrics {
         pause: (w - 86.0, reminder_y + 28.0, 70.0, 24.0),
         pet_dec: (16.0, pet_y + 8.0, 36.0, 26.0),
         pet_inc: (120.0, pet_y + 8.0, 36.0, 26.0),
-        list_top,
-        list_bottom,
-        row_h: 34.0,
-        add: (16.0, add_y, w - 32.0, add_h),
     }
 }
 
-pub fn settings_card_visible_rows(m: &SettingsCardMetrics) -> usize {
-    let span = (m.list_bottom - m.list_top).max(0.0);
-    ((span / m.row_h).floor() as usize).max(1)
-}
-
 pub fn compose_settings_card(
-    names: &[(String, bool, bool)],
     reminder: (bool, u32, bool),
     pet_scale: f32,
     dpr: f32,
-    highlight_row: Option<usize>,
     card_w: f32,
     card_h: f32,
-    list_scroll: usize,
 ) -> (u32, u32, Vec<u8>) {
     let (enabled, interval_min, paused) = reminder;
     let m = settings_card_metrics(card_w, card_h);
@@ -2456,9 +2511,7 @@ pub fn compose_settings_card(
     let mut out = vec![0u8; (w * h * 4) as usize];
     let wf = w as f32;
     let hf = h as f32;
-    let visible = settings_card_visible_rows(&m);
-    let max_scroll = names.len().saturating_sub(visible);
-    let scroll = list_scroll.min(max_scroll);
+    let _ = hf;
 
     fill_rrect_aa(
         &mut out,
@@ -2708,86 +2761,6 @@ pub fn compose_settings_card(
         dpi,
     );
 
-    blit_text(
-        &mut out,
-        w,
-        h,
-        "常用应用",
-        dpi.s(16.0),
-        dpi.s(m.list_top - 16.0),
-        dpi.su(140),
-        dpi.px(12.0),
-        SECONDARY,
-    );
-
-    let vis_names: Vec<(usize, &(String, bool, bool))> = names
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(visible)
-        .collect();
-    for (slot, (i, (name, sc_en, valid))) in vis_names.iter().enumerate() {
-        let y = dpi.s(m.list_top + slot as f32 * m.row_h);
-        let bh = dpi.s(m.row_h);
-        if highlight_row == Some(*i) {
-            fill_rrect_aa(
-                &mut out,
-                w,
-                h,
-                dpi.s(12.0),
-                y,
-                wf - dpi.s(12.0),
-                y + bh - dpi.s(2.0),
-                dpi.s(8.0),
-                HIGHLIGHT_ROW,
-            );
-        }
-        let mark = if !*valid {
-            "!"
-        } else if *sc_en {
-            "●"
-        } else {
-            "○"
-        };
-        let color = if *valid { LABEL } else { ORANGE };
-        let label = format!("{mark}  {name}");
-        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(150), dpi.px(12.5), color) {
-            let ty = (y + (bh - th as f32) * 0.5).round() as u32;
-            blit(&mut out, w, h, &t, tw, th, dpi.s(18.0) as u32, ty);
-        }
-        let mid_y = (y + bh * 0.5 - dpi.s(6.0)) as u32;
-        trailing_btn(&mut out, w, h, w - dpi.su(132), mid_y, "上", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(100), mid_y, "下", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(68), mid_y, "开", BLUE, dpi);
-        trailing_btn(&mut out, w, h, w - dpi.su(36), mid_y, "删", RED, dpi);
-    }
-
-    let (ax, ay, aw, ah) = m.add;
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(ax),
-        dpi.s(ay),
-        dpi.s(ax + aw),
-        dpi.s(ay + ah),
-        dpi.s(12.0),
-        PRIMARY,
-    );
-    blit_text_centered(
-        &mut out,
-        w,
-        h,
-        "添加应用",
-        dpi.s(ax),
-        dpi.s(ay),
-        dpi.s(aw),
-        dpi.s(ah),
-        dpi.px(14.0),
-        WHITE,
-        dpi,
-    );
-
     (w, h, out)
 }
 
@@ -2796,8 +2769,6 @@ pub fn hit_settings_card(
     local_y: f32,
     card_w: f32,
     card_h: f32,
-    row_count: usize,
-    list_scroll: usize,
 ) -> Option<SettingsHit> {
     let m = settings_card_metrics(card_w, card_h);
     if local_x >= m.w - 64.0 && local_y <= 42.0 {
@@ -2821,33 +2792,6 @@ pub fn hit_settings_card(
     if in_rect(local_x, local_y, m.pet_inc) {
         return Some(SettingsHit::PetScaleInc);
     }
-    if in_rect(local_x, local_y, m.add) {
-        return Some(SettingsHit::Add);
-    }
-    let visible = settings_card_visible_rows(&m);
-    for slot in 0..visible {
-        let i = list_scroll + slot;
-        if i >= row_count {
-            break;
-        }
-        let y0 = m.list_top + slot as f32 * m.row_h;
-        let y1 = y0 + m.row_h - 2.0;
-        if local_y < y0 || local_y > y1 {
-            continue;
-        }
-        if local_x >= m.w - 48.0 {
-            return Some(SettingsHit::RowDelete(i));
-        }
-        if local_x >= m.w - 80.0 {
-            return Some(SettingsHit::RowToggle(i));
-        }
-        if local_x >= m.w - 112.0 {
-            return Some(SettingsHit::RowDown(i));
-        }
-        if local_x >= m.w - 144.0 {
-            return Some(SettingsHit::RowUp(i));
-        }
-    }
     None
 }
 
@@ -2862,32 +2806,21 @@ mod settings_card {
     #[test]
     fn compact_card_fits_launcher() {
         let m = settings_card_metrics(360.0, 360.0);
-        assert!(m.list_bottom > m.list_top);
-        assert!(m.add.1 + m.add.3 <= 360.0);
-        assert!(settings_card_visible_rows(&m) >= 2);
-        let (w, h, out) = compose_settings_card(
-            &[("Chrome".into(), true, true)],
-            (true, 45, false),
-            1.0,
-            1.0,
-            None,
-            360.0,
-            360.0,
-            0,
-        );
+        assert!(m.pet_inc.1 + m.pet_inc.3 < 360.0);
+        let (w, h, out) = compose_settings_card((true, 45, false), 1.0, 1.0, 360.0, 360.0);
         assert_eq!(out.len(), (w * h * 4) as usize);
         assert!(w > 200 && h > 200);
         assert!(matches!(
-            hit_settings_card(330.0, 20.0, 360.0, 360.0, 1, 0),
+            hit_settings_card(330.0, 20.0, 360.0, 360.0),
             Some(SettingsHit::Close)
         ));
+        assert!(hit_settings_card(180.0, 300.0, 360.0, 360.0).is_none());
     }
 }
 
-pub fn hit_settings(local_x: f32, local_y: f32, row_count: usize) -> Option<SettingsHit> {
+pub fn hit_settings(local_x: f32, local_y: f32) -> Option<SettingsHit> {
     // local coords are logical (caller maps physical → logical)
     let w = SETTINGS_W as f32;
-    let h = SETTINGS_H as f32;
     if local_x >= w - 72.0 && local_y <= 52.0 {
         return Some(SettingsHit::Close);
     }
@@ -2927,43 +2860,7 @@ pub fn hit_settings(local_x: f32, local_y: f32, row_count: usize) -> Option<Sett
     {
         return Some(SettingsHit::PetScaleInc);
     }
-    if (24.0..=w - 24.0).contains(&local_x) && (h - 72.0..=h - 24.0).contains(&local_y) {
-        return Some(SettingsHit::Add);
-    }
-    for i in 0..row_count {
-        let y = LIST_TOP + i as f32 * ROW_H;
-        if local_y < y || local_y > y + ROW_H - 4.0 {
-            continue;
-        }
-        if local_x >= w - 48.0 - 20.0 {
-            return Some(SettingsHit::RowDelete(i));
-        }
-        if local_x >= w - 88.0 - 16.0 {
-            return Some(SettingsHit::RowToggle(i));
-        }
-        if local_x >= w - 136.0 - 16.0 {
-            return Some(SettingsHit::RowDown(i));
-        }
-        if local_x >= w - 184.0 - 16.0 {
-            return Some(SettingsHit::RowUp(i));
-        }
-    }
     None
-}
-
-fn trailing_btn(
-    out: &mut [u8],
-    w: u32,
-    h: u32,
-    x: u32,
-    y: u32,
-    label: &str,
-    color: [u8; 4],
-    dpi: Dpi,
-) {
-    if let Some((tw, th, t)) = rasterize_text(label, dpi.su(48), dpi.px(12.5), color) {
-        blit(out, w, h, &t, tw, th, x.saturating_sub(tw / 2), y);
-    }
 }
 
 // ── Drawing primitives (AA SDF) ───────────────────────────────────────────
@@ -3403,6 +3300,58 @@ mod playful_dock {
             px.copy_from_slice(&[0xF4, 0xF0, 0xEC, 0xFF]);
         }
         (w, h, rgba)
+    }
+
+    #[test]
+    fn compose_drag_paints_bowl_and_ghost() {
+        let entries = vec![
+            MenuEntry::AddShortcut,
+            MenuEntry::Manage,
+            MenuEntry::Shortcut {
+                id: Uuid::nil(),
+                name: "Chrome".into(),
+                valid: true,
+                icon: None,
+            },
+        ];
+        let lay = layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 80.0, 128.0, 128.0),
+            (150.0, 20.0, 360.0, 360.0),
+            ExpandDir::Right,
+            1.0,
+        );
+        let (pw, ph, pet) = dummy_pet();
+        let (w, h, out) = compose_menu_frame(
+            &pet,
+            pw,
+            ph,
+            &lay,
+            1.0,
+            MenuChromeState {
+                drag: Some(MenuDragChrome {
+                    id: Uuid::nil(),
+                    name: "Chrome".into(),
+                    valid: true,
+                    icon: None,
+                    pointer_x: 220.0,
+                    pointer_y: 240.0,
+                    grab_dx: 40.0,
+                    grab_dy: 16.0,
+                    from: 0,
+                    insert_at: 0,
+                    over_bowl: true,
+                    row_w: 300.0,
+                    row_h: 42.0,
+                }),
+                ..MenuChromeState::default()
+            },
+        );
+        assert_eq!(out.len(), (w * h * 4) as usize);
+        let opaque = out.chunks_exact(4).filter(|p| p[3] > 8).count();
+        assert!(opaque > 200, "drag overlay should paint, got {opaque}");
     }
 
     #[test]

@@ -211,20 +211,17 @@ fn main() {
         ("bold", "Microsoft YaHei UI", FW_BOLD.0 as i32, "参考上限：雅黑 Bold(700)"),
     ];
 
-    // Settings panel strings at DPR 2.0 (screenshot was 840x1280 = 420x640 @ 2x).
+    // Settings panel strings at DPR 2.0 (420x320 @ 2x after dropping the app list).
     let samples: &[(&str, f32)] = &[
         ("设置", 20.0),
-        ("提醒与常用应用", 13.5),
+        ("提醒与外观", 13.5),
         ("健康提醒", 13.5),
         ("●  启用提醒", 15.0),
         ("15 分钟", 15.0),
         ("宠物大小", 13.5),
         ("70%", 16.0),
-        ("常用应用", 13.5),
-        ("●  Spotify", 14.0),
-        ("●  Docker Desktop", 14.0),
         ("相对默认尺寸 · 托盘也可调", 12.5),
-        ("添加应用", 15.0),
+        ("喂给我删除", 12.0),
         ("运行中", 13.5),
     ];
     const DPR: f32 = 2.0;
