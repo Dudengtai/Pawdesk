@@ -18,7 +18,7 @@ pub const REMINDER_INTERVAL_MAX: u32 = 180;
 
 /// Pet display scale relative to 128px design baseline.
 pub const PET_SCALE_MIN: f32 = 0.5;
-pub const PET_SCALE_MAX: f32 = 1.5;
+pub const PET_SCALE_MAX: f32 = 1.0;
 /// Step used by settings / tray size controls.
 pub const PET_SCALE_STEP: f32 = 0.1;
 
@@ -48,7 +48,8 @@ mod scale_tests {
         assert!((step_pet_scale(0.6, 1) - 0.7).abs() < 0.001);
         assert!((step_pet_scale(0.6, -1) - 0.5).abs() < 0.001);
         assert!((step_pet_scale(0.5, -1) - 0.5).abs() < 0.001);
-        assert!((step_pet_scale(1.5, 1) - 1.5).abs() < 0.001);
+        assert!((step_pet_scale(1.0, 1) - 1.0).abs() < 0.001);
+        assert!((clamp_pet_scale(1.4) - 1.0).abs() < 0.001);
         assert!((clamp_pet_scale(0.63) - 0.6).abs() < 0.001);
     }
 }

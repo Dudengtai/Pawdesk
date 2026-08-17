@@ -27,7 +27,7 @@ use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
 use crate::render::easing::ease_in_out_cubic;
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
-    compose_menu_pet_only, compose_menu_pet_preview, compose_settings_card,
+    compose_menu_pet_only, compose_settings_card,
     compose_settings_frame, draw_say_bubble, hit_settings,
     hit_settings_card, menu_visual_fade, menu_visual_scale, prerender_drag_images,
     prerender_list_rows, present_menu_cached, present_menu_drag, MenuChromeState,
@@ -47,8 +47,8 @@ use crate::shortcut::{
     ShortcutRepository,
 };
 use crate::ui::launcher_place::{
-    logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
-    DEFAULT_GAP, DEFAULT_MARGIN,
+    infer_attach_dir, logical_to_physical, physical_to_logical, physical_to_logical_u32,
+    place_launcher, snap_dpr, DEFAULT_GAP, DEFAULT_MARGIN,
 };
 use crate::ui::list_drag::{
     bowl_rect, edge_scroll_delta, insert_index_from_y, pointer_dist, reorder_ids, should_start_drag,
@@ -68,6 +68,15 @@ pub enum UserEvent {
     App(AppEvent),
     /// Async file-dialog result (never block UI thread with rfd).
     FilePicked(Option<PathBuf>),
+}
+
+/// Dock geometry as it was when settings opened — restored if the user
+/// discards a pet-size preview (Esc) instead of committing with 「完成」.
+#[derive(Debug, Clone)]
+struct SettingsLayoutSnapshot {
+    layout: RadialLayout,
+    present_pos: (i32, i32),
+    logical_size: (u32, u32),
 }
 
 /// In-card launcher ↔ settings slide (physical pixels stay put).
@@ -190,6 +199,8 @@ pub struct App {
     settings_card_cache: Option<(u32, u32, Vec<u8>)>,
     /// Uncommitted pet-size preview while settings is open (None = use config).
     pet_scale_draft: Option<f32>,
+    /// Overlay + pet slot as of settings entry, so Esc can undo a live resize.
+    settings_layout_snapshot: Option<SettingsLayoutSnapshot>,
     /// Expanded comic-bubble window while `idle_yawn` plays.
     yawn_ui_active: bool,
     yawn_place: Option<YawnPlacement>,
@@ -300,6 +311,7 @@ impl App {
             settings_embed: false,
             settings_card_cache: None,
             pet_scale_draft: None,
+            settings_layout_snapshot: None,
             yawn_ui_active: false,
             yawn_place: None,
             yawn_present_pos: None,
@@ -1349,6 +1361,7 @@ impl App {
         self.settings_embed = false;
         self.settings_transition = None;
         self.settings_card_cache = None;
+        self.settings_layout_snapshot = None;
         self.pet_scale_draft = None;
         self.restore_overlay_origin_window();
         // L3-05: ignore click that closed the dock + brief double-tap reopen.
@@ -1439,6 +1452,13 @@ impl App {
             }
         }
         self.ensure_settings_card_cache();
+        if let (Some(lay), Some(pos)) = (self.menu_layout.clone(), self.menu_present_pos) {
+            self.settings_layout_snapshot = Some(SettingsLayoutSnapshot {
+                layout: lay,
+                present_pos: pos,
+                logical_size: self.menu_logical_size,
+            });
+        }
         self.settings_transition = Some(SettingsTransition {
             started: now,
             duration: Duration::from_millis(220),
@@ -1456,9 +1476,14 @@ impl App {
             return;
         }
         // Leaving the settings session ends the preview: on Esc this discards
-        // the draft (pet slides back at the committed size); on 「完成」 the
-        // draft was already committed, so this is a no-op.
+        // the draft and snaps the dock back to the entry snapshot; on 「完成」
+        // the draft was already committed, so the previewed geometry stays.
+        let discarding = self.pet_scale_draft.is_some();
         self.pet_scale_draft = None;
+        if discarding {
+            self.restore_settings_layout_snapshot();
+        }
+        self.settings_layout_snapshot = None;
         if self.settings_transition.is_some() {
             return;
         }
@@ -1524,17 +1549,9 @@ impl App {
         }) else {
             return;
         };
-        // Pet preview: scale the avatar within its fixed layout rect so +/−
-        // resizes the cat next to the card in real time. The layout rect was
-        // sized from the scale in effect when the card opened, so the ratio is
-        // (desired logical size) / (rect size) — after 「完成」 the draft is
-        // gone but the committed config still yields the preview size, so the
-        // pop-back slide never snaps the pet back to the stale open-time size.
-        let preview_k = (pet_logical_size(self.effective_pet_scale()) as f32
-            / layout.pet_w.max(1.0))
-            .clamp(0.001, 4.0);
-        let (ww, hh, mut out) =
-            compose_menu_pet_preview(&pet_rgba, fw, fh, &layout, dpr, preview_k);
+        // Overlay HWND / card stay frozen. The pet slot may hang off the
+        // canvas; draw_avatar clips so the card is never cropped.
+        let (ww, hh, mut out) = compose_menu_pet_only(&pet_rgba, fw, fh, &layout, dpr);
         let d = if (dpr - dpr.round()).abs() < 0.08 {
             dpr.round()
         } else {
@@ -1642,6 +1659,7 @@ impl App {
         self.settings_present_pos = None;
         self.settings_embed = false;
         self.settings_card_cache = None;
+        self.settings_layout_snapshot = None;
         // Close menu into settings without losing origin.
         if self.menu_ui_active {
             if let Some(pet) = self.pet.as_mut() {
@@ -2298,10 +2316,8 @@ impl App {
         self.settings_card_cache = None;
         match hit {
             SettingsHit::Done => {
-                // Commit the pending pet-size preview, then close as before.
-                // Overlay geometry stays locked — the pet is already drawn at
-                // the new size via preview_k, and moving the HWND here is the
-                // jump the user sees on 「完成」.
+                // Commit the pending pet-size preview. The slot already sits
+                // at the previewed gap; pin that desk spot as the new home.
                 if let Some(draft) = self.pet_scale_draft.take() {
                     self.config.pet.scale = draft;
                     if let Some(saver) = self.saver.as_mut() {
@@ -2309,7 +2325,10 @@ impl App {
                     }
                     info!(scale = draft, "settings: pet size committed");
                 }
-                self.sync_menu_pet_slot_to_effective_scale();
+                if self.settings_embed {
+                    self.sync_pet_slot_to_scale(self.config.pet.scale);
+                    self.commit_previewed_pet_origin();
+                }
                 self.exit_settings_ui();
             }
             SettingsHit::ToggleEnabled => {
@@ -2374,6 +2393,9 @@ impl App {
             return;
         }
         self.pet_scale_draft = Some(next);
+        if self.settings_embed && self.menu_layout.is_some() {
+            self.sync_pet_slot_to_scale(next);
+        }
         self.texture_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -2383,6 +2405,134 @@ impl App {
             logical = pet_logical_size(next),
             "pet scale preview changed"
         );
+    }
+
+    fn layout_rect_on_screen(
+        present: (i32, i32),
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        dpr: f64,
+    ) -> platform::Rect {
+        platform::Rect {
+            x: present.0 + (x as f64 * dpr).round() as i32,
+            y: present.1 + (y as f64 * dpr).round() as i32,
+            width: (w as f64 * dpr).round().max(1.0) as i32,
+            height: (h as f64 * dpr).round().max(1.0) as i32,
+        }
+    }
+
+    /// Move only the pet slot. Card local/screen, overlay size and
+    /// `menu_present_pos` stay put — growing the HWND here was cropping the
+    /// settings card to half. The slot may go negative; compose clips it.
+    fn sync_pet_slot_to_scale(&mut self, scale: f32) {
+        let Some(pos) = self.menu_present_pos else {
+            return;
+        };
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let dpr = snap_dpr(self.scale_factor);
+        let card = Self::layout_rect_on_screen(
+            pos,
+            layout.card_x,
+            layout.card_y,
+            layout.card_w,
+            layout.card_h,
+            dpr,
+        );
+        let pet = Self::layout_rect_on_screen(
+            pos,
+            layout.pet_x,
+            layout.pet_y,
+            layout.pet_w,
+            layout.pet_h,
+            dpr,
+        );
+        let dir = if let Some(snap) = self.settings_layout_snapshot.as_ref() {
+            infer_attach_dir(
+                Self::layout_rect_on_screen(
+                    snap.present_pos,
+                    snap.layout.pet_x,
+                    snap.layout.pet_y,
+                    snap.layout.pet_w,
+                    snap.layout.pet_h,
+                    dpr,
+                ),
+                Self::layout_rect_on_screen(
+                    snap.present_pos,
+                    snap.layout.card_x,
+                    snap.layout.card_y,
+                    snap.layout.card_w,
+                    snap.layout.card_h,
+                    dpr,
+                ),
+            )
+        } else {
+            infer_attach_dir(pet, card)
+        };
+        let size = logical_to_physical(pet_logical_size(scale), dpr);
+        let (px, py) = match dir {
+            crate::ui::radial_menu::ExpandDir::Right => (card.x - DEFAULT_GAP - size, pet.y),
+            crate::ui::radial_menu::ExpandDir::Left => (card.x + card.width + DEFAULT_GAP, pet.y),
+            crate::ui::radial_menu::ExpandDir::Down => (pet.x, card.y - DEFAULT_GAP - size),
+            crate::ui::radial_menu::ExpandDir::Up => (pet.x, card.y + card.height + DEFAULT_GAP),
+        };
+        let pet_x = physical_to_logical(px - pos.0, dpr);
+        let pet_y = physical_to_logical(py - pos.1, dpr);
+        let pet_s = physical_to_logical(size, dpr);
+        let Some(layout) = self.menu_layout.as_mut() else {
+            return;
+        };
+        layout.pet_x = pet_x;
+        layout.pet_y = pet_y;
+        layout.pet_w = pet_s;
+        layout.pet_h = pet_s;
+    }
+
+    fn commit_previewed_pet_origin(&mut self) {
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let Some(pos) = self.menu_present_pos else {
+            return;
+        };
+        let dpr = snap_dpr(self.scale_factor);
+        let origin = Self::layout_rect_on_screen(
+            pos,
+            layout.pet_x,
+            layout.pet_y,
+            layout.pet_w,
+            layout.pet_h,
+            dpr,
+        );
+        self.overlay_origin = Some(Point::new(origin.x as f64, origin.y as f64));
+        self.config.window.x = Some(origin.x);
+        self.config.window.y = Some(origin.y);
+        if let Some(saver) = self.saver.as_mut() {
+            saver.mark_dirty();
+        }
+    }
+
+    fn restore_settings_layout_snapshot(&mut self) {
+        let Some(snap) = self.settings_layout_snapshot.clone() else {
+            return;
+        };
+        self.menu_layout = Some(snap.layout);
+        self.menu_present_pos = Some(snap.present_pos);
+        self.menu_logical_size = snap.logical_size;
+        self.menu_card_cache = None;
+        if let Some(g) = &self.menu_outside_guard {
+            let dpr = snap_dpr(self.scale_factor);
+            g.update_rect(platform::Rect {
+                x: snap.present_pos.0,
+                y: snap.present_pos.1,
+                width: logical_to_physical(snap.logical_size.0, dpr),
+                height: logical_to_physical(snap.logical_size.1, dpr),
+            });
+        }
+        self.texture_dirty = true;
     }
 
     fn persist_reminder_config(&mut self) {
@@ -3820,30 +3970,67 @@ mod tests {
         assert_eq!(px[7], 64);
     }
 
+    fn seed_embedded_settings(app: &mut App, scale: f32) {
+        let pet = pet_logical_size(scale) as f32;
+        app.scale_factor = 1.0;
+        app.menu_ui_active = true;
+        app.settings_ui_active = true;
+        app.settings_embed = true;
+        app.menu_logical_size = (400, 400);
+        app.menu_present_pos = Some((40, 50));
+        let layout = layout_pinned_scroll(
+            &[],
+            400,
+            400,
+            (8.0, 80.0, pet, pet),
+            (100.0, 20.0, 360.0, 450.0),
+            crate::ui::radial_menu::ExpandDir::Right,
+            1.0,
+            0,
+        );
+        app.settings_layout_snapshot = Some(SettingsLayoutSnapshot {
+            layout: layout.clone(),
+            present_pos: (40, 50),
+            logical_size: (400, 400),
+        });
+        app.menu_layout = Some(layout);
+    }
+
+    fn card_screen_of(app: &App) -> platform::Rect {
+        let lay = app.menu_layout.as_ref().expect("layout");
+        let pos = app.menu_present_pos.expect("present");
+        App::layout_rect_on_screen(
+            pos,
+            lay.card_x,
+            lay.card_y,
+            lay.card_w,
+            lay.card_h,
+            snap_dpr(app.scale_factor),
+        )
+    }
+
+    fn pet_screen_of(app: &App) -> platform::Rect {
+        let lay = app.menu_layout.as_ref().expect("layout");
+        let pos = app.menu_present_pos.expect("present");
+        App::layout_rect_on_screen(
+            pos,
+            lay.pet_x,
+            lay.pet_y,
+            lay.pet_w,
+            lay.pet_h,
+            snap_dpr(app.scale_factor),
+        )
+    }
+
     #[test]
-    fn done_commits_scale_without_moving_overlay() {
-        // 「完成」 writes the preview into config but must not relayout or
-        // resize the dock window — that jump is the jitter after clicking Done.
+    fn done_pins_pet_to_card_gap_and_keeps_card() {
         let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
         let saver = crate::config::DebouncedSaver::new(repo);
         let config = crate::config::AppConfig::default();
         let mut app = App::new(PathBuf::from("."), config, saver);
         let old_scale = app.config.pet.scale;
-        let old_pet = pet_logical_size(old_scale) as f32;
-        app.menu_ui_active = true;
-        app.settings_ui_active = true;
-        app.settings_embed = true;
-        app.menu_present_pos = Some((40, 50));
-        app.menu_layout = Some(layout_pinned_scroll(
-            &[],
-            400,
-            400,
-            (8.0, 80.0, old_pet, old_pet),
-            (100.0, 20.0, 360.0, 450.0),
-            crate::ui::radial_menu::ExpandDir::Right,
-            1.0,
-            0,
-        ));
+        seed_embedded_settings(&mut app, old_scale);
+        let card_before = card_screen_of(&app);
         app.pet_scale_draft = Some(0.9);
 
         app.handle_settings_hit(SettingsHit::Done);
@@ -3853,25 +4040,96 @@ mod tests {
             "draft must be committed"
         );
         assert!(app.pet_scale_draft.is_none(), "committed draft must be cleared");
+        let card_after = card_screen_of(&app);
+        assert_eq!(card_after, card_before, "card screen rect must stay locked");
+        let pet = pet_screen_of(&app);
+        let new_pet = pet_logical_size(0.9) as i32;
+        assert_eq!(pet.width, new_pet);
+        assert_eq!(pet.height, new_pet);
         assert_eq!(
-            app.menu_present_pos,
-            Some((40, 50)),
-            "overlay present target must stay put"
+            pet.x + pet.width + DEFAULT_GAP,
+            card_after.x,
+            "facing edge must keep DEFAULT_GAP from the card"
         );
-        let lay = app.menu_layout.as_ref().expect("launcher layout stays");
-        assert!(
-            (lay.pet_x - 8.0).abs() < 0.01 && (lay.pet_y - 80.0).abs() < 0.01,
-            "pet slot origin must not move"
+        assert_eq!(
+            app.overlay_origin.map(|p| (p.x as i32, p.y as i32)),
+            Some((pet.x, pet.y)),
+            "home origin must be the previewed pet spot"
         );
-        let new_pet = pet_logical_size(0.9) as f32;
-        assert!(
-            (lay.pet_w - new_pet).abs() < 0.01 && (lay.pet_h - new_pet).abs() < 0.01,
-            "launcher pet slot must keep the committed size, not snap back to {old_pet}"
+        assert_eq!(app.config.window.x, Some(pet.x));
+        assert_eq!(app.config.window.y, Some(pet.y));
+    }
+
+    #[test]
+    fn scale_steps_do_not_move_card_or_present() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let start_scale = app.config.pet.scale;
+        seed_embedded_settings(&mut app, start_scale);
+        let card0 = card_screen_of(&app);
+        let pos0 = app.menu_present_pos;
+        let card_local0 = {
+            let l = app.menu_layout.as_ref().unwrap();
+            (l.card_x, l.card_y, l.card_w, l.card_h)
+        };
+        let win0 = {
+            let l = app.menu_layout.as_ref().unwrap();
+            (l.window_w, l.window_h)
+        };
+
+        app.preview_pet_scale(1);
+        app.preview_pet_scale(1);
+        app.preview_pet_scale(-1);
+
+        assert_eq!(app.menu_present_pos, pos0, "present origin must stay frozen");
+        assert_eq!(card_screen_of(&app), card0, "card screen must stay frozen");
+        let l = app.menu_layout.as_ref().unwrap();
+        assert_eq!(
+            (l.card_x, l.card_y, l.card_w, l.card_h),
+            card_local0,
+            "card local must stay frozen across ±"
         );
-        assert!(
-            (lay.card_x - 100.0).abs() < 0.01 && (lay.card_w - 360.0).abs() < 0.01,
-            "card geometry must stay locked"
+        assert_eq!(
+            (l.window_w, l.window_h),
+            win0,
+            "overlay canvas size must stay frozen (cropped card = window grew)"
         );
+        let pet = pet_screen_of(&app);
+        assert_eq!(
+            pet.x + pet.width + DEFAULT_GAP,
+            card0.x,
+            "facing gap stays DEFAULT_GAP"
+        );
+    }
+
+    #[test]
+    fn esc_discards_preview_and_restores_snapshot() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let old_scale = app.config.pet.scale;
+        seed_embedded_settings(&mut app, old_scale);
+        let card_before = card_screen_of(&app);
+        let pet_before = pet_screen_of(&app);
+        let pos_before = app.menu_present_pos;
+        app.pet_scale_draft = Some(1.2);
+        app.sync_pet_slot_to_scale(1.2);
+        assert_ne!(
+            pet_screen_of(&app).width,
+            pet_before.width,
+            "preview must move the slot"
+        );
+
+        app.begin_settings_pop(Instant::now());
+
+        assert!(app.pet_scale_draft.is_none());
+        assert!((app.config.pet.scale - old_scale).abs() < 0.001);
+        assert_eq!(app.menu_present_pos, pos_before);
+        assert_eq!(pet_screen_of(&app), pet_before);
+        assert_eq!(card_screen_of(&app), card_before);
     }
 
     #[test]

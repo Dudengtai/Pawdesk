@@ -60,8 +60,11 @@ pub const FEED_BOWL_H: f32 = 120.0;
 
 /// Logical pet window edge length from config scale (clamped).
 pub fn pet_logical_size(scale: f32) -> u32 {
-    let s = scale.clamp(0.5, 2.0);
-    ((PET_WINDOW_SIZE as f32) * s).round().clamp(64.0, 256.0) as u32
+    let s = scale.clamp(
+        crate::config::PET_SCALE_MIN,
+        crate::config::PET_SCALE_MAX,
+    );
+    ((PET_WINDOW_SIZE as f32) * s).round() as u32
 }
 
 /// High-level pet controller used by the app loop.

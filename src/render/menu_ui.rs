@@ -2280,10 +2280,12 @@ fn draw_avatar(
     if src_w == 0 || src_h == 0 || pet_rgba.len() < (src_w * src_h * 4) as usize {
         return;
     }
-    let px = dpi.s(pet_x).round() as u32;
-    let py = dpi.s(pet_y).round() as u32;
-    let dw = dpi.s(pet_w).round().max(1.0) as u32;
-    let dh = dpi.s(pet_h).round().max(1.0) as u32;
+    // Signed dest: a settings size preview may sit partly outside the
+    // (frozen) overlay; `put` clips instead of wrapping a negative u32.
+    let px = dpi.s(pet_x).round() as i32;
+    let py = dpi.s(pet_y).round() as i32;
+    let dw = dpi.s(pet_w).round().max(1.0) as i32;
+    let dh = dpi.s(pet_h).round().max(1.0) as i32;
     // Exact replica of the idle present (app::scale_rgba_centered, scale 1):
     // same aspect fit, same safety margins, bottom-aligned. Opening the
     // launcher must never move or resize the cat, so this keeps the pet
@@ -2296,8 +2298,8 @@ fn draw_avatar(
     let margin_bot = 4u32.min(fh / 12).max(3);
     fw = fw.saturating_sub(margin_x * 2).max(1);
     fh = fh.saturating_sub(margin_top + margin_bot).max(1);
-    let ox = px + (dw.saturating_sub(fw)) / 2;
-    let oy = py + dh.saturating_sub(fh + margin_bot);
+    let ox = px + (dw - fw as i32) / 2;
+    let oy = py + dh - fh as i32 - margin_bot as i32;
     let scale_x = src_w as f64 / fw as f64;
     let scale_y = src_h as f64 / fh as f64;
     for dy in 0..fh {
@@ -2305,7 +2307,7 @@ fn draw_avatar(
             let sx = (dx as f64 + 0.5) * scale_x - 0.5;
             let sy = (dy as f64 + 0.5) * scale_y - 0.5;
             let col = sample_rgba_bilinear(pet_rgba, src_w, src_h, sx, sy);
-            put(out, w, (ox + dx) as i32, (oy + dy) as i32, col);
+            put(out, w, ox + dx as i32, oy + dy as i32, col);
         }
     }
 }
@@ -2369,17 +2371,6 @@ pub fn compose_settings_frame(
         SHADOW_B,
     );
     fill_rrect_aa(&mut out, w, h, 0.0, 0.0, wf, hf, dpi.s(18.0), CARD);
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(1.5),
-        dpi.s(1.5),
-        wf - dpi.s(1.5),
-        dpi.s(22.0),
-        dpi.s(14.0),
-        INNER_HL,
-    );
     stroke_rrect_aa(
         &mut out,
         w,
@@ -2791,17 +2782,6 @@ pub fn compose_settings_card(
         with_alpha(SHADOW_B, 0.9),
     );
     fill_rrect_aa(&mut out, w, h, 0.0, 0.0, wf, hf, dpi.s(22.0), CARD);
-    fill_rrect_aa(
-        &mut out,
-        w,
-        h,
-        dpi.s(1.5),
-        dpi.s(1.5),
-        wf - dpi.s(1.5),
-        dpi.s(18.0),
-        dpi.s(14.0),
-        INNER_HL,
-    );
     stroke_rrect_aa(
         &mut out,
         w,
@@ -3219,6 +3199,19 @@ mod settings_card {
         // Top-right 「完成」 commits; card-control rows do not.
         assert!(matches!(hit_settings(400.0, 20.0), Some(SettingsHit::Done)));
         assert!(hit_settings(60.0, 60.0).is_none());
+    }
+
+    #[test]
+    fn settings_top_corners_have_no_ghost_contour() {
+        let (w, _h, out) = compose_settings_card((true, 45, false), 1.0, 2.0, 360.0, 360.0);
+        let g = |x: u32, y: u32| out[((y * w + x) * 4 + 1) as usize] as i32;
+        // No highlight/sheen ring in the transparent wedge outside the r=22 arc.
+        assert_eq!(out[3], 0, "pixel (0,0) is outside the rounded card");
+        assert_eq!(g(2, 2), 0, "outside the top-left arc");
+        assert_eq!(g(w - 3, 2), 0, "outside the top-right arc");
+        // Top band is the card fill, not a second inset highlight.
+        let mid = g(w / 2, 16);
+        assert_eq!(mid, CARD[1] as i32, "top band must not carry a sheen ring");
     }
 
     #[test]

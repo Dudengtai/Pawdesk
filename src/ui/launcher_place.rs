@@ -186,6 +186,16 @@ fn finish(
     }
 
     let pet_screen_delta = (pet.x - pet0.x, pet.y - pet0.y);
+    placement_from(pet, card, window, dir, pet_screen_delta)
+}
+
+fn placement_from(
+    pet: Rect,
+    card: Rect,
+    window: Rect,
+    dir: ExpandDir,
+    pet_screen_delta: (i32, i32),
+) -> LauncherPlacement {
     let pet_local = Rect {
         x: pet.x - window.x,
         y: pet.y - window.y,
@@ -198,7 +208,6 @@ fn finish(
         width: card.width,
         height: card.height,
     };
-
     LauncherPlacement {
         window,
         pet_screen: pet,
@@ -207,6 +216,146 @@ fn finish(
         card_local,
         dir,
         pet_screen_delta,
+    }
+}
+
+/// Which side of the pet the card sits on (larger center-to-center axis wins).
+pub fn infer_attach_dir(pet: Rect, card: Rect) -> ExpandDir {
+    let pcx = pet.x + pet.width / 2;
+    let pcy = pet.y + pet.height / 2;
+    let ccx = card.x + card.width / 2;
+    let ccy = card.y + card.height / 2;
+    let dx = ccx - pcx;
+    let dy = ccy - pcy;
+    if dx.abs() >= dy.abs() {
+        if dx >= 0 {
+            ExpandDir::Right
+        } else {
+            ExpandDir::Left
+        }
+    } else if dy >= 0 {
+        ExpandDir::Down
+    } else {
+        ExpandDir::Up
+    }
+}
+
+/// Resize the pet against a locked card: the facing edge stays [`DEFAULT_GAP`]
+/// from the card, the card never moves, the overlay grows toward the pet.
+///
+/// `other_axis` is the pet's unchanged origin on the non-attach axis
+/// (`pet.y` for left/right attach, `pet.x` for up/down).
+/// Near a work-area edge the pet is clamped in; the gap may shrink.
+pub fn place_pet_against_locked_card(
+    card: Rect,
+    pet_size: i32,
+    dir: ExpandDir,
+    other_axis: i32,
+    work: Rect,
+    margin: i32,
+    gap: i32,
+) -> LauncherPlacement {
+    let pet_size = pet_size.max(1);
+    let gap = gap.max(0);
+    let pet0 = match dir {
+        ExpandDir::Right => Rect {
+            x: card.x - gap - pet_size,
+            y: other_axis,
+            width: pet_size,
+            height: pet_size,
+        },
+        ExpandDir::Left => Rect {
+            x: card.x + card.width + gap,
+            y: other_axis,
+            width: pet_size,
+            height: pet_size,
+        },
+        ExpandDir::Down => Rect {
+            x: other_axis,
+            y: card.y - gap - pet_size,
+            width: pet_size,
+            height: pet_size,
+        },
+        ExpandDir::Up => Rect {
+            x: other_axis,
+            y: card.y + card.height + gap,
+            width: pet_size,
+            height: pet_size,
+        },
+    };
+    let mut pet = pet0;
+    // Card stays put — only the pet yields when the work area is tight.
+    shift_rect_into_work(&mut pet, work, margin);
+
+    let content = union_rects(pet, card);
+    let window = inflate_within_work(content, WINDOW_PADDING, work);
+    placement_from(pet, card, window, dir, (pet.x - pet0.x, pet.y - pet0.y))
+}
+
+/// How much to grow an existing overlay so a max-size pet still fits
+/// against a locked card. `origin_dx/dy` shift the window top-left
+/// (negative = grow left/up). Card and current pet **screen** rects stay put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OverlayPad {
+    pub origin_dx: i32,
+    pub origin_dy: i32,
+    pub extra_w: i32,
+    pub extra_h: i32,
+}
+
+impl OverlayPad {
+    pub fn is_zero(self) -> bool {
+        self.origin_dx == 0 && self.origin_dy == 0 && self.extra_w == 0 && self.extra_h == 0
+    }
+}
+
+pub fn overlay_pad_for_max_pet(
+    window: Rect,
+    card: Rect,
+    pet: Rect,
+    dir: ExpandDir,
+    max_pet: i32,
+    gap: i32,
+    pad: i32,
+) -> OverlayPad {
+    let max_pet = max_pet.max(1);
+    let gap = gap.max(0);
+    let pad = pad.max(0);
+    let want = match dir {
+        ExpandDir::Right => Rect {
+            x: card.x - gap - max_pet,
+            y: pet.y,
+            width: max_pet,
+            height: max_pet,
+        },
+        ExpandDir::Left => Rect {
+            x: card.x + card.width + gap,
+            y: pet.y,
+            width: max_pet,
+            height: max_pet,
+        },
+        ExpandDir::Down => Rect {
+            x: pet.x,
+            y: card.y - gap - max_pet,
+            width: max_pet,
+            height: max_pet,
+        },
+        ExpandDir::Up => Rect {
+            x: pet.x,
+            y: card.y + card.height + gap,
+            width: max_pet,
+            height: max_pet,
+        },
+    };
+    let need_left = (window.x + pad - want.x).max(0);
+    let need_top = (window.y + pad - want.y).max(0);
+    let need_right = (want.x + want.width + pad - (window.x + window.width)).max(0);
+    let need_bottom = (want.y + want.height + pad - (window.y + window.height)).max(0);
+    OverlayPad {
+        origin_dx: -need_left,
+        origin_dy: -need_top,
+        extra_w: need_left + need_right,
+        extra_h: need_top + need_bottom,
     }
 }
 
@@ -645,5 +794,180 @@ mod tests {
             height: 100,
         };
         assert!(!fully_inside(&bad, outer, 8));
+    }
+
+    #[test]
+    fn infer_attach_prefers_larger_axis() {
+        let pet = pet_at(100, 200, 80);
+        let right = Rect {
+            x: 196,
+            y: 80,
+            width: 360,
+            height: 450,
+        };
+        assert_eq!(infer_attach_dir(pet, right), ExpandDir::Right);
+        let left = Rect {
+            x: 10,
+            y: 80,
+            width: 80,
+            height: 200,
+        };
+        assert_eq!(
+            infer_attach_dir(pet_at(200, 200, 80), left),
+            ExpandDir::Left
+        );
+    }
+
+    #[test]
+    fn locked_card_grow_right_keeps_gap_and_card() {
+        let card = Rect {
+            x: 200,
+            y: 80,
+            width: 360,
+            height: 450,
+        };
+        let work = work_1920();
+        let p = place_pet_against_locked_card(
+            card,
+            180,
+            ExpandDir::Right,
+            200,
+            work,
+            DEFAULT_MARGIN,
+            DEFAULT_GAP,
+        );
+        assert_eq!(p.card_screen, card, "card must not move");
+        assert_eq!(p.pet_screen.y, 200);
+        assert_eq!(p.pet_screen.width, 180);
+        assert_eq!(p.pet_screen.x + p.pet_screen.width + DEFAULT_GAP, card.x);
+        assert!(p.window.x <= p.pet_screen.x);
+        assert!(p.window.x < card.x, "overlay must grow toward the pet");
+        assert_eq!(p.pet_local.x + p.window.x, p.pet_screen.x);
+        assert_eq!(p.card_local.x + p.window.x, card.x);
+    }
+
+    #[test]
+    fn locked_card_shrink_still_keeps_gap() {
+        let card = Rect {
+            x: 200,
+            y: 80,
+            width: 360,
+            height: 450,
+        };
+        let work = work_1920();
+        let p = place_pet_against_locked_card(
+            card,
+            64,
+            ExpandDir::Right,
+            200,
+            work,
+            DEFAULT_MARGIN,
+            DEFAULT_GAP,
+        );
+        assert_eq!(p.card_screen, card);
+        assert_eq!(p.pet_screen.x + p.pet_screen.width + DEFAULT_GAP, card.x);
+        assert_eq!(p.pet_screen.width, 64);
+    }
+
+    #[test]
+    fn locked_card_left_edge_clamps_pet_not_card() {
+        let card = Rect {
+            x: 100,
+            y: 80,
+            width: 360,
+            height: 450,
+        };
+        let work = work_1920();
+        // Ideal pet.x = 100 - 8 - 90 = 2, but work margin pins it at 8.
+        let p = place_pet_against_locked_card(
+            card,
+            90,
+            ExpandDir::Right,
+            200,
+            work,
+            DEFAULT_MARGIN,
+            DEFAULT_GAP,
+        );
+        assert_eq!(p.card_screen, card);
+        assert_eq!(p.pet_screen.x, work.x + DEFAULT_MARGIN);
+        assert!(
+            p.pet_screen.x + p.pet_screen.width <= card.x,
+            "pet still sits left of the locked card"
+        );
+        assert!(
+            card.x - (p.pet_screen.x + p.pet_screen.width) < DEFAULT_GAP,
+            "gap is allowed to shrink at the work edge"
+        );
+    }
+
+    #[test]
+    fn overlay_pad_grows_left_for_right_attach() {
+        let window = Rect {
+            x: 40,
+            y: 50,
+            width: 400,
+            height: 400,
+        };
+        let card = Rect {
+            x: 140,
+            y: 70,
+            width: 360,
+            height: 450,
+        };
+        let pet = Rect {
+            x: 48,
+            y: 130,
+            width: 77,
+            height: 77,
+        };
+        let pad = overlay_pad_for_max_pet(
+            window,
+            card,
+            pet,
+            ExpandDir::Right,
+            192,
+            DEFAULT_GAP,
+            WINDOW_PADDING,
+        );
+        assert!(pad.origin_dx < 0, "window origin moves left");
+        assert_eq!(pad.extra_w, -pad.origin_dx, "width grows by the left pad");
+        // Card screen after applying pad: (window.x + dx) + (card.x - window.x - dx) = card.x
+        let new_wx = window.x + pad.origin_dx;
+        let new_card_local_x = card.x - new_wx;
+        assert_eq!(new_wx + new_card_local_x, card.x);
+        let want_left = card.x - DEFAULT_GAP - 192;
+        assert!(new_wx + WINDOW_PADDING <= want_left);
+    }
+
+    #[test]
+    fn overlay_pad_noop_when_already_fits() {
+        let window = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 800,
+        };
+        let card = Rect {
+            x: 300,
+            y: 100,
+            width: 360,
+            height: 450,
+        };
+        let pet = Rect {
+            x: 200,
+            y: 200,
+            width: 80,
+            height: 80,
+        };
+        let pad = overlay_pad_for_max_pet(
+            window,
+            card,
+            pet,
+            ExpandDir::Right,
+            192,
+            DEFAULT_GAP,
+            WINDOW_PADDING,
+        );
+        assert!(pad.is_zero());
     }
 }

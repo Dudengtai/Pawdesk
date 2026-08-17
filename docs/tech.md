@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.18**（2026-08-17：取消托盘暂停/打开设置；改大小预览） |
-| 依据 | `prd.md` v0.7.8 · `design.md` v0.21 |
+| 版本 | **v0.19**（2026-08-18：改大小 50%–100%；设置卡钉死） |
+| 依据 | `prd.md` v0.7.9 · `design.md` v0.22 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -165,11 +165,11 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | --- | --- |
 | 配置 | `config.pet.scale`（`AppConfig` / `%APPDATA%/PawDesk/config.json`） |
 | 基准 | `PET_WINDOW_SIZE = 128` 逻辑 px |
-| 实际边长 | `pet_logical_size(scale)` = round(128 × scale)，钳位约 64–256 |
+| 实际边长 | `pet_logical_size(scale)` = round(128 × scale)，钳在 `PET_SCALE_MIN/MAX`（约 64–128） |
 | 默认 | **0.6**（schema v3 迁移会把旧 `1.0` 拉到默认） |
-| 范围 / 步进 | **0.5–1.5** / **0.1**（`clamp_pet_scale` / `step_pet_scale`） |
+| 范围 / 步进 | **0.5–1.0** / **0.1**（`clamp_pet_scale` / `step_pet_scale`；设置与托盘共用） |
 | 入口 | 设置页 `−`/`+`（`pet_scale_draft` 预览，「完成」写入）；托盘 `PetScaleUp` / `PetScaleDown` |
-| 生效 | 待机即时改窗 + `idle_present_pos` 原子 ULW；设置内只改绘制比例，不重排叠层窗；「完成」后 `sync_menu_pet_slot_to_effective_scale` 保持新尺寸回待机 |
+| 生效 | 待机即时改窗 + `idle_present_pos` 原子 ULW。设置内 **不改** 叠层 HWND / `menu_present_pos` / 卡片几何（扩窗会裁掉半张设置卡并抖）；`sync_pet_slot_to_scale` 只动宠槽，朝卡边钉 `DEFAULT_GAP`，槽可出画布由 `draw_avatar` 裁。旧配置 `>1.0` 启动时钳回 1.0。「完成」写 scale + `overlay_origin`（预览桌面点）；Esc 回 `settings_layout_snapshot` |
 | 建窗 | `create_window` 用 `pet_size()`，并强制物理 resize（防 DPI 忽略 LogicalSize） |
 
 ---
@@ -275,7 +275,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
 | 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
-| 设置转场 | 点击肉垫印 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。「完成」反转滑回，宠保持提交后的尺寸 |
+| 设置转场 | 点击肉垫印 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。设置卡无顶高光（避免圆角双线）。「完成」反转滑回，宠停在提交后的槽位 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
 | 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
 | 转场命中 | 生长期间 **不**接 settings hit；t=1 后 `finish_settings_transition` 再开 |
@@ -286,9 +286,10 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 1. 整缓冲全局 alpha 含宠 → 宠先消失。现仅卡/控件 per-layer alpha。  
 2. 先 resize 再延迟 paint → 空帧。现原子 present + 立即 redraw。  
 3. 30fps + `ease_out_back` → 顿 + 弹。现 60fps + out_quint/out_cubic。  
-4. Primary 顶 `INNER_HL` + 底阴影 → 「两道影 / 白条」。现 **flat solid** + 细描边。  
+4. Primary 顶 `INNER_HL` + 底阴影 → 「两道影 / 白条」。现 **flat solid** + 细描边。设置卡同样去掉顶高光 / 内缩圆角高光，否则左上/右上重影。  
 5. fontdue 拉丁无 hinting → 波浪字。现 **GDI**（精致字体后期再优化）。  
-6. 卡高不够 / `break` 裁行 + `take(5)` → 只显示 2 个。现视口 4 行 + **滚轮** + 软上限 128。
+6. 卡高不够 / `break` 裁行 + `take(5)` → 只显示 2 个。现视口 4 行 + **滚轮** + 软上限 128。  
+7. 设置内为宠预留最大体型而改 `card_x` / 叠层尺寸、却不跟 HWND → 设置卡只显示一半。现窗与卡钉死，只动宠槽。
 
 ### 5.5 不做
 
@@ -480,3 +481,4 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.16** | **2026-08-17** | 坞内长按拖动：`list_drag` + 空碗删除；设置去掉常用应用（420×320）；失效行文件框修复；design **v0.19** · prd **v0.7.6** |
 | **v0.17** | **2026-08-17** | 坞卡去掉外投影；宠自由剪影且不随卡 scale；拖动分层：长按预热 `ghost/bowl/hint` + 空白卡 + 行位图，插缝只 blit；design **v0.20** · prd **v0.7.7** |
 | **v0.18** | **2026-08-17** | 取消托盘暂停/打开设置；设置暂停 `SAY_NO_PAUSE` + `sly_pause`；`pet_scale_draft` 预览 + `idle_present_pos`；拎起行无投影；design **v0.21** · prd **v0.7.8** |
+| **v0.19** | **2026-08-18** | `PET_SCALE_MAX=1.0`（设置/托盘同一 `step_pet_scale`）；设置改大小不扩叠层（`sync_pet_slot_to_scale` + 裁剪出界宠）；完成钉 `overlay_origin`；设置卡去顶高光；design **v0.22** · prd **v0.7.9** |
