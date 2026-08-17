@@ -10,7 +10,7 @@ use crate::render::easing::lerp;
 use crate::render::rgba::sample_rgba_bilinear;
 use crate::render::text::{center_in_rect, rasterize_text};
 use crate::shortcut::{scale_icon_rgba, IconRgba, IconShape};
-use crate::ui::radial_menu::{ExpandDir, MenuEntry, RadialLayout};
+use crate::ui::radial_menu::{ExpandDir, MenuEntry, RadialLayout, RECENT_ICON};
 
 // ── Palette (playful warm glass · design §2 tokens) ───────────────────────
 /// Cream card, a touch rosier than the old near-white.
@@ -30,6 +30,8 @@ const PAW_INK: [u8; 4] = [0x9A, 0x40, 0x68, 0xFF];
 const PAW_KICKER: [u8; 4] = [0xFF, 0x7A, 0xAF, 0xFF];
 const TITLE: &str = "给你叼来了";
 const SUBTITLE: &str = "想开哪个？";
+const RECENT_CAPTION: &str = "最近启用";
+const LIST_CAPTION: &str = "应用列表";
 const ADD_LABEL: &str = "再叼一个";
 const CLOSE_HINT: &str = "拍拍收起";
 const EMPTY_TITLE: &str = "还没叼来应用";
@@ -404,6 +406,59 @@ fn paint_menu_card(
         );
     }
 
+    if title_a > 0.02 && layout.recent_box_w > 1.0 {
+        blit_text(
+            &mut out,
+            w,
+            h,
+            RECENT_CAPTION,
+            dpi.s(layout.recent_box_x),
+            dpi.s(layout.recent_label_y),
+            dpi.s(layout.recent_box_w).max(dpi.s(80.0)) as u32,
+            dpi.px(11.5),
+            with_alpha(SECONDARY, title_a),
+        );
+        let bx0 = dpi.s(layout.recent_box_x);
+        let by0 = dpi.s(layout.recent_box_y);
+        let bx1 = bx0 + dpi.s(layout.recent_box_w);
+        let by1 = by0 + dpi.s(layout.recent_box_h);
+        let br = dpi.s(14.0);
+        fill_rrect_aa(
+            &mut out,
+            w,
+            h,
+            bx0,
+            by0,
+            bx1,
+            by1,
+            br,
+            with_alpha(GROUPED_BG, title_a),
+        );
+        stroke_rrect_aa(
+            &mut out,
+            w,
+            h,
+            bx0 + 0.5,
+            by0 + 0.5,
+            bx1 - 0.5,
+            by1 - 0.5,
+            br,
+            with_alpha(SOFT_BORDER, title_a * 0.85),
+            1.0,
+        );
+        blit_text(
+            &mut out,
+            w,
+            h,
+            LIST_CAPTION,
+            dpi.s(layout.recent_box_x),
+            dpi.s(layout.list_label_y),
+            dpi.s(layout.recent_box_w).max(dpi.s(80.0)) as u32,
+            dpi.px(11.5),
+            with_alpha(SECONDARY, title_a),
+        );
+    }
+
     // Tens/day: items fade with the card. No stagger, no extra y.
     let mut saw_shortcut = false;
     for (i, item) in layout.items.iter().enumerate() {
@@ -436,6 +491,7 @@ fn paint_menu_card(
         y = cy - bh * 0.5;
         let radius = match &item.entry {
             MenuEntry::Shortcut { .. } => dpi.s(14.0),
+            MenuEntry::Recent { .. } => dpi.s(12.0),
             _ => dpi.s(11.0),
         };
 
@@ -465,6 +521,24 @@ fn paint_menu_card(
                     y,
                     bw,
                     bh,
+                    hover_w,
+                    press_w,
+                    reveal,
+                );
+            }
+            MenuEntry::Recent { name, valid, icon, .. } => {
+                draw_recent_icon(
+                    &mut out,
+                    w,
+                    h,
+                    dpi,
+                    x,
+                    y,
+                    bw,
+                    bh,
+                    name,
+                    *valid,
+                    icon.as_deref(),
                     hover_w,
                     press_w,
                     reveal,
@@ -1208,6 +1282,124 @@ fn draw_list_row(
     // icons stand alone — both end up with the same visual footprint.
     let tile_r = dpi.s(13.0).round() as i32;
     let tile_corner = dpi.s(7.0).round().max(3.0) as i32;
+    draw_app_icon(
+        out,
+        w,
+        h,
+        dpi,
+        icx,
+        icy,
+        tile_r,
+        tile_corner,
+        name,
+        valid,
+        icon,
+        reveal,
+    );
+
+    let max_tw = (bw - dpi.s(88.0)).max(8.0) as u32;
+    // 15pt logical · dual-font + 2× SS (text.rs) for clean Latin names.
+    if valid {
+        if let Some((tw, th, tbuf)) =
+            rasterize_text(name, max_tw, dpi.px(15.0), with_alpha(LABEL, reveal))
+        {
+            let ty = (y + (bh - th as f32) * 0.5).round().max(0.0) as u32;
+            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+        }
+    } else {
+        if let Some((tw, th, tbuf)) =
+            rasterize_text(name, max_tw, dpi.px(14.0), with_alpha(ORANGE, reveal))
+        {
+            let ty = (y + dpi.s(8.0)).round().max(0.0) as u32;
+            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+        }
+        if let Some((tw, th, tbuf)) = rasterize_text(
+            "无法找到程序 · 点此修复",
+            max_tw,
+            dpi.px(11.0),
+            with_alpha(ORANGE, reveal * 0.9),
+        ) {
+            let ty = (y + dpi.s(26.0)).round().max(0.0) as u32;
+            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
+        }
+    }
+
+    draw_chevron(
+        out,
+        w,
+        (x + bw - dpi.s(16.0)) as i32,
+        (y + bh * 0.5) as i32,
+        dpi,
+        with_alpha(if valid { PAW_KICKER } else { TERTIARY }, reveal),
+    );
+}
+
+fn draw_recent_icon(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    x: f32,
+    y: f32,
+    bw: f32,
+    bh: f32,
+    name: &str,
+    valid: bool,
+    icon: Option<&IconRgba>,
+    hover_w: f32,
+    press_w: f32,
+    reveal: f32,
+) {
+    let _ = press_w;
+    let hover_scale = 1.0 + 0.06 * hover_w;
+    if hover_w > 0.02 {
+        fill_rrect_aa(
+            out,
+            w,
+            h,
+            x,
+            y,
+            x + bw,
+            y + bh,
+            dpi.s(12.0),
+            with_alpha(GROUPED_HOVER, reveal * hover_w),
+        );
+    }
+    let cx = (x + bw * 0.5) as i32;
+    let cy = (y + bh * 0.5) as i32;
+    let tile_r = (dpi.s(RECENT_ICON * 0.5) * hover_scale).round().max(8.0) as i32;
+    let tile_corner = dpi.s(8.0).round().max(3.0) as i32;
+    draw_app_icon(
+        out,
+        w,
+        h,
+        dpi,
+        cx,
+        cy,
+        tile_r,
+        tile_corner,
+        name,
+        valid,
+        icon,
+        reveal,
+    );
+}
+
+/// Shared slot for list-row and frequent-strip icons.
+fn draw_app_icon(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    icx: i32,
+    icy: i32,
+    tile_r: i32,
+    tile_corner: i32,
+    name: &str,
+    valid: bool,
+    icon: Option<&IconRgba>,
+    reveal: f32,
+) {
     let (disc, disc_d) = if valid {
         (PRIMARY, PRIMARY_HOVER)
     } else {
@@ -1218,8 +1410,6 @@ fn draw_list_row(
         if let Some(icon) = icon {
             match icon.shape {
                 IconShape::Round => {
-                    // Dark tile container fills the empty corners, then the
-                    // icon at ~80% (Windows-11-style inner inset).
                     fill_soft_tile(
                         out,
                         w,
@@ -1238,7 +1428,6 @@ fn draw_list_row(
                     blit_icon_tile(out, w, &scaled, iw, ih, icx, icy, tile_r, tile_corner);
                 }
                 IconShape::Square => {
-                    // No container — the icon itself fills the slot (~92%).
                     let icon_d = (tile_r as f32 * 2.0 * 0.92).max(8.0) as u32;
                     let (iw, ih, scaled) =
                         scale_icon_rgba(&icon.rgba, icon.w, icon.h, icon_d, icon_d);
@@ -1304,42 +1493,6 @@ fn draw_list_row(
             blit(out, w, h, &tbuf, tw, th, tx, ty);
         }
     }
-
-    let max_tw = (bw - dpi.s(88.0)).max(8.0) as u32;
-    // 15pt logical · dual-font + 2× SS (text.rs) for clean Latin names.
-    if valid {
-        if let Some((tw, th, tbuf)) =
-            rasterize_text(name, max_tw, dpi.px(15.0), with_alpha(LABEL, reveal))
-        {
-            let ty = (y + (bh - th as f32) * 0.5).round().max(0.0) as u32;
-            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
-        }
-    } else {
-        if let Some((tw, th, tbuf)) =
-            rasterize_text(name, max_tw, dpi.px(14.0), with_alpha(ORANGE, reveal))
-        {
-            let ty = (y + dpi.s(8.0)).round().max(0.0) as u32;
-            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
-        }
-        if let Some((tw, th, tbuf)) = rasterize_text(
-            "无法找到程序 · 点此修复",
-            max_tw,
-            dpi.px(11.0),
-            with_alpha(ORANGE, reveal * 0.9),
-        ) {
-            let ty = (y + dpi.s(26.0)).round().max(0.0) as u32;
-            blit(out, w, h, &tbuf, tw, th, (x + dpi.s(42.0)) as u32, ty);
-        }
-    }
-
-    draw_chevron(
-        out,
-        w,
-        (x + bw - dpi.s(16.0)) as i32,
-        (y + bh * 0.5) as i32,
-        dpi,
-        with_alpha(if valid { PAW_KICKER } else { TERTIARY }, reveal),
-    );
 }
 
 /// Scale card + items around pivot; pet rect stays fixed (pin-pet).
@@ -1410,6 +1563,20 @@ fn scale_layout_from_pivot(
         list_can_scroll_down: layout.list_can_scroll_down,
         list_top: list_top_y,
         list_bottom: list_bot_y,
+        recent_label_y: map(layout.recent_box_x, layout.recent_label_y).1,
+        recent_box_x: {
+            let bcx = layout.recent_box_x + layout.recent_box_w * 0.5;
+            let (nx, _) = map(bcx, layout.recent_box_y);
+            nx - layout.recent_box_w * s * 0.5
+        },
+        recent_box_y: {
+            let bcy = layout.recent_box_y + layout.recent_box_h * 0.5;
+            let (_, ny) = map(layout.recent_box_x, bcy);
+            ny - layout.recent_box_h * s * 0.5
+        },
+        recent_box_w: layout.recent_box_w * s,
+        recent_box_h: layout.recent_box_h * s,
+        list_label_y: map(layout.recent_box_x, layout.list_label_y).1,
     }
 }
 
@@ -1560,13 +1727,7 @@ fn content_w_from(layout: &RadialLayout) -> f32 {
 }
 
 fn empty_y(layout: &RadialLayout) -> u32 {
-    let y = layout
-        .items
-        .iter()
-        .map(|i| i.y + i.h)
-        .fold(layout.card_y + 96.0, f32::max)
-        + 20.0;
-    y as u32
+    layout.list_top.round().max(0.0) as u32
 }
 
 fn draw_avatar(

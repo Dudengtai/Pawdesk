@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.14**（2026-08-14：提醒 `reminder_hop` 正面轻跃） |
-| 依据 | `prd.md` v0.7.4 · `design.md` v0.16 |
+| 版本 | **v0.15**（2026-08-17：启动坞「最近启用」条） |
+| 依据 | `prd.md` v0.7.5 · `design.md` v0.18 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -249,8 +249,8 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 步骤 | 位置 |
 | --- | --- |
 | 开坞 | `app::enter_menu_ui`：探头 snap → `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → `menu_present_pos` → resize → **宠物-only 立即 present** → 合成静帧卡层缓存 |
-| 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + **视口内**快捷行；宠在 **pet_local** |
-| 列表数据 | `build_entries`：全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限 |
+| 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + 固定「最近启用」框 +「应用列表」标题 + **视口内**快捷行；宠在 **pet_local** |
+| 列表数据 | `build_entries`：`rank_frequent` 最多 6 个 `Recent` + 全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限；常用条不计入 `list_total` |
 | 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll`（转场中 / 开合动画中禁用） |
 | 绘制 | 开合：`present_menu_cached` 对静帧卡层 scale+fade + 钉宠；落定后 `compose_menu_frame` live（hover/press） |
 | 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium）；开合不重跑 GDI |
@@ -263,7 +263,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定 / 托盘直开设置） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
-卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=5`；右上角肉垫印进设置；**禁止**把产品做成「最多 5 个就装不下」。  
+卡片：`CARD_LOGICAL_W/H` ≈ **360×450**；`LIST_VISIBLE_ROWS=5`；「再叼一个」与列表之间固定「最近启用」分区（标题 + 整宽圆角框，框内最多 **6** 个图标；`launch_count` 降序，并列 `last_launched_at_ms` 新的在前；空框仍保留）；列表前有「应用列表」标题与之隔离；右上角肉垫印进设置；**禁止**把产品做成「最多 5 个就装不下」。  
 设置：失效项可 `settings_highlight_row` 高亮列表行；设置面板共用同一 token。
 
 ### 5.4 呈现与防闪（重要）
@@ -330,11 +330,13 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 
 ### 7.1 ShortcutItem
 
-字段：`id (Uuid)` · `name` · `target_path` · `arguments` · `working_directory` · `icon_path` · `sort_order` · `enabled`。
+字段：`id (Uuid)` · `name` · `target_path` · `arguments` · `working_directory` · `icon_path` · `sort_order` · `enabled` · `launch_count` · `last_launched_at_ms`。
 
 - 启动前校验路径；失效保留 + UI 提示。  
 - 删除只删配置条目。  
-- 启动：安全 API，禁止危险 shell 拼接。
+- 启动：安全 API，禁止危险 shell 拼接。  
+- 坞内启动成功：`record_launch` 累加 `launch_count` 并写 `last_launched_at_ms`（serde default，无需 bump schema）。  
+- 「最近启用」：`rank_frequent`（enabled + count>0 + 路径仍在；次数降序、并列取新）。
 
 ### 7.2 配置
 
@@ -342,7 +344,7 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 
 - `schema_version` 当前 **3** + `migrate_config`。  
   - v2→v3：将 `pet.scale` 置为产品默认 **0.6**（修正历史写死 1.0 过大）。  
-- 主要字段：`pet.scale` / `pet.opacity` / `pet.edge_hide_enabled` · `reminder.*` · `shortcuts[]` · `window.x/y`。  
+- 主要字段：`pet.scale` / `pet.opacity` / `pet.edge_hide_enabled` · `reminder.*` · `shortcuts[]`（含 `launch_count` / `last_launched_at_ms`） · `window.x/y`。  
 - 加载：去 UTF-8 BOM；主配置失败则读 `.bak` 并**回写主文件**；启动 load/migrate 后可立刻 save 固化迁移。  
 - 原子写 + `.bak`。  
 - 防抖：拖动位置、排序、scale 等。
@@ -472,3 +474,4 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.12** | **2026-08-14** | 母版 `idle_stretch`（110f@50，键 hold，不拓窗）进 `IDLE_ACTION_ENABLED` 与哈欠轮播；`pack_idle_stretch.py`；design **v0.14** · prd **v0.7.2** |
 | **v0.13** | **2026-08-14** | 伸懒腰 7 档（转/下蹲/探/半峰/峰）；峰值设定图表情；1024 抠边+去晕+轮廓 despill；design **v0.15** · prd **v0.7.3** |
 | **v0.14** | **2026-08-14** | 提醒进场/回程 `reminder_hop`：攒劲零位移 + ease-in-out 抛物线；`pack_reminder_hop.py`；旅途不再播旧 `reminder_wave`；design **v0.16** · prd **v0.7.4** |
+| **v0.15** | **2026-08-17** | 启动坞「最近启用」：`launch_count` / `last_launched_at_ms` + `rank_frequent` + `MenuEntry::Recent`；卡高 **360×450**；design **v0.18** · prd **v0.7.5** |

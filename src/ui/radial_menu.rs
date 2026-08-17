@@ -17,8 +17,10 @@ pub const MENU_WINDOW: u32 = MENU_WINDOW_W;
 
 /// Glass card content size (logical @ 96 DPI) — pet is outside this rect (pin-pet).
 pub const CARD_LOGICAL_W: u32 = 360;
-/// Height = chrome + viewport for [`LIST_VISIBLE_ROWS`] + scroll-hint strip.
-pub const CARD_LOGICAL_H: u32 = 360;
+/// Height = chrome + frequent-icon strip + viewport for [`LIST_VISIBLE_ROWS`] + hint.
+///
+/// Strip (label + box) + list caption are always reserved so `place_launcher` stays stable.
+pub const CARD_LOGICAL_H: u32 = 450;
 
 /// Rows visible in the dock list without scrolling.
 pub const LIST_VISIBLE_ROWS: usize = 5;
@@ -42,10 +44,28 @@ pub const ROW_GAP: f32 = 4.0;
 /// Space under list for “滚轮查看更多” hint.
 pub const SCROLL_HINT_H: f32 = 16.0;
 
+/// Frequent-launch icon strip (between「再叼一个」and the list).
+pub const RECENT_MAX: usize = 6;
+pub const RECENT_LABEL_H: f32 = 14.0;
+pub const RECENT_LABEL_GAP: f32 = 4.0;
+pub const RECENT_BOX_PAD: f32 = 6.0;
+pub const RECENT_BOX_H: f32 = 48.0;
+pub const RECENT_STRIP_H: f32 = RECENT_LABEL_H + RECENT_LABEL_GAP + RECENT_BOX_H;
+pub const RECENT_ICON: f32 = 30.0;
+pub const RECENT_SLOT: f32 = 36.0;
+pub const RECENT_SLOT_GAP: f32 = 8.0;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuEntry {
     Manage,
     AddShortcut,
+    /// Icon-only frequent-launch slot (does not participate in list scroll).
+    Recent {
+        id: Uuid,
+        name: String,
+        valid: bool,
+        icon: Option<Arc<IconRgba>>,
+    },
     Shortcut {
         id: Uuid,
         name: String,
@@ -92,6 +112,15 @@ pub struct RadialLayout {
     /// List viewport top/bottom in window-local logical coords.
     pub list_top: f32,
     pub list_bottom: f32,
+    /// Caption baseline area for「最近启用」(window-local logical).
+    pub recent_label_y: f32,
+    /// Fixed frequent-icon box (window-local logical).
+    pub recent_box_x: f32,
+    pub recent_box_y: f32,
+    pub recent_box_w: f32,
+    pub recent_box_h: f32,
+    /// Caption baseline area for「应用列表」(window-local logical).
+    pub list_label_y: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +164,14 @@ pub fn build_entries(
     mut icon_of: impl FnMut(&ShortcutItem) -> Option<Arc<IconRgba>>,
 ) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
+    for s in crate::shortcut::rank_frequent(shortcuts.iter(), RECENT_MAX) {
+        entries.push(MenuEntry::Recent {
+            id: s.id,
+            name: s.name.clone(),
+            valid: true,
+            icon: icon_of(&s),
+        });
+    }
     for s in shortcuts
         .iter()
         .filter(|s| s.enabled)
@@ -211,6 +248,12 @@ fn layout_with_scroll(
         list_can_scroll_down: built.list_can_scroll_down,
         list_top: built.list_top,
         list_bottom: built.list_bottom,
+        recent_label_y: built.recent_label_y,
+        recent_box_x: built.recent_box_x,
+        recent_box_y: built.recent_box_y,
+        recent_box_w: built.recent_box_w,
+        recent_box_h: built.recent_box_h,
+        list_label_y: built.list_label_y,
     }
 }
 
@@ -268,6 +311,12 @@ pub fn layout_pinned_scroll(
         list_can_scroll_down: built.list_can_scroll_down,
         list_top: built.list_top,
         list_bottom: built.list_bottom,
+        recent_label_y: built.recent_label_y,
+        recent_box_x: built.recent_box_x,
+        recent_box_y: built.recent_box_y,
+        recent_box_w: built.recent_box_w,
+        recent_box_h: built.recent_box_h,
+        list_label_y: built.list_label_y,
     }
 }
 
@@ -279,6 +328,12 @@ struct BuiltList {
     list_can_scroll_down: bool,
     list_top: f32,
     list_bottom: f32,
+    recent_label_y: f32,
+    recent_box_x: f32,
+    recent_box_y: f32,
+    recent_box_w: f32,
+    recent_box_h: f32,
+    list_label_y: f32,
 }
 
 /// Items in a vertical card stack. Shortcut rows fill a fixed viewport and scroll.
@@ -304,6 +359,31 @@ fn layout_items_in_card(
         let gy = card_y + (TITLE_BAND - GEAR_SIZE) * 0.5;
         items.push(rect_item(e.clone(), gx, gy, GEAR_SIZE, GEAR_SIZE));
     }
+
+    let recent_label_y = y;
+    let recent_box_x = content_x;
+    let recent_box_y = y + RECENT_LABEL_H + RECENT_LABEL_GAP;
+    let recent_box_w = content_w;
+    let recent_box_h = RECENT_BOX_H;
+    let recents: Vec<&MenuEntry> = entries
+        .iter()
+        .filter(|e| matches!(e, MenuEntry::Recent { .. }))
+        .take(RECENT_MAX)
+        .collect();
+    let slot = RECENT_SLOT;
+    let mut rx = recent_box_x + RECENT_BOX_PAD;
+    let ry = recent_box_y + ((recent_box_h - slot) * 0.5).max(0.0);
+    let inner_right = recent_box_x + recent_box_w - RECENT_BOX_PAD;
+    for e in recents {
+        if rx + slot > inner_right + 0.5 {
+            break;
+        }
+        items.push(rect_item(e.clone(), rx, ry, slot, slot));
+        rx += slot + RECENT_SLOT_GAP;
+    }
+    y += RECENT_STRIP_H + PRIMARY_GAP;
+    let list_label_y = y;
+    y += RECENT_LABEL_H + RECENT_LABEL_GAP;
 
     let shortcuts: Vec<&MenuEntry> = entries
         .iter()
@@ -343,6 +423,12 @@ fn layout_items_in_card(
         list_can_scroll_down,
         list_top,
         list_bottom: row_y - if shown > 0 { ROW_GAP } else { 0.0 },
+        recent_label_y,
+        recent_box_x,
+        recent_box_y,
+        recent_box_w,
+        recent_box_h,
+        list_label_y,
     }
 }
 
@@ -612,5 +698,131 @@ mod tests {
         }
         let e = build_entries(&items, |_| None);
         assert_eq!(count_shortcuts(&e), 10);
+        assert!(e.iter().all(|e| !matches!(e, MenuEntry::Recent { .. })));
+    }
+
+    fn chrome_plus_recents_and_shortcuts(n_recent: usize, n_list: usize) -> Vec<MenuEntry> {
+        let mut entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
+        for i in 0..n_recent {
+            entries.push(MenuEntry::Recent {
+                id: Uuid::nil(),
+                name: format!("R{i}"),
+                valid: true,
+                icon: None,
+            });
+        }
+        for i in 0..n_list {
+            entries.push(MenuEntry::Shortcut {
+                id: Uuid::nil(),
+                name: format!("App{i}"),
+                valid: true,
+                icon: None,
+            });
+        }
+        entries
+    }
+
+    #[test]
+    fn recents_sit_between_add_and_list() {
+        let entries = chrome_plus_recents_and_shortcuts(3, 2);
+        let lay = layout_pinned(
+            &entries,
+            500,
+            500,
+            (8.0, 40.0, 100.0, 100.0),
+            (120.0, 8.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+            ExpandDir::Right,
+            1.0,
+        );
+        let add = lay
+            .items
+            .iter()
+            .find(|it| matches!(it.entry, MenuEntry::AddShortcut))
+            .unwrap();
+        let recents: Vec<_> = lay
+            .items
+            .iter()
+            .filter(|it| matches!(it.entry, MenuEntry::Recent { .. }))
+            .collect();
+        let list: Vec<_> = lay
+            .items
+            .iter()
+            .filter(|it| matches!(it.entry, MenuEntry::Shortcut { .. }))
+            .collect();
+        assert_eq!(recents.len(), 3);
+        assert_eq!(list.len(), 2);
+        assert_eq!(lay.list_total, 2, "recents must not count toward list scroll");
+        assert!(lay.recent_label_y >= add.y + add.h - 0.5);
+        assert!((lay.recent_box_h - RECENT_BOX_H).abs() < 0.1);
+        assert!((lay.recent_box_w - (CARD_LOGICAL_W as f32 - 32.0)).abs() < 0.5);
+        for r in &recents {
+            assert!(r.y >= lay.recent_box_y - 0.5, "icon inside box");
+            assert!(r.y + r.h <= lay.recent_box_y + lay.recent_box_h + 0.5);
+            assert!(r.x >= lay.recent_box_x - 0.5);
+            assert!(r.x + r.w <= lay.recent_box_x + lay.recent_box_w + 0.5);
+            assert!(r.y + r.h <= list[0].y + 0.5, "recent above first list row");
+            assert!((r.w - RECENT_SLOT).abs() < 0.1);
+            assert!((r.h - RECENT_SLOT).abs() < 0.1);
+        }
+        assert!(recents[1].x > recents[0].x);
+        assert!(recents[2].x > recents[1].x);
+        assert!(lay.list_label_y >= lay.recent_box_y + lay.recent_box_h - 0.5);
+        assert!(list[0].y >= lay.list_label_y + RECENT_LABEL_H - 0.5);
+    }
+
+    #[test]
+    fn empty_recents_still_reserves_labeled_box() {
+        let with = layout_pinned(
+            &chrome_plus_recents_and_shortcuts(0, 1),
+            500,
+            500,
+            (8.0, 40.0, 100.0, 100.0),
+            (120.0, 8.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+            ExpandDir::Right,
+            1.0,
+        );
+        let add = with
+            .items
+            .iter()
+            .find(|it| matches!(it.entry, MenuEntry::AddShortcut))
+            .unwrap();
+        let row = with
+            .items
+            .iter()
+            .find(|it| matches!(it.entry, MenuEntry::Shortcut { .. }))
+            .unwrap();
+        assert!(with.recent_box_w > 40.0);
+        assert!((with.recent_box_h - RECENT_BOX_H).abs() < 0.1);
+        assert!(with.recent_label_y >= add.y + add.h - 0.5);
+        assert!(with.list_label_y >= with.recent_box_y + with.recent_box_h - 0.5);
+        assert!(row.y >= with.list_label_y + RECENT_LABEL_H - 0.5);
+        assert!(with.items.iter().all(|it| !matches!(it.entry, MenuEntry::Recent { .. })));
+    }
+
+    #[test]
+    fn build_entries_ranks_frequent_and_caps() {
+        let mut items = Vec::new();
+        for i in 0..8 {
+            let mut s = ShortcutItem::new(
+                format!("A{i}"),
+                std::path::PathBuf::from("."),
+                i as u32,
+            );
+            s.launch_count = (8 - i) as u32;
+            s.last_launched_at_ms = Some(1000 + i as u64);
+            items.push(s);
+        }
+        let e = build_entries(&items, |_| None);
+        let recents: Vec<_> = e
+            .iter()
+            .filter_map(|en| match en {
+                MenuEntry::Recent { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(recents.len(), RECENT_MAX);
+        assert_eq!(recents[0], "A0");
+        assert_eq!(recents[5], "A5");
+        assert_eq!(count_shortcuts(&e), 8);
     }
 }

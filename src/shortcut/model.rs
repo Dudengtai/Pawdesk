@@ -23,6 +23,12 @@ pub struct ShortcutItem {
     pub sort_order: u32,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Successful launches from the dock (used by the frequent-icon strip).
+    #[serde(default)]
+    pub launch_count: u32,
+    /// UNIX epoch milliseconds of the last successful dock launch.
+    #[serde(default)]
+    pub last_launched_at_ms: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -42,6 +48,8 @@ impl ShortcutItem {
             icon_path: None,
             sort_order,
             enabled: true,
+            launch_count: 0,
+            last_launched_at_ms: None,
         }
     }
 
@@ -105,5 +113,19 @@ mod tests {
         let long = "啊".repeat(100);
         let item = ShortcutItem::new(long, PathBuf::from("a.exe"), 1);
         assert!(item.name.chars().count() <= MAX_NAME_LEN);
+    }
+
+    #[test]
+    fn missing_launch_stats_default_to_zero() {
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "x",
+            "target_path": "x.exe",
+            "sort_order": 0
+        }"#;
+        let item: ShortcutItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.launch_count, 0);
+        assert_eq!(item.last_launched_at_ms, None);
+        assert!(item.enabled);
     }
 }

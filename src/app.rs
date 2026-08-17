@@ -1742,7 +1742,8 @@ impl App {
                     None => self.enter_settings_ui(),
                 }
             }
-            MenuEntry::Shortcut { id, valid, name, .. } => {
+            MenuEntry::Shortcut { id, valid, name, .. }
+            | MenuEntry::Recent { id, valid, name, .. } => {
                 if !valid {
                     warn!(%name, "shortcut path invalid — open manager to fix");
                     let row = self
@@ -1760,6 +1761,9 @@ impl App {
                 if let Some(item) = self.shortcuts.get(id).cloned() {
                     match launch(&item) {
                         Ok(()) => {
+                            if self.shortcuts.record_launch(id) {
+                                self.persist_shortcuts();
+                            }
                             // Tens/day: close now. Don't make the user wait on a line of copy.
                             self.exit_menu_ui(now);
                         }

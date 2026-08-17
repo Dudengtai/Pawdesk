@@ -11,4 +11,4 @@ pub(crate) use icon::scale_icon_rgba;
 pub use launcher::launch;
 pub use model::ShortcutItem;
 pub use picker::{build_pick_context, pick_executable};
-pub use repository::ShortcutRepository;
+pub use repository::{rank_frequent, ShortcutRepository};
