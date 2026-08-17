@@ -10,7 +10,7 @@ use crate::render::easing::lerp;
 use crate::render::rgba::sample_rgba_bilinear;
 use crate::render::text::{center_in_rect, rasterize_text};
 use crate::shortcut::{scale_icon_rgba, IconRgba, IconShape};
-use crate::ui::list_drag::bowl_rect;
+use crate::ui::list_drag::{bowl_rect, BOWL_SIZE};
 use crate::ui::radial_menu::{ExpandDir, MenuEntry, RadialLayout, RECENT_ICON, ROW_GAP, ROW_H};
 
 // ── Palette (playful warm glass · design §2 tokens) ───────────────────────
@@ -22,9 +22,7 @@ const GROUPED_HOVER: [u8; 4] = [0xFF, 0xD6, 0xE2, 0xB8];
 const GROUPED_PRESS: [u8; 4] = [0xF6, 0xD0, 0xDC, 0xD0];
 const INVALID_BG: [u8; 4] = [0xFF, 0xB0, 0x20, 0x30];
 const INVALID_BG_HOVER: [u8; 4] = [0xFF, 0xB0, 0x20, 0x48];
-const SEPARATOR: [u8; 4] = [0xE2, 0xE0, 0xDE, 0x90];
 const BORDER: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x48];
-const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x80];
 const INNER_HL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x55];
 const PAW_INK: [u8; 4] = [0x9A, 0x40, 0x68, 0xFF];
 const PAW_KICKER: [u8; 4] = [0xFF, 0x7A, 0xAF, 0xFF];
@@ -33,7 +31,6 @@ const SUBTITLE: &str = "想开哪个？";
 const RECENT_CAPTION: &str = "最近启用";
 const LIST_CAPTION: &str = "应用列表";
 const ADD_LABEL: &str = "再叼一个";
-const CLOSE_HINT: &str = "拍拍收起";
 const EMPTY_TITLE: &str = "还没叼来应用";
 const EMPTY_HINT: &str = "点「再叼一个」选 exe / 快捷方式";
 pub const SAY_LAUNCH: &str = "收到，马上打开～";
@@ -78,6 +75,16 @@ pub struct MenuDragChrome {
     pub over_bowl: bool,
     pub row_w: f32,
     pub row_h: f32,
+    /// Pre-rendered lifted row (shadow baked in), device px. Built once at drag
+    /// start so per-frame drag composition never re-rasterizes text / icons.
+    pub ghost_img: Option<(u32, u32, Vec<u8>)>,
+    /// Pre-rendered delete bowl at rest size (see [`prerender_drag_images`]).
+    pub bowl_img: Option<(u32, u32, Vec<u8>)>,
+    /// Bowl at 1.08× while the pointer is over it.
+    pub bowl_over_img: Option<(u32, u32, Vec<u8>)>,
+    /// 「喂给我删除」glyphs in both states (ink / kicker).
+    pub hint_ink: Option<(u32, u32, Vec<u8>)>,
+    pub hint_kicker: Option<(u32, u32, Vec<u8>)>,
 }
 
 /// Hover / press indices into `layout.items` + animated blends (0..1).
@@ -97,6 +104,12 @@ pub struct MenuChromeState {
     pub reduced_motion: bool,
     /// Long-press reorder / feed-to-delete overlay.
     pub drag: Option<MenuDragChrome>,
+    /// Draft mode for the cached card layer: shift rows around the dragged one
+    /// but omit the moving ghost (composited per frame by [`present_menu_drag`]).
+    pub drag_draft: bool,
+    /// Blank every shortcut row (static card layer during drag). Rows are
+    /// pre-rendered separately and blitted per frame at shifted positions.
+    pub rows_blank: bool,
 }
 
 /// Popover grow start. Never `0` — nothing appears from nothing.
@@ -145,6 +158,23 @@ impl Dpi {
     }
 }
 
+/// Vertical stride between shortcut row slots.
+pub fn row_stride() -> f32 {
+    ROW_H + ROW_GAP
+}
+
+/// Slot y (window-local logical) for the shortcut row at `orig` during a drag,
+/// after removing the dragged row and inserting it at `insert_at`.
+pub fn drag_slot_y(layout: &RadialLayout, orig: usize, from: usize, insert_at: usize) -> f32 {
+    let remaining_index = if orig > from { orig - 1 } else { orig };
+    let visual_index = if remaining_index >= insert_at {
+        remaining_index + 1
+    } else {
+        remaining_index
+    };
+    layout.list_top + (visual_index as f32 - layout.list_scroll as f32) * row_stride()
+}
+
 // ── Public: launcher ──────────────────────────────────────────────────────
 
 pub fn compose_menu_frame(
@@ -168,6 +198,9 @@ pub fn compose_menu_frame(
     } else {
         menu_visual_scale(t_vis)
     };
+    // The pet rect never participates in the card's grow scale — the cat must
+    // stay exactly where it rests while the card scales around it.
+    let pet_rect = (layout.pet_x, layout.pet_y, layout.pet_w, layout.pet_h);
     let layout_scaled;
     let layout = if (scale - 1.0).abs() < 0.001 {
         layout
@@ -180,28 +213,25 @@ pub fn compose_menu_frame(
 
     paint_menu_card(&mut out, w, h, dpi, layout, &chrome, t_fade);
 
-    // Pet always full opacity. Plate / close hint fades with the card so the
-    // silhouette does not flash into a glass tray on frame 0.
+    // Pet always full opacity, free-standing (no glass tray behind it).
     draw_avatar(
         &mut out,
         w,
-        h,
         dpi,
-        layout.pet_x,
-        layout.pet_y,
-        layout.pet_w,
-        layout.pet_h,
+        pet_rect.0,
+        pet_rect.1,
+        pet_rect.2,
+        pet_rect.3,
         pet_rgba,
         pet_w,
         pet_h,
-        t_fade,
     );
     if let Some(line) = chrome.say {
         draw_say_bubble(&mut out, w, h, dpi, layout, line, t_fade.max(0.85));
     }
-    // After the pet plate so the hint is never tucked under「拍拍收起」.
+    // The delete bowl after the pet so its hint never sits under the silhouette.
     if let Some(drag) = chrome.drag.as_ref() {
-        draw_delete_bowl(&mut out, w, h, dpi, layout, drag, t_fade.max(0.85));
+        draw_bowl_state(&mut out, w, h, dpi, layout, drag, t_fade.max(0.85));
     }
 
     (w, h, out)
@@ -236,7 +266,6 @@ pub fn compose_menu_pet_only(
     draw_avatar(
         &mut out,
         w,
-        h,
         dpi,
         layout.pet_x,
         layout.pet_y,
@@ -245,7 +274,6 @@ pub fn compose_menu_pet_only(
         pet_rgba,
         pet_w,
         pet_h,
-        0.0,
     );
     (w, h, out)
 }
@@ -277,7 +305,6 @@ pub fn present_menu_cached(
     draw_avatar(
         dest,
         dw,
-        dh,
         dpi,
         layout.pet_x,
         layout.pet_y,
@@ -286,8 +313,154 @@ pub fn present_menu_cached(
         pet_rgba,
         pet_src_w,
         pet_src_h,
-        fade,
     );
+}
+
+/// Base-state list row (icon tile + name + chevron) as a standalone bitmap, so
+/// the drag fast path can blit rows without re-rasterizing text per frame.
+pub fn prerender_list_row(
+    name: &str,
+    valid: bool,
+    icon: Option<&IconRgba>,
+    dpr: f32,
+    row_w: f32,
+    row_h: f32,
+) -> (u32, u32, Vec<u8>) {
+    let dpi = Dpi::new(dpr);
+    let w = dpi.s(row_w).round().max(1.0) as u32;
+    let h = dpi.s(row_h).round().max(1.0) as u32;
+    let mut img = vec![0u8; (w * h * 4) as usize];
+    draw_list_row(
+        &mut img,
+        w,
+        h,
+        dpi,
+        0.0,
+        0.0,
+        w as f32,
+        h as f32,
+        dpi.s(14.0),
+        name,
+        valid,
+        icon,
+        0.0,
+        0.0,
+        1.0,
+    );
+    (w, h, img)
+}
+
+/// Rows for the current scroll window, in `layout.items` shortcut order.
+pub fn prerender_list_rows(layout: &RadialLayout, dpr: f32) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut rows = Vec::new();
+    for item in &layout.items {
+        let MenuEntry::Shortcut { name, valid, icon, .. } = &item.entry else {
+            continue;
+        };
+        rows.push(prerender_list_row(
+            name, *valid, icon.as_deref(), dpr, item.w, item.h,
+        ));
+    }
+    rows
+}
+
+/// Per-frame drag composition: blit the static card layer (rows blanked) + the
+/// pre-rendered rows at their shifted slots + the moving parts (pet, lifted
+/// row, delete bowl). No text rasterization / icon rescale on the hot path.
+pub fn present_menu_drag(
+    dest: &mut [u8],
+    dw: u32,
+    dh: u32,
+    base: &[u8],
+    rows: &[(u32, u32, Vec<u8>)],
+    pet_rgba: &[u8],
+    pet_src_w: u32,
+    pet_src_h: u32,
+    layout: &RadialLayout,
+    dpr: f32,
+    say: Option<&'static str>,
+    drag: Option<&MenuDragChrome>,
+) {
+    let need = (dw * dh * 4) as usize;
+    if need == 0 || dest.len() < need || base.len() < need {
+        return;
+    }
+    dest[..need].copy_from_slice(&base[..need]);
+    let dpi = Dpi::new(dpr);
+    draw_avatar(
+        dest,
+        dw,
+        dpi,
+        layout.pet_x,
+        layout.pet_y,
+        layout.pet_w,
+        layout.pet_h,
+        pet_rgba,
+        pet_src_w,
+        pet_src_h,
+    );
+    if let Some(line) = say {
+        draw_say_bubble(dest, dw, dh, dpi, layout, line, 1.0);
+    }
+    let Some(drag) = drag else {
+        return;
+    };
+
+    // Pre-rendered rows at their visual (shifted) slots. Index k counts every
+    // shortcut in layout order — the dragged row's bitmap is skipped, not removed.
+    let mut k = 0usize;
+    for item in &layout.items {
+        let MenuEntry::Shortcut { id, .. } = &item.entry else {
+            continue;
+        };
+        let Some((iw, ih, img)) = rows.get(k) else {
+            break;
+        };
+        if *id != drag.id {
+            let orig = layout.list_scroll + k;
+            let logical_y = drag_slot_y(layout, orig, drag.from, drag.insert_at);
+            if logical_y + item.h >= layout.list_top - 2.0
+                && logical_y <= layout.list_bottom + 2.0
+            {
+                blit(
+                    dest,
+                    dw,
+                    dh,
+                    img,
+                    *iw,
+                    *ih,
+                    dpi.s(item.x).round().max(0.0) as u32,
+                    dpi.s(logical_y).round().max(0.0) as u32,
+                );
+            }
+        }
+        k += 1;
+    }
+
+    // Lifted row: pre-rendered bitmap (shadow baked in) at the pointer.
+    if let Some((iw, ih, img)) = &drag.ghost_img {
+        let lift = GHOST_LIFT;
+        let bw = dpi.s(drag.row_w) * lift;
+        let bh = dpi.s(drag.row_h) * lift;
+        let x = dpi.s(drag.pointer_x - drag.grab_dx) - (bw - dpi.s(drag.row_w)) * 0.5;
+        let y = dpi.s(drag.pointer_y - drag.grab_dy) - (bh - dpi.s(drag.row_h)) * 0.5;
+        let (gpad_x, gpad_y) = ghost_pad(dpi);
+        blit(
+            dest,
+            dw,
+            dh,
+            img,
+            *iw,
+            *ih,
+            (x - gpad_x).round().max(0.0) as u32,
+            (y - gpad_y).round().max(0.0) as u32,
+        );
+    } else {
+        draw_drag_ghost(dest, dw, dh, dpi, drag, 1.0);
+    }
+
+    // Delete bowl + hint, from pre-rendered state images.
+    draw_bowl_state(dest, dw, dh, dpi, layout, drag, 1.0);
 }
 
 fn paint_menu_card(
@@ -299,8 +472,6 @@ fn paint_menu_card(
     chrome: &MenuChromeState,
     t_fade: f32,
 ) {
-    let t_shadow = (t_fade * t_fade).clamp(0.0, 1.0);
-
     // Elevated glass card (rest of union window stays transparent for pin-pet).
     let cx0 = dpi.s(layout.card_x);
     let cy0 = dpi.s(layout.card_y);
@@ -309,39 +480,9 @@ fn paint_menu_card(
     let crad = dpi.s(22.0);
 
     if t_fade > 0.01 {
-        fill_rrect_aa(
-            &mut out,
-            w,
-            h,
-            cx0 + dpi.s(10.0),
-            cy0 + dpi.s(14.0),
-            cx1 + dpi.s(8.0),
-            cy1 + dpi.s(12.0),
-            crad,
-            with_alpha(SHADOW_A, t_shadow),
-        );
-        fill_rrect_aa(
-            &mut out,
-            w,
-            h,
-            cx0 + dpi.s(5.0),
-            cy0 + dpi.s(7.0),
-            cx1 + dpi.s(4.0),
-            cy1 + dpi.s(6.0),
-            crad,
-            with_alpha(SHADOW_B, t_shadow),
-        );
-        fill_rrect_aa(
-            &mut out,
-            w,
-            h,
-            cx0 + dpi.s(1.5),
-            cy0 + dpi.s(2.5),
-            cx1 + dpi.s(1.5),
-            cy1 + dpi.s(2.0),
-            crad,
-            with_alpha(SHADOW_C, t_shadow * 0.9),
-        );
+        // No outer drop shadow: the card sits flush on the desktop, with a
+        // single 1 px border line (deeper layers like a shadow here only read
+        // as a second line along the bottom / right edge).
         fill_rrect_aa(
             &mut out,
             w,
@@ -353,16 +494,19 @@ fn paint_menu_card(
             crad,
             with_alpha(CARD, t_fade),
         );
-        // Top sheen
-        fill_rrect_aa(
+        // Top highlight: clipped to the card outline, soft vertical fade so the
+        // rounded corners and the highlight fully merge (no contour line).
+        fill_top_sheen(
             &mut out,
             w,
             h,
-            cx0 + dpi.s(1.5),
-            cy0 + dpi.s(1.5),
-            cx1 - dpi.s(1.5),
-            cy0 + dpi.s(20.0),
-            dpi.s(14.0),
+            cx0,
+            cy0,
+            cx1,
+            cy1,
+            crad,
+            1.5,
+            26.0,
             with_alpha(INNER_HL, t_fade),
         );
         stroke_rrect_aa(
@@ -375,18 +519,6 @@ fn paint_menu_card(
             cy1 - 0.5,
             crad,
             with_alpha(BORDER, t_fade),
-            1.0,
-        );
-        stroke_rrect_aa(
-            &mut out,
-            w,
-            h,
-            cx0 + 1.0,
-            cy0 + 1.0,
-            cx1 - 1.0,
-            cy1 - 1.0,
-            crad - 0.5,
-            with_alpha(HAIRLINE, t_fade),
             1.0,
         );
         draw_card_tail(&mut out, w, h, dpi, &layout, t_fade);
@@ -487,7 +619,6 @@ fn paint_menu_card(
     // Tens/day: items fade with the card. No stagger, no extra y.
     let mut saw_shortcut = false;
     let mut vis_shortcut = 0usize;
-    let stride = ROW_H + ROW_GAP;
     for (i, item) in layout.items.iter().enumerate() {
         let reveal = t_fade;
         if reveal <= 0.01 {
@@ -572,6 +703,9 @@ fn paint_menu_card(
                 );
             }
             MenuEntry::Shortcut { name, valid, icon, id } => {
+                if chrome.rows_blank {
+                    continue;
+                }
                 saw_shortcut = true;
                 let orig = layout.list_scroll + vis_shortcut;
                 vis_shortcut += 1;
@@ -579,14 +713,7 @@ fn paint_menu_card(
                     continue;
                 }
                 if let Some(drag) = chrome.drag.as_ref() {
-                    let remaining_index = if orig > drag.from { orig - 1 } else { orig };
-                    let visual_index = if remaining_index >= drag.insert_at {
-                        remaining_index + 1
-                    } else {
-                        remaining_index
-                    };
-                    let logical_y = layout.list_top
-                        + (visual_index as f32 - layout.list_scroll as f32) * stride;
+                    let logical_y = drag_slot_y(layout, orig, drag.from, drag.insert_at);
                     if logical_y + item.h < layout.list_top - 2.0
                         || logical_y > layout.list_bottom + 2.0
                     {
@@ -620,10 +747,12 @@ fn paint_menu_card(
 
     if let Some(drag) = chrome.drag.as_ref() {
         saw_shortcut = true;
-        draw_drag_ghost(&mut out, w, h, dpi, drag, t_fade);
+        if !chrome.drag_draft {
+            draw_drag_ghost(&mut out, w, h, dpi, drag, t_fade);
+        }
     }
 
-    if !saw_shortcut {
+    if !saw_shortcut && !chrome.rows_blank {
         draw_empty_state(
             &mut out,
             w,
@@ -1390,6 +1519,79 @@ fn draw_list_row(
     );
 }
 
+/// Lift factor for the dragged row (visual pop).
+const GHOST_LIFT: f32 = 1.04;
+/// Slack around the pre-rendered ghost so the +3/+5 shadow fits without clipping.
+fn ghost_pad(dpi: Dpi) -> (f32, f32) {
+    (dpi.s(6.0), dpi.s(8.0))
+}
+
+/// Pre-render every per-frame drag overlay (lifted row, delete bowl, hint) so
+/// the drag hot path never touches GDI text or rescales bitmaps. Call once when
+/// a drag begins; `present_menu_drag` then only blits the cached images.
+pub fn prerender_drag_images(drag: &mut MenuDragChrome, dpr: f32) {
+    let dpi = Dpi::new(dpr);
+
+    // Lifted row: shadow + row bitmap with the shadow offsets baked in.
+    let bw = dpi.s(drag.row_w) * GHOST_LIFT;
+    let bh = dpi.s(drag.row_h) * GHOST_LIFT;
+    let (pad_x, pad_y) = ghost_pad(dpi);
+    let gw = (bw + pad_x * 2.0).ceil().max(1.0) as u32;
+    let gh = (bh + pad_y * 2.0).ceil().max(1.0) as u32;
+    let mut img = vec![0u8; (gw * gh * 4) as usize];
+    fill_rrect_aa(
+        &mut img,
+        gw,
+        gh,
+        pad_x + dpi.s(3.0),
+        pad_y + dpi.s(5.0),
+        pad_x + bw + dpi.s(3.0),
+        pad_y + bh + dpi.s(5.0),
+        dpi.s(14.0),
+        with_alpha(SHADOW_C, 0.85),
+    );
+    draw_list_row(
+        &mut img,
+        gw,
+        gh,
+        dpi,
+        pad_x,
+        pad_y,
+        bw,
+        bh,
+        dpi.s(14.0),
+        &drag.name,
+        drag.valid,
+        drag.icon.as_deref(),
+        1.0,
+        0.0,
+        1.0,
+    );
+    drag.ghost_img = Some((gw, gh, img));
+
+    // Delete bowl at rest and at the 1.08× over-bowl size.
+    if let Some((sw, sh, src)) = empty_bowl_asset() {
+        let rest = dpi.s(BOWL_SIZE).round().max(24.0) as u32;
+        let over = (dpi.s(BOWL_SIZE) * 1.08).round().max(24.0) as u32;
+        let (ow, oh, img) = scale_rgba_fit(src, *sw, *sh, rest, rest);
+        drag.bowl_img = Some((ow, oh, img));
+        let (ow2, oh2, img2) = scale_rgba_fit(src, *sw, *sh, over, over);
+        drag.bowl_over_img = Some((ow2, oh2, img2));
+    }
+
+    //「喂给我删除」glyphs in both states.
+    if let Some((tw, th, t)) =
+        rasterize_text(DELETE_HINT, dpi.su(140), dpi.px(11.0), with_alpha(PAW_INK, 1.0))
+    {
+        drag.hint_ink = Some((tw, th, t));
+    }
+    if let Some((tw, th, t)) =
+        rasterize_text(DELETE_HINT, dpi.su(140), dpi.px(11.0), with_alpha(PAW_KICKER, 1.0))
+    {
+        drag.hint_kicker = Some((tw, th, t));
+    }
+}
+
 fn draw_drag_ghost(
     out: &mut [u8],
     w: u32,
@@ -1398,9 +1600,8 @@ fn draw_drag_ghost(
     drag: &MenuDragChrome,
     reveal: f32,
 ) {
-    let lift = 1.04;
-    let bw = dpi.s(drag.row_w) * lift;
-    let bh = dpi.s(drag.row_h) * lift;
+    let bw = dpi.s(drag.row_w) * GHOST_LIFT;
+    let bh = dpi.s(drag.row_h) * GHOST_LIFT;
     let x = dpi.s(drag.pointer_x - drag.grab_dx) - (bw - dpi.s(drag.row_w)) * 0.5;
     let y = dpi.s(drag.pointer_y - drag.grab_dy) - (bh - dpi.s(drag.row_h)) * 0.5;
     fill_rrect_aa(
@@ -1433,7 +1634,9 @@ fn draw_drag_ghost(
     );
 }
 
-fn draw_delete_bowl(
+/// Delete bowl +「喂给我删除」hint. Uses the pre-rendered state images when
+/// available; the fallback path (missing PNG) re-rasterizes per frame.
+fn draw_bowl_state(
     out: &mut [u8],
     w: u32,
     h: u32,
@@ -1457,42 +1660,74 @@ fn draw_delete_bowl(
     let dh = bh * scale;
     let x = cx - dw * 0.5;
     let y = cy - dh * 0.5;
-    blit_empty_bowl(
-        out,
-        w,
-        h,
-        dpi.s(x),
-        dpi.s(y),
-        dpi.s(dw),
-        dpi.s(dh),
-        reveal,
-    );
-    // Sit under the bowl — above it collides with the pet plate /「拍拍收起」.
-    let hint_color = with_alpha(if drag.over_bowl { PAW_KICKER } else { PAW_INK }, reveal);
-    if let Some((tw, th, t)) =
-        rasterize_text(DELETE_HINT, dpi.su(140), dpi.px(11.0), hint_color)
-    {
-        let mut tx = dpi.s(cx) - tw as f32 * 0.5;
-        let mut ty = dpi.s(y + dh) + dpi.s(2.0);
-        if ty + th as f32 > h as f32 - 2.0 {
-            // No room below: tuck to the side facing the dock card.
-            let toward_card = if layout.card_x + layout.card_w * 0.5 >= layout.pet_x + layout.pet_w * 0.5
-            {
-                1.0
-            } else {
-                -1.0
-            };
-            tx = if toward_card > 0.0 {
-                dpi.s(x + dw) + dpi.s(4.0)
-            } else {
-                dpi.s(x) - tw as f32 - dpi.s(4.0)
-            };
-            ty = dpi.s(cy) - th as f32 * 0.5;
-        }
-        let tx = tx.round().clamp(2.0, (w as f32 - tw as f32 - 2.0).max(2.0)) as u32;
-        let ty = ty.round().clamp(2.0, (h as f32 - th as f32 - 2.0).max(2.0)) as u32;
-        blit(out, w, h, &t, tw, th, tx, ty);
+
+    let img = if drag.over_bowl {
+        drag.bowl_over_img.as_ref()
+    } else {
+        drag.bowl_img.as_ref()
+    };
+    if let Some((iw, ih, src)) = img {
+        let dx = (dpi.s(cx) - *iw as f32 * 0.5).round().max(0.0) as u32;
+        let dy = (dpi.s(cy) - *ih as f32 * 0.5).round().max(0.0) as u32;
+        blit(out, w, h, src, *iw, *ih, dx, dy);
+    } else {
+        blit_empty_bowl(out, w, h, dpi.s(x), dpi.s(y), dpi.s(dw), dpi.s(dh), reveal);
     }
+
+    // Hint sits under the bowl so it never overlaps the pet silhouette.
+    let bowl_dev = (dpi.s(x), dpi.s(y), dpi.s(dw), dpi.s(dh));
+    let hint = if drag.over_bowl {
+        drag.hint_kicker.as_ref()
+    } else {
+        drag.hint_ink.as_ref()
+    };
+    if let Some((tw, th, t)) = hint {
+        blit_hint_glyphs(out, w, h, dpi, layout, bowl_dev, cx, cy, t, *tw, *th);
+    } else {
+        let color = with_alpha(if drag.over_bowl { PAW_KICKER } else { PAW_INK }, reveal);
+        if let Some((tw, th, t)) =
+            rasterize_text(DELETE_HINT, dpi.su(140), dpi.px(11.0), color)
+        {
+            blit_hint_glyphs(out, w, h, dpi, layout, bowl_dev, cx, cy, &t, tw, th);
+        }
+    }
+}
+
+/// Position and blit the delete hint under (or beside) the bowl.
+fn blit_hint_glyphs(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    layout: &RadialLayout,
+    bowl_dev: (f32, f32, f32, f32),
+    cx: f32,
+    cy: f32,
+    t: &[u8],
+    tw: u32,
+    th: u32,
+) {
+    let (sx, sy, sdw, sdh) = bowl_dev;
+    let mut tx = dpi.s(cx) - tw as f32 * 0.5;
+    let mut ty = sy + sdh + dpi.s(2.0);
+    if ty + th as f32 > h as f32 - 2.0 {
+        // No room below: tuck to the side facing the dock card.
+        let toward_card = if layout.card_x + layout.card_w * 0.5 >= layout.pet_x + layout.pet_w * 0.5
+        {
+            1.0
+        } else {
+            -1.0
+        };
+        tx = if toward_card > 0.0 {
+            sx + sdw + dpi.s(4.0)
+        } else {
+            sx - tw as f32 - dpi.s(4.0)
+        };
+        ty = dpi.s(cy) - th as f32 * 0.5;
+    }
+    let tx = tx.round().clamp(2.0, (w as f32 - tw as f32 - 2.0).max(2.0)) as u32;
+    let ty = ty.round().clamp(2.0, (h as f32 - th as f32 - 2.0).max(2.0)) as u32;
+    blit(out, w, h, t, tw, th, tx, ty);
 }
 
 fn empty_bowl_asset() -> Option<&'static (u32, u32, Vec<u8>)> {
@@ -1965,7 +2200,6 @@ fn empty_y(layout: &RadialLayout) -> u32 {
 fn draw_avatar(
     out: &mut [u8],
     w: u32,
-    h: u32,
     dpi: Dpi,
     pet_x: f32,
     pet_y: f32,
@@ -1974,84 +2208,36 @@ fn draw_avatar(
     pet_rgba: &[u8],
     src_w: u32,
     src_h: u32,
-    // 0 = free silhouette (idle look); 1 = full glass plate + hint.
-    plate_a: f32,
 ) {
-    let plate_a = plate_a.clamp(0.0, 1.0);
-    let px = dpi.s(pet_x);
-    let py = dpi.s(pet_y);
-    let pw = dpi.s(pet_w);
-    let ph = dpi.s(pet_h);
-    let rad = dpi.s(18.0);
-
-    if plate_a > 0.02 {
-        fill_rrect_aa(
-            out,
-            w,
-            h,
-            px + dpi.s(3.0),
-            py + dpi.s(5.0),
-            px + pw + dpi.s(3.0),
-            py + ph + dpi.s(5.0),
-            rad,
-            with_alpha(SHADOW_B, plate_a),
-        );
-        fill_rrect_aa(
-            out,
-            w,
-            h,
-            px,
-            py,
-            px + pw,
-            py + ph,
-            rad,
-            with_alpha(CARD, plate_a),
-        );
-        stroke_rrect_aa(
-            out,
-            w,
-            h,
-            px + 0.5,
-            py + 0.5,
-            px + pw - 0.5,
-            py + ph - 0.5,
-            rad,
-            with_alpha(SEPARATOR, plate_a),
-            1.0,
-        );
+    if src_w == 0 || src_h == 0 || pet_rgba.len() < (src_w * src_h * 4) as usize {
+        return;
     }
-
-    // Idle: fill almost the whole pin rect. Menu settled: leave room for label.
-    let inset = lerp(dpi.s(4.0), dpi.s(40.0), plate_a);
-    let max = (pw.min(ph) - inset).max(dpi.s(48.0)) as u32;
-    let (sw, sh, pet) = scale_rgba_fit(pet_rgba, src_w, src_h, max, max);
-    let label_pad = lerp(0.0, dpi.s(28.0), plate_a);
-    let ox = (px + (pw - sw as f32) * 0.5).round() as u32;
-    let oy = (py + (ph - label_pad - sh as f32) * 0.5 + dpi.s(2.0))
-        .round()
-        .max(py + dpi.s(2.0)) as u32;
-
-    if plate_a > 0.02 {
-        fill_soft_ellipse(
-            out,
-            w,
-            h,
-            (px + pw * 0.5) as i32,
-            (py + ph - dpi.s(34.0)) as i32,
-            dpi.s(30.0) as i32,
-            dpi.s(8.0) as i32,
-            with_alpha(SHADOW_B, plate_a),
-        );
-    }
-    blit(out, w, h, &pet, sw, sh, ox, oy);
-
-    if plate_a > 0.05 {
-        if let Some((tw, th, t)) =
-            rasterize_text(CLOSE_HINT, dpi.su(110), dpi.px(11.0), with_alpha(PAW_INK, plate_a * 0.85))
-        {
-            let tx = (px + (pw - tw as f32) * 0.5).round() as u32;
-            let ty = (py + ph - dpi.s(18.0) - th as f32 * 0.5).round() as u32;
-            blit(out, w, h, &t, tw, th, tx, ty);
+    let px = dpi.s(pet_x).round() as u32;
+    let py = dpi.s(pet_y).round() as u32;
+    let dw = dpi.s(pet_w).round().max(1.0) as u32;
+    let dh = dpi.s(pet_h).round().max(1.0) as u32;
+    // Exact replica of the idle present (app::scale_rgba_centered, scale 1):
+    // same aspect fit, same safety margins, bottom-aligned. Opening the
+    // launcher must never move or resize the cat, so this keeps the pet
+    // pixel-identical to its resting state.
+    let fit = (dw as f64 / src_w as f64).min(dh as f64 / src_h as f64);
+    let mut fw = (src_w as f64 * fit).round().max(1.0) as u32;
+    let mut fh = (src_h as f64 * fit).round().max(1.0) as u32;
+    let margin_x = 2u32.min(fw / 16);
+    let margin_top = 2u32.min(fh / 16);
+    let margin_bot = 4u32.min(fh / 12).max(3);
+    fw = fw.saturating_sub(margin_x * 2).max(1);
+    fh = fh.saturating_sub(margin_top + margin_bot).max(1);
+    let ox = px + (dw.saturating_sub(fw)) / 2;
+    let oy = py + dh.saturating_sub(fh + margin_bot);
+    let scale_x = src_w as f64 / fw as f64;
+    let scale_y = src_h as f64 / fh as f64;
+    for dy in 0..fh {
+        for dx in 0..fw {
+            let sx = (dx as f64 + 0.5) * scale_x - 0.5;
+            let sy = (dy as f64 + 0.5) * scale_y - 0.5;
+            let col = sample_rgba_bilinear(pet_rgba, src_w, src_h, sx, sy);
+            put(out, w, (ox + dx) as i32, (oy + dy) as i32, col);
         }
     }
 }
@@ -2472,6 +2658,8 @@ pub struct SettingsCardMetrics {
     pub interval_dec: (f32, f32, f32, f32),
     pub interval_inc: (f32, f32, f32, f32),
     pub pause: (f32, f32, f32, f32),
+    /// Top of the pet-size group card (styled like the reminder card).
+    pub pet_y: f32,
     pub pet_dec: (f32, f32, f32, f32),
     pub pet_inc: (f32, f32, f32, f32),
 }
@@ -2491,8 +2679,9 @@ pub fn settings_card_metrics(card_w: f32, card_h: f32) -> SettingsCardMetrics {
         interval_dec: (16.0, reminder_y + 52.0, 44.0, 26.0),
         interval_inc: (132.0, reminder_y + 52.0, 44.0, 26.0),
         pause: (w - 86.0, reminder_y + 28.0, 70.0, 24.0),
-        pet_dec: (16.0, pet_y + 8.0, 36.0, 26.0),
-        pet_inc: (120.0, pet_y + 8.0, 36.0, 26.0),
+        pet_y,
+        pet_dec: (16.0, pet_y + 36.0, 36.0, 26.0),
+        pet_inc: (104.0, pet_y + 36.0, 36.0, 26.0),
     }
 }
 
@@ -2698,6 +2887,42 @@ pub fn compose_settings_card(
         dpi,
     );
 
+    // ── Pet size group card, styled like the reminder card above ──
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        rx0,
+        dpi.s(m.pet_y),
+        rx1,
+        dpi.s(m.pet_y + 72.0),
+        dpi.s(12.0),
+        GROUPED_BG,
+    );
+    stroke_rrect_aa(
+        &mut out,
+        w,
+        h,
+        rx0 + 0.5,
+        dpi.s(m.pet_y) + 0.5,
+        rx1 - 0.5,
+        dpi.s(m.pet_y + 72.0) - 0.5,
+        dpi.s(12.0),
+        SOFT_BORDER,
+        1.0,
+    );
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "宠物大小",
+        dpi.s(20.0),
+        dpi.s(m.pet_y + 6.0),
+        dpi.su(140),
+        dpi.px(12.0),
+        SECONDARY,
+    );
+
     let (pdx, pdy, pdw, pdh) = m.pet_dec;
     fill_rrect_aa(
         &mut out,
@@ -2760,6 +2985,18 @@ pub fn compose_settings_card(
         LABEL,
         dpi,
     );
+    // Hint, same wording/style as the standalone settings window.
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "相对默认尺寸 · 托盘也可调",
+        dpi.s(pix + piw + 8.0),
+        dpi.s(piy + 8.0),
+        dpi.su(190),
+        dpi.px(11.5),
+        TERTIARY,
+    );
 
     (w, h, out)
 }
@@ -2815,6 +3052,47 @@ mod settings_card {
             Some(SettingsHit::Close)
         ));
         assert!(hit_settings_card(180.0, 300.0, 360.0, 360.0).is_none());
+    }
+
+    #[test]
+    fn pet_size_section_matches_reminder_style() {
+        let (w, _h, out) = compose_settings_card((true, 45, false), 1.0, 1.0, 360.0, 360.0);
+        let m = settings_card_metrics(360.0, 360.0);
+        let rgba = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * w + x) * 4) as usize;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        // Both sections sit on the identical grouped-card background (no text
+        // or controls at the sample points) → styles are aligned.
+        let reminder_bg = rgba(300, (m.reminder_y + 60.0) as u32);
+        let pet_bg = rgba(300, (m.pet_y + 66.0) as u32);
+        assert_eq!(pet_bg, reminder_bg, "pet group card must match reminder style");
+        // The + chip is clickable at its new row position.
+        assert!(matches!(
+            hit_settings_card(m.pet_inc.0 + 10.0, m.pet_inc.1 + 10.0, 360.0, 360.0),
+            Some(SettingsHit::PetScaleInc)
+        ));
+        // Hint text renders right of the + chip.
+        let hx0 = (m.pet_inc.0 + m.pet_inc.2 + 8.0) as u32;
+        let hy0 = (m.pet_inc.1 + 6.0) as u32;
+        let mut inked = 0usize;
+        for y in hy0..hy0 + 18 {
+            for x in hx0..hx0 + 190 {
+                if out[((y * w + x) * 4 + 3) as usize] > 0 {
+                    inked += 1;
+                }
+            }
+        }
+        assert!(inked > 40, "pet-size hint text must render, inked={inked}");
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_settings_card_preview() {
+        let (w, h, out) = compose_settings_card((true, 45, false), 1.0, 2.0, 360.0, 360.0);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/_settings_card.png");
+        image::save_buffer(&path, &out, w, h, image::ColorType::Rgba8).expect("write settings card");
+        assert!(path.is_file());
     }
 }
 
@@ -2900,6 +3178,65 @@ fn fill_rrect_aa(
             if col[3] > 0 {
                 put(out, w, px, py, col);
             }
+        }
+    }
+}
+
+/// Top highlight clipped to the card outline with a soft vertical fade, so the
+/// highlight follows the card's rounded corners and fades out before its own
+/// bottom edge (no hard contour line on the corner arcs).
+fn fill_top_sheen(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radius: f32,
+    inset: f32,
+    height: f32,
+    c: [u8; 4],
+) {
+    let r = radius
+        .min((x1 - x0) * 0.5)
+        .min((y1 - y0) * 0.5)
+        .max(0.0);
+    if height <= 0.0 {
+        return;
+    }
+    let top = y0 + inset;
+    let bottom = top + height;
+    let min_x = (x0 + inset - 1.0).floor().max(0.0) as i32;
+    let min_y = top.floor().max(0.0) as i32;
+    let max_x = (x1 - inset + 1.0).ceil().min(w as f32) as i32;
+    let max_y = bottom.ceil().min(h as f32) as i32;
+    for py in min_y..max_y {
+        let t = ((py as f32 + 0.5) - top) / height;
+        let ydim = {
+            let d = 1.0 - t.clamp(0.0, 1.0);
+            d * d
+        };
+        if ydim <= 0.0 {
+            continue;
+        }
+        for px in min_x..max_x {
+            let cx = px as f32 + 0.5;
+            let cy = py as f32 + 0.5;
+            // Clip to the card outline: coverage uses the same AA curve as the
+            // card fill, so the highlight never escapes the rounded corners.
+            let d = sd_round_rect(cx, cy, x0, y0, x1, y1, r);
+            let cov = (0.6 - d).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            let a = c[3] as f32 * ydim * cov;
+            if a <= 0.5 {
+                continue;
+            }
+            let mut col = c;
+            col[3] = a.round() as u8;
+            put(out, w, px, py, col);
         }
     }
 }
@@ -3345,6 +3682,11 @@ mod playful_dock {
                     over_bowl: true,
                     row_w: 300.0,
                     row_h: 42.0,
+                    ghost_img: None,
+                    bowl_img: None,
+                    bowl_over_img: None,
+                    hint_ink: None,
+                    hint_kicker: None,
                 }),
                 ..MenuChromeState::default()
             },
@@ -3451,6 +3793,316 @@ mod playful_dock {
         );
         let opaque = out.chunks_exact(4).filter(|p| p[3] > 8).count();
         assert!(opaque > 100, "scaled card + pet should paint, got {opaque}");
+    }
+
+    fn drag_chrome(name: &str) -> MenuDragChrome {
+        MenuDragChrome {
+            id: Uuid::from_u128(3),
+            name: name.into(),
+            valid: true,
+            icon: None,
+            pointer_x: 220.0,
+            pointer_y: 240.0,
+            grab_dx: 40.0,
+            grab_dy: 16.0,
+            from: 2,
+            insert_at: 1,
+            over_bowl: false,
+            row_w: 300.0,
+            row_h: 42.0,
+            ghost_img: None,
+            bowl_img: None,
+            bowl_over_img: None,
+            hint_ink: None,
+            hint_kicker: None,
+        }
+    }
+
+    fn three_shortcut_layout() -> RadialLayout {
+        let entries = vec![
+            MenuEntry::AddShortcut,
+            MenuEntry::Manage,
+            MenuEntry::Shortcut {
+                id: Uuid::from_u128(1),
+                name: "App0".into(),
+                valid: true,
+                icon: None,
+            },
+            MenuEntry::Shortcut {
+                id: Uuid::from_u128(2),
+                name: "App1".into(),
+                valid: true,
+                icon: None,
+            },
+            MenuEntry::Shortcut {
+                id: Uuid::from_u128(3),
+                name: "App2".into(),
+                valid: true,
+                icon: None,
+            },
+        ];
+        layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 80.0, 128.0, 128.0),
+            (150.0, 20.0, 360.0, 360.0),
+            ExpandDir::Right,
+            1.0,
+        )
+    }
+
+    #[test]
+    fn menu_pet_geometry_matches_idle_present() {
+        let lay = three_shortcut_layout();
+        let (pw, ph, pet) = dummy_pet();
+        let (w1, h1, frame) = compose_menu_frame(
+            &pet,
+            pw,
+            ph,
+            &lay,
+            1.0,
+            MenuChromeState::default(),
+        );
+        let (w2, h2, pet_only) = compose_menu_pet_only(&pet, pw, ph, &lay, 1.0);
+        assert_eq!((w1, h1), (w2, h2));
+        let alpha = |buf: &[u8], w: u32, x: u32, y: u32| buf[((y * w + x) * 4 + 3) as usize];
+        // Pet rect (8,80,128,128) at dpr=1, 32×32 source: the idle-present
+        // replica draws a 124×122 box at (10,82) — inside opaque, outside
+        // transparent (no glass tray, exact same geometry as the rest state).
+        assert!(alpha(&frame, w1, 60, 120) > 0, "pet must be inked");
+        assert!(alpha(&frame, w1, 10, 82) > 0, "box top-left");
+        assert!(alpha(&frame, w1, 133, 203) > 0, "box bottom-right");
+        assert_eq!(alpha(&frame, w1, 9, 82), 0, "nothing left of the box");
+        assert_eq!(alpha(&frame, w1, 10, 81), 0, "nothing above the box");
+        assert_eq!(alpha(&frame, w1, 134, 82), 0, "nothing right of the box");
+        assert_eq!(alpha(&frame, w1, 10, 204), 0, "nothing below the box");
+        // The pet area must match the settings-view layer pixel for pixel.
+        for y in 80..208 {
+            for x in 8..136 {
+                let fi = ((y * w1 + x) * 4) as usize;
+                let pi = ((y * w2 + x) * 4) as usize;
+                assert_eq!(
+                    &frame[fi..fi + 4],
+                    &pet_only[pi..pi + 4],
+                    "pet pixel mismatch at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prerender_drag_images_fills_expected_sizes() {
+        let mut drag = drag_chrome("App2");
+        prerender_drag_images(&mut drag, 2.0);
+
+        // Ghost: row 300×42 lifted 1.04×, + 6/8 dp pad each side, at 2× dpr.
+        let (gw, gh, img) = drag.ghost_img.as_ref().expect("ghost must pre-render");
+        assert!((*gw as f32 - (300.0 * 1.04 * 2.0 + 24.0)).abs() <= 2.0, "gw={gw}");
+        assert!((*gh as f32 - (42.0 * 1.04 * 2.0 + 32.0)).abs() <= 2.0, "gh={gh}");
+        assert_eq!(img.len(), (*gw * *gh * 4) as usize);
+        let opaque = img.chunks_exact(4).filter(|p| p[3] > 8).count();
+        assert!(opaque > 100, "ghost row painted, got {opaque}");
+
+        // Bowl from assets/ui/empty_feed_bowl.png: rest 96, over 104 at 2× dpr.
+        if let Some((ow, oh, bowl)) = &drag.bowl_img {
+            assert!(*ow <= 96 && *oh <= 96 && *ow > 0 && *oh > 0);
+            assert!(bowl.chunks_exact(4).any(|p| p[3] > 8), "bowl painted");
+        }
+        if let Some((ow, oh, _)) = &drag.bowl_over_img {
+            assert!(*ow <= 104 && *oh <= 104 && *ow > 0 && *oh > 0);
+        }
+
+        // Glyphs only exist where GDI text works (Windows).
+        if cfg!(windows) {
+            for (label, hint) in [
+                ("ink", &drag.hint_ink),
+                ("kicker", &drag.hint_kicker),
+            ] {
+                let (tw, th, t) = hint.as_ref().unwrap_or_else(|| panic!("{label} hint missing"));
+                assert!(*tw > 0 && *th > 0 && t.len() == (*tw * *th * 4) as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn drag_slot_y_shifts_around_insert_slot() {
+        let lay = three_shortcut_layout();
+        let y0 = drag_slot_y(&lay, 0, 2, 1);
+        let y1 = drag_slot_y(&lay, 1, 2, 1);
+        // slot 1 is freed by the dragged row; rows land at 0 and 2
+        assert_eq!(y1 - y0, row_stride() * 2.0);
+        // inserting at the top pushes everything down one slot
+        assert_eq!(drag_slot_y(&lay, 0, 2, 0), y0 + row_stride());
+        // unaffected rows keep their natural slot
+        assert_eq!(drag_slot_y(&lay, 1, 0, 0), lay.list_top + row_stride());
+    }
+
+    #[test]
+    fn card_interior_not_tinted_by_shadow() {
+        // The card is translucent (0xF0); with the old offset-rrect shadows the
+        // interior pixels had shadow blended underneath. The new outer shadow
+        // never touches the card, so interior RGB is exactly the card color.
+        let lay = three_shortcut_layout();
+        let (w, _h, rgba) = compose_menu_card_layer(&lay, 1.0, MenuChromeState::default());
+        let px = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * w + x) * 4) as usize;
+            [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+        };
+        let interior = px(190, 140);
+        assert_eq!(interior, CARD, "interior pixel must be pure card color");
+    }
+
+    #[test]
+    fn card_has_no_outer_shadow() {
+        let lay = three_shortcut_layout();
+        let (w, _h, rgba) = compose_menu_card_layer(&lay, 1.0, MenuChromeState::default());
+        let alpha = |x: u32, y: u32| -> u8 {
+            rgba[((y * w + x) * 4 + 3) as usize]
+        };
+        // Nothing above, left of, below or right of the card — no drop shadow.
+        assert_eq!(alpha(300, 10), 0, "nothing above the card");
+        assert_eq!(alpha(100, 100), 0, "nothing left of the card");
+        assert_eq!(alpha(155, 22), 0, "top-left notch stays transparent");
+        assert_eq!(alpha(512, 22), 0, "top-right notch stays transparent");
+        for y in 381..396 {
+            assert_eq!(alpha(330, y), 0, "no shadow band below the card at y={y}");
+        }
+        for x in 511..526 {
+            assert_eq!(alpha(x, 200), 0, "no shadow band right of the card at x={x}");
+        }
+    }
+
+    #[test]
+    fn top_sheen_follows_card_outline() {
+        let lay = three_shortcut_layout();
+        let (w, _h, rgba) = compose_menu_card_layer(&lay, 1.0, MenuChromeState::default());
+        let px = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * w + x) * 4) as usize;
+            [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+        };
+        // The highlight brightens the top band …
+        assert!(px(190, 24)[1] > CARD[1], "top band should be brightened");
+        // … but never escapes the rounded corners into the transparent wedge.
+        assert_eq!(px(155, 22)[3], 0, "sheen must not bleed past the corner");
+        assert_eq!(px(508, 22)[3], 0, "sheen must not bleed past the corner");
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_card_border_preview() {
+        let lay = three_shortcut_layout();
+        let (w, h, rgba) = compose_menu_card_layer(&lay, 2.0, MenuChromeState::default());
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/_card_border.png");
+        image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).expect("write preview");
+        // Zoomed crops of the corners + right/bottom edge for inspection.
+        let zoom = |cx: u32, cy: u32, half: u32, name: &str, z: u32| {
+            let x0 = cx.saturating_sub(half);
+            let y0 = cy.saturating_sub(half);
+            let mut dst = vec![0u8; (half * 2 * z * half * 2 * z * 4) as usize];
+            for py in 0..(half * 2 * z) {
+                for px in 0..(half * 2 * z) {
+                    let sx = x0 + px / z;
+                    let sy = y0 + py / z;
+                    if sx >= w || sy >= h {
+                        continue;
+                    }
+                    let si = ((sy * w + sx) * 4) as usize;
+                    let di = ((py * half * 2 * z + px) * 4) as usize;
+                    dst[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+                }
+            }
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/_card_{name}.png"));
+            image::save_buffer(&p, &dst, half * 2 * z, half * 2 * z, image::ColorType::Rgba8)
+                .expect("write corner crop");
+        };
+        zoom(151, 21, 8, "tl", 8); // top-left corner (device px, dpr = 2 → logical 20, 20)
+        zoom(1023, 21, 8, "tr", 8); // top-right corner
+        zoom(151, 765, 8, "bl", 8); // bottom-left
+        zoom(1023, 765, 8, "br", 8); // bottom-right shadow corner
+        zoom(500, 790, 8, "bottom_edge", 6);
+        zoom(1050, 400, 8, "right_edge", 6);
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn present_drag_same_frame_outside_overlay_boxes() {
+        // Blank layer + pre-rendered rows + present_menu_drag must reproduce
+        // compose_menu_frame everywhere except the overlay regions (rows, the
+        // lifted row, bowl, hint).
+        let lay = three_shortcut_layout();
+        let (pw, ph, pet) = dummy_pet();
+        let drag = drag_chrome("App2");
+
+        let chrome = MenuChromeState {
+            drag: Some(drag.clone()),
+            ..MenuChromeState::default()
+        };
+        let (w, h, full) = compose_menu_frame(&pet, pw, ph, &lay, 1.0, chrome.clone());
+
+        let mut blank = chrome.clone();
+        blank.drag = None;
+        blank.drag_draft = false;
+        blank.rows_blank = true;
+        let (cw, ch, base) = compose_menu_card_layer(&lay, 1.0, blank);
+        let rows = prerender_list_rows(&lay, 1.0);
+        let mut out = vec![0u8; (cw * ch * 4) as usize];
+        present_menu_drag(&mut out, cw, ch, &base, &rows, &pet, pw, ph, &lay, 1.0, None, Some(&drag));
+
+        assert_eq!((w, h), (cw, ch));
+
+        // Lifted row box: pointer − grab, lifted 1.04×, shadow/pad margins.
+        let gx = 220.0f32 - 40.0 - (300.0f32 * 1.04 - 300.0) * 0.5;
+        let gy = 240.0f32 - 16.0 - (42.0f32 * 1.04 - 42.0) * 0.5;
+        let gbox = (
+            (gx - 9.0).floor().max(0.0) as i32,
+            (gy - 11.0).floor().max(0.0) as i32,
+            (300.0f32 * 1.04 + 30.0).ceil() as i32,
+            (42.0f32 * 1.04 + 22.0).ceil() as i32,
+        );
+        // List viewport box: shifted rows live inside it (2 px tolerance).
+        let (row_x, row_w) = lay
+            .items
+            .iter()
+            .find_map(|it| match &it.entry {
+                MenuEntry::Shortcut { .. } => Some((it.x, it.w)),
+                _ => None,
+            })
+            .unwrap_or((lay.card_x, lay.card_w));
+        let vbox = (
+            (row_x - 4.0).floor().max(0.0) as i32,
+            (lay.list_top - 4.0).floor().max(0.0) as i32,
+            (row_w + 8.0).ceil() as i32,
+            ((lay.list_bottom - lay.list_top) + 8.0).ceil() as i32,
+        );
+        // Bowl + hint box (hint sits under the bowl on this tall window).
+        let (bx, by, bw, bh) = bowl_rect(8.0, 80.0, 128.0, 128.0, 500.0, 480.0);
+        let bbox = (
+            (bx - 12.0).floor().max(0.0) as i32,
+            (by - 12.0).floor().max(0.0) as i32,
+            (bw + 24.0).ceil() as i32,
+            (bh + 12.0 + 48.0).ceil() as i32,
+        );
+        let in_box = |x: i32, y: i32| {
+            let (x0, y0, w0, h0) = gbox;
+            let (x1, y1, w1, h1) = vbox;
+            let (x2, y2, w2, h2) = bbox;
+            (x >= x0 && x < x0 + w0 && y >= y0 && y < y0 + h0)
+                || (x >= x1 && x < x1 + w1 && y >= y1 && y < y1 + h1)
+                || (x >= x2 && x < x2 + w2 && y >= y2 && y < y2 + h2)
+        };
+
+        let mut outside = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                if full[i..i + 4] != out[i..i + 4] && !in_box(x as i32, y as i32) {
+                    outside += 1;
+                }
+            }
+        }
+        assert_eq!(outside, 0, "diffs outside drag overlay boxes: {outside}");
     }
 }
 

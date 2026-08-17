@@ -28,7 +28,8 @@ use crate::render::easing::ease_in_out_cubic;
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
     compose_menu_pet_only, compose_settings_card, compose_settings_frame, hit_settings,
-    hit_settings_card, menu_visual_fade, menu_visual_scale, present_menu_cached, MenuChromeState,
+    hit_settings_card, menu_visual_fade, menu_visual_scale, prerender_drag_images,
+    prerender_list_rows, present_menu_cached, present_menu_drag, MenuChromeState,
     MenuDragChrome, SettingsHit, SAY_EATEN, SAY_FAIL, SETTINGS_H, SETTINGS_W,
 };
 use crate::render::sample_rgba_bilinear;
@@ -76,6 +77,39 @@ struct SettingsTransition {
     t: f32,
     /// true = dock → settings (in from right); false = settings → dock.
     entering: bool,
+}
+
+/// Re-composition key for the cached drag layers — the static card (rows
+/// blanked) + pre-rendered row bitmaps. They only change when the scroll window
+/// (or the frozen chrome) changes; insertion-slot changes just re-blit rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DragLayersKey {
+    scroll: usize,
+    total: usize,
+    hover: Option<usize>,
+    press: Option<usize>,
+    say: Option<&'static str>,
+}
+
+/// Rebuild the static drag layers (blank card + row bitmaps) only when the key
+/// changed. Takes the layers field directly so callers can keep other borrows.
+fn ensure_drag_layers(
+    layers: &mut Option<(DragLayersKey, (u32, u32, Vec<u8>), Vec<(u32, u32, Vec<u8>)>)>,
+    layout: &RadialLayout,
+    dpr: f32,
+    chrome: &MenuChromeState,
+    key: DragLayersKey,
+) {
+    if layers.as_ref().map(|(k, _, _)| k) == Some(&key) {
+        return;
+    }
+    let mut blank = chrome.clone();
+    blank.drag = None;
+    blank.drag_draft = false;
+    blank.rows_blank = true;
+    let (w, h, base) = compose_menu_card_layer(layout, dpr, blank);
+    let rows = prerender_list_rows(layout, dpr);
+    *layers = Some((key, (w, h, base), rows));
 }
 
 pub struct App {
@@ -140,6 +174,10 @@ pub struct App {
     list_drag_visual: Option<MenuDragChrome>,
     /// Throttle auto-scroll while dragging near the list edge.
     list_drag_edge_at: Option<Instant>,
+    /// Static drag layers: card (rows blanked) + pre-rendered rows for the
+    /// current scroll window. Insertion-slot changes never rebuild these —
+    /// [`present_menu_drag`] re-blits the rows at shifted positions.
+    menu_drag_layers: Option<(DragLayersKey, (u32, u32, Vec<u8>), Vec<(u32, u32, Vec<u8>)>)>,
     /// Settings grows from the launcher's Manage button instead of snapping center.
     settings_transition: Option<SettingsTransition>,
     /// Overlay window top-left (physical) for atomic layered present during settings transition.
@@ -241,6 +279,7 @@ impl App {
             list_drag: ListDrag::Idle,
             list_drag_visual: None,
             list_drag_edge_at: None,
+            menu_drag_layers: None,
             settings_transition: None,
             settings_present_pos: None,
             settings_embed: false,
@@ -595,7 +634,66 @@ impl App {
                 say: self.menu_say.map(|(_, s)| s),
                 reduced_motion: !platform::client_area_animation_enabled(),
                 drag: self.list_drag_visual.clone(),
+                drag_draft: false,
+                rows_blank: false,
             };
+
+            // Drag fast path: the card and rows are pre-rendered layers, so each frame
+            // only re-blits them (insertion-slot changes shift the rows for free).
+            if self.list_drag.is_dragging() && layout.open_t >= 0.999 {
+                if self.list_drag_visual.is_none() {
+                    let (w, h, composed) = compose_menu_frame(
+                        &pet_rgba,
+                        clip.frame_width,
+                        clip.frame_height,
+                        &layout,
+                        dpr,
+                        chrome,
+                    );
+                    self.menu_layout = Some(layout);
+                    self.sprite_logical = (lw, lh);
+                    self.hit_rgba = composed;
+                    self.hit_size = (w, h);
+                    self.texture_dirty = false;
+                    return;
+                }
+                let key = DragLayersKey {
+                    scroll: layout.list_scroll,
+                    total,
+                    hover: self.menu_hover,
+                    press: self.menu_press,
+                    say: self.menu_say.map(|(_, s)| s),
+                };
+                ensure_drag_layers(&mut self.menu_drag_layers, &layout, dpr, &chrome, key);
+                let (_, (cw, ch, base), rows) = self
+                    .menu_drag_layers
+                    .as_ref()
+                    .expect("drag layers built above");
+                let need = (cw * ch * 4) as usize;
+                if self.hit_rgba.len() < need {
+                    self.hit_rgba = vec![0u8; need];
+                }
+                present_menu_drag(
+                    &mut self.hit_rgba[..need],
+                    *cw,
+                    *ch,
+                    base,
+                    rows,
+                    &pet_rgba,
+                    clip.frame_width,
+                    clip.frame_height,
+                    &layout,
+                    dpr,
+                    self.menu_say.map(|(_, s)| s),
+                    self.list_drag_visual.as_ref(),
+                );
+                self.menu_layout = Some(layout);
+                self.sprite_logical = (lw, lh);
+                self.hit_size = (*cw, *ch);
+                self.texture_dirty = false;
+                return;
+            }
+
             let (w, h, composed) = compose_menu_frame(
                 &pet_rgba,
                 clip.frame_width,
@@ -1091,6 +1189,7 @@ impl App {
         self.list_drag = ListDrag::Idle;
         self.list_drag_visual = None;
         self.list_drag_edge_at = None;
+        self.menu_drag_layers = None;
         // Atomic layered present target (physical). Avoids empty frames during resize.
         self.menu_present_pos = Some((place.window.x, place.window.y));
 
@@ -1175,6 +1274,7 @@ impl App {
         self.list_drag = ListDrag::Idle;
         self.list_drag_visual = None;
         self.list_drag_edge_at = None;
+        self.menu_drag_layers = None;
         self.settings_ui_active = false;
         self.settings_embed = false;
         self.settings_transition = None;
@@ -1561,14 +1661,15 @@ impl App {
     }
 
     fn begin_list_press(&mut self, idx: usize, lx: f32, ly: f32, now: Instant) {
-        let Some(layout) = self.menu_layout.as_ref() else {
+        let Some(layout) = self.menu_layout.clone() else {
             return;
         };
         let Some(item) = layout.items.get(idx) else {
             return;
         };
-        let MenuEntry::Shortcut { id, .. } = item.entry else {
+        let MenuEntry::Shortcut { id, name, valid, icon } = item.entry.clone() else {
             self.list_drag = ListDrag::Idle;
+            self.menu_drag_layers = None;
             return;
         };
         let Some(from) = self
@@ -1587,6 +1688,82 @@ impl App {
             armed: true,
             t0: now,
         };
+        // Warm everything the drag will need during the 400 ms hold, so lifting
+        // the row paints smoothly: lifted-row image, bowl, hints, static card
+        // layer and row bitmaps. A tap just wastes this one-time prerender.
+        let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+        let total = self.shortcuts.list_enabled_sorted().len();
+        let insert_at = insert_index_from_y(
+            ly,
+            layout.list_top,
+            ROW_H + ROW_GAP,
+            layout.list_scroll,
+            total.saturating_sub(1),
+        );
+        let bowl = bowl_rect(
+            layout.pet_x,
+            layout.pet_y,
+            layout.pet_w,
+            layout.pet_h,
+            layout.window_w as f32,
+            layout.window_h as f32,
+        );
+        let over_bowl = crate::ui::list_drag::hit_bowl(lx, ly, bowl);
+        self.list_drag_visual = Some(MenuDragChrome {
+            id,
+            name,
+            valid,
+            icon,
+            pointer_x: lx,
+            pointer_y: ly,
+            grab_dx: lx - item.x,
+            grab_dy: ly - item.y,
+            from,
+            insert_at,
+            over_bowl,
+            row_w: item.w,
+            row_h: item.h,
+            ghost_img: None,
+            bowl_img: None,
+            bowl_over_img: None,
+            hint_ink: None,
+            hint_kicker: None,
+        });
+        if let Some(visual) = self.list_drag_visual.as_mut() {
+            prerender_drag_images(visual, dpr);
+        }
+        let chrome = MenuChromeState {
+            hover: self.menu_hover,
+            press: self.menu_press,
+            hover_t: self.menu_hover_t,
+            press_t: self.menu_press_t,
+            closing: self.pet.as_ref().map(|p| p.menu_closing).unwrap_or(false),
+            say: self.menu_say.map(|(_, s)| s),
+            reduced_motion: !platform::client_area_animation_enabled(),
+            drag: None,
+            drag_draft: false,
+            rows_blank: false,
+        };
+        let key = DragLayersKey {
+            scroll: layout.list_scroll,
+            total,
+            hover: self.menu_hover,
+            press: self.menu_press,
+            say: self.menu_say.map(|(_, s)| s),
+        };
+        self.rebuild_drag_layers_if_stale(&layout, dpr, &chrome, key);
+    }
+
+    /// Rebuild the static drag layers (blank card + row bitmaps) only when the
+    /// key changed; insertion-slot changes never rebuild them.
+    fn rebuild_drag_layers_if_stale(
+        &mut self,
+        layout: &RadialLayout,
+        dpr: f32,
+        chrome: &MenuChromeState,
+        key: DragLayersKey,
+    ) {
+        ensure_drag_layers(&mut self.menu_drag_layers, layout, dpr, chrome, key);
     }
 
     fn tick_list_drag_hold(&mut self, now: Instant) {
@@ -1620,15 +1797,6 @@ impl App {
         let Some(item) = layout.items.get(item_idx) else {
             return;
         };
-        let (name, valid, icon) = match &item.entry {
-            MenuEntry::Shortcut {
-                name,
-                valid,
-                icon,
-                ..
-            } => (name.clone(), *valid, icon.clone()),
-            _ => return,
-        };
         let total = self.shortcuts.list_enabled_sorted().len();
         let max_insert = total.saturating_sub(1);
         let insert_at = insert_index_from_y(
@@ -1658,21 +1826,52 @@ impl App {
             row_w: item.w,
             row_h: item.h,
         };
-        self.list_drag_visual = Some(MenuDragChrome {
-            id,
-            name,
-            valid,
-            icon,
-            pointer_x: lx,
-            pointer_y: ly,
-            grab_dx: lx - item.x,
-            grab_dy: ly - item.y,
-            from,
-            insert_at,
-            over_bowl,
-            row_w: item.w,
-            row_h: item.h,
-        });
+        // Reuse the press-time prerendered visual (ghost / bowl / hints) instead
+        // of rebuilding it; the long-press hold already paid that cost.
+        if let Some(visual) = self.list_drag_visual.as_mut() {
+            visual.pointer_x = lx;
+            visual.pointer_y = ly;
+            visual.grab_dx = lx - item.x;
+            visual.grab_dy = ly - item.y;
+            visual.from = from;
+            visual.insert_at = insert_at;
+            visual.over_bowl = over_bowl;
+            visual.row_w = item.w;
+            visual.row_h = item.h;
+        } else {
+            let (name, valid, icon) = match &item.entry {
+                MenuEntry::Shortcut {
+                    name,
+                    valid,
+                    icon,
+                    ..
+                } => (name.clone(), *valid, icon.clone()),
+                _ => return,
+            };
+            let mut visual = MenuDragChrome {
+                id,
+                name,
+                valid,
+                icon,
+                pointer_x: lx,
+                pointer_y: ly,
+                grab_dx: lx - item.x,
+                grab_dy: ly - item.y,
+                from,
+                insert_at,
+                over_bowl,
+                row_w: item.w,
+                row_h: item.h,
+                ghost_img: None,
+                bowl_img: None,
+                bowl_over_img: None,
+                hint_ink: None,
+                hint_kicker: None,
+            };
+            let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+            prerender_drag_images(&mut visual, dpr);
+            self.list_drag_visual = Some(visual);
+        }
         self.menu_card_cache = None;
         self.texture_dirty = true;
     }
@@ -1768,10 +1967,12 @@ impl App {
         else {
             self.list_drag = ListDrag::Idle;
             self.list_drag_visual = None;
+            self.menu_drag_layers = None;
             return;
         };
         self.list_drag_visual = None;
         self.list_drag_edge_at = None;
+        self.menu_drag_layers = None;
         if over_bowl {
             self.shortcuts.remove(id);
             self.shortcut_icons.clear();
@@ -1809,6 +2010,7 @@ impl App {
         };
         self.list_drag = ListDrag::Idle;
         self.list_drag_visual = None;
+        self.menu_drag_layers = None;
         let Some(idx) = self.menu_press.take() else {
             return;
         };

@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.16**（2026-08-17：坞内长按拖动 + 喂猫删除） |
-| 依据 | `prd.md` v0.7.6 · `design.md` v0.19 |
+| 版本 | **v0.17**（2026-08-17：坞卡无外阴影 + 拖动分层合成） |
+| 依据 | `prd.md` v0.7.7 · `design.md` v0.20 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -252,12 +252,13 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + 固定「最近启用」框 +「应用列表」标题 + **视口内**快捷行；宠在 **pet_local** |
 | 列表数据 | `build_entries`：`rank_frequent` 最多 6 个 `Recent` + 全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限；常用条不计入 `list_total` |
 | 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll`（转场中 / 开合动画中禁用） |
-| 绘制 | 开合：`present_menu_cached` 对静帧卡层 scale+fade + 钉宠；落定后 `compose_menu_frame` live（hover/press） |
+| 绘制 | 开合：`present_menu_cached` 对静帧卡层 scale+fade + 钉宠（宠矩形**不**参与 scale）；落定后 `compose_menu_frame` live（hover/press） |
 | 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium）；开合不重跑 GDI |
 | 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **视觉** 0..1（ease-out 两端）；开 **180ms** / 关 **140ms** |
-| 视觉曲线 | `menu_visual_scale` 0.95→1 绕宠心；`menu_visual_fade` ×1.22 领先；无 stagger |
-| 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t, drag }`；`app` 每帧 `approach` 插值 |
+| 视觉曲线 | `menu_visual_scale` 0.95→1 绕宠心；`menu_visual_fade` ×1.22 领先；无 stagger；坞卡无外投影，顶高光 `fill_top_sheen` 裁进圆角 |
+| 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t, drag, drag_draft, rows_blank }`；`app` 每帧 `approach` 插值 |
 | 列表拖动 | `ui/list_drag.rs`：400ms 长按 + 8px slop → `Dragging`；插入下标按指针 y；空碗命中删条目 |
+| 拖动合成 | 按下即 `prerender_drag_images`（拎起行 / 碗 / 文案）+ `prerender_list_rows` + 空白卡层；`DragLayersKey` 只在 scroll/总数/hover/press/say 变时重建；每帧 `present_menu_drag` 只 blit 行到 `drag_slot_y` + 拎起行 + 碗 |
 | 肉垫印→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
 | 托盘→设置 | `enter_settings_ui`：居中直开，**无** `settings_transition` |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
@@ -477,3 +478,4 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.14** | **2026-08-14** | 提醒进场/回程 `reminder_hop`：攒劲零位移 + ease-in-out 抛物线；`pack_reminder_hop.py`；旅途不再播旧 `reminder_wave`；design **v0.16** · prd **v0.7.4** |
 | **v0.15** | **2026-08-17** | 启动坞「最近启用」：`launch_count` / `last_launched_at_ms` + `rank_frequent` + `MenuEntry::Recent`；卡高 **360×450**；design **v0.18** · prd **v0.7.5** |
 | **v0.16** | **2026-08-17** | 坞内长按拖动：`list_drag` + 空碗删除；设置去掉常用应用（420×320）；失效行文件框修复；design **v0.19** · prd **v0.7.6** |
+| **v0.17** | **2026-08-17** | 坞卡去掉外投影；宠自由剪影且不随卡 scale；拖动分层：长按预热 `ghost/bowl/hint` + 空白卡 + 行位图，插缝只 blit；design **v0.20** · prd **v0.7.7** |
