@@ -1,25 +1,43 @@
 //! Windows-specific platform helpers (tech §7.1, PLAT-01/02).
 
+use std::cell::RefCell;
+
 use tracing::{debug, info, warn};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DIB_RGB_COLORS, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetSystemMetrics, GetWindowLongW, SetClassLongPtrW,
-    SetWindowsHookExW, SetWindowLongW, SetWindowPos, UnhookWindowsHookEx, UpdateLayeredWindow,
-    GCLP_HBRBACKGROUND, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    ULW_ALPHA, WH_MOUSE_LL, WM_LBUTTONDOWN, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    SetWindowsHookExW, SetWindowLongW, SetWindowPos, SystemParametersInfoW, UnhookWindowsHookEx,
+    UpdateLayeredWindow, GCLP_HBRBACKGROUND, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WH_MOUSE_LL,
+    WM_LBUTTONDOWN, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{MonitorInfo, Rect};
 use crate::error::AppError;
+
+/// Windows stand-in for `prefers-reduced-motion`: client-area animation off.
+pub fn client_area_animation_enabled() -> bool {
+    unsafe {
+        let mut on: u32 = 1;
+        let ok = SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut on as *mut u32).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        ok.is_ok() && on != 0
+    }
+}
 
 /// Query the primary monitor work area via Win32.
 pub fn primary_work_area() -> Result<Rect, AppError> {
@@ -176,62 +194,31 @@ pub fn update_layered_rgba_ex(
     }
 
     let hwnd = hwnd_from_window(window)?;
-    unsafe {
-        // Screen DC (NULL hwnd) — required by UpdateLayeredWindow docs.
+    LAYERED_DIB.with(|cell| unsafe {
         let hdc_screen = GetDC(None);
         if hdc_screen.0.is_null() {
             return Err(AppError::Platform("GetDC(NULL) failed".into()));
         }
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-        if hdc_mem.0.is_null() {
-            ReleaseDC(None, hdc_screen);
-            return Err(AppError::Platform("CreateCompatibleDC failed".into()));
-        }
 
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                // negative = top-down DIB
-                biHeight: -(height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0 as u32,
-                biSizeImage: need as u32,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [Default::default(); 1],
-        };
-
-        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let hbmp = match CreateDIBSection(
-            Some(hdc_mem),
-            &bmi,
-            DIB_RGB_COLORS,
-            &mut bits,
-            None,
-            0,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                let _ = DeleteDC(hdc_mem);
-                ReleaseDC(None, hdc_screen);
-                return Err(AppError::Platform(format!("CreateDIBSection failed: {e}")));
+        let mut slot = cell.borrow_mut();
+        let reuse = slot
+            .as_ref()
+            .map(|s| s.width == width && s.height == height)
+            .unwrap_or(false);
+        if !reuse {
+            *slot = None;
+            match LayeredDib::create(hdc_screen, width, height, need) {
+                Ok(dib) => *slot = Some(dib),
+                Err(e) => {
+                    ReleaseDC(None, hdc_screen);
+                    return Err(e);
+                }
             }
-        };
-
-        if bits.is_null() {
-            let _ = DeleteObject(hbmp.into());
-            let _ = DeleteDC(hdc_mem);
-            ReleaseDC(None, hdc_screen);
-            return Err(AppError::Platform("CreateDIBSection null bits".into()));
         }
+        let dib = slot.as_mut().expect("layered DIB just created");
 
         // RGBA → premultiplied BGRA in the DIB (required for AC_SRC_ALPHA).
-        let dst = std::slice::from_raw_parts_mut(bits as *mut u8, need);
+        let dst = std::slice::from_raw_parts_mut(dib.bits, need);
         for i in 0..(width as usize * height as usize) {
             let o = i * 4;
             let r = rgba[o] as u32;
@@ -247,7 +234,6 @@ pub fn update_layered_rgba_ex(
             dst[o + 3] = a as u8;
         }
 
-        let old = SelectObject(hdc_mem, hbmp.into());
         let mut size = windows::Win32::Foundation::SIZE {
             cx: width as i32,
             cy: height as i32,
@@ -270,7 +256,6 @@ pub fn update_layered_rgba_ex(
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
         }
 
-        // pptDst: None keeps current screen position; Some moves atomically with size.
         let ok = UpdateLayeredWindow(
             hwnd,
             Some(hdc_screen),
@@ -280,23 +265,98 @@ pub fn update_layered_rgba_ex(
                 None
             },
             Some(&mut size),
-            Some(hdc_mem),
+            Some(dib.hdc_mem),
             Some(&mut pt_src),
             windows::Win32::Foundation::COLORREF(0),
             Some(&mut blend),
             ULW_ALPHA,
         );
 
-        let _ = SelectObject(hdc_mem, old);
-        let _ = DeleteObject(hbmp.into());
-        let _ = DeleteDC(hdc_mem);
         ReleaseDC(None, hdc_screen);
 
         if let Err(e) = ok {
             return Err(AppError::Platform(format!("UpdateLayeredWindow failed: {e}")));
         }
+        Ok(())
+    })
+}
+
+thread_local! {
+    static LAYERED_DIB: RefCell<Option<LayeredDib>> = const { RefCell::new(None) };
+}
+
+/// Reused memory DC + DIB so open/close frames don't Create/Delete every tick.
+struct LayeredDib {
+    hdc_mem: HDC,
+    hbmp: HBITMAP,
+    old: HGDIOBJ,
+    bits: *mut u8,
+    width: u32,
+    height: u32,
+}
+
+impl LayeredDib {
+    unsafe fn create(hdc_screen: HDC, width: u32, height: u32, need: usize) -> Result<Self, AppError> {
+        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+        if hdc_mem.0.is_null() {
+            return Err(AppError::Platform("CreateCompatibleDC failed".into()));
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                biSizeImage: need as u32,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [Default::default(); 1],
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hbmp = match CreateDIBSection(
+            Some(hdc_mem),
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            None,
+            0,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = DeleteDC(hdc_mem);
+                return Err(AppError::Platform(format!("CreateDIBSection failed: {e}")));
+            }
+        };
+        if bits.is_null() {
+            let _ = DeleteObject(hbmp.into());
+            let _ = DeleteDC(hdc_mem);
+            return Err(AppError::Platform("CreateDIBSection null bits".into()));
+        }
+        let old = SelectObject(hdc_mem, hbmp.into());
+        Ok(Self {
+            hdc_mem,
+            hbmp,
+            old,
+            bits: bits as *mut u8,
+            width,
+            height,
+        })
     }
-    Ok(())
+}
+
+impl Drop for LayeredDib {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SelectObject(self.hdc_mem, self.old);
+            let _ = DeleteObject(self.hbmp.into());
+            let _ = DeleteDC(self.hdc_mem);
+        }
+    }
 }
 
 /// Re-assert always-on-top without activating the window.

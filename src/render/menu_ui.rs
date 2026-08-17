@@ -1,27 +1,41 @@
-//! Appica-inspired quick-launch dock + manager UI (warm glass · pin-pet).
+//! Playful pin-pet dock: the cat presents a warm glass card (speech-tail).
 //!
 //! Drawn at **device pixel ratio** so text/edges stay sharp on HiDPI
 //! (no low-res compose → bilinear upscale blur). No system Acrylic.
 
-use crate::render::easing::{ease_out_cubic, ease_out_quint, lerp, stagger_t};
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use crate::render::easing::lerp;
+use crate::render::rgba::sample_rgba_bilinear;
 use crate::render::text::{center_in_rect, rasterize_text};
 use crate::shortcut::{scale_icon_rgba, IconRgba, IconShape};
-use crate::ui::radial_menu::{MenuEntry, RadialLayout};
+use crate::ui::radial_menu::{ExpandDir, MenuEntry, RadialLayout};
 
-// ── Palette (Appica-warm · design §2 · no system Acrylic) ─────────────────
-/// Near-white card ~92% alpha with warm tint.
-const CARD: [u8; 4] = [0xFF, 0xFB, 0xFA, 0xEB];
-/// Soft muted surfaces (rows / chips).
-const GROUPED_BG: [u8; 4] = [0xF4, 0xF2, 0xF0, 0xD0];
-const GROUPED_HOVER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xE8];
-const GROUPED_PRESS: [u8; 4] = [0xEE, 0xE8, 0xF0, 0xF0];
+// ── Palette (playful warm glass · design §2 tokens) ───────────────────────
+/// Cream card, a touch rosier than the old near-white.
+const CARD: [u8; 4] = [0xFF, 0xF8, 0xF4, 0xF0];
+/// Soft muted surfaces (rows / chips) — pink wash.
+const GROUPED_BG: [u8; 4] = [0xFF, 0xEC, 0xF2, 0x8C];
+const GROUPED_HOVER: [u8; 4] = [0xFF, 0xD6, 0xE2, 0xB8];
+const GROUPED_PRESS: [u8; 4] = [0xF6, 0xD0, 0xDC, 0xD0];
 const INVALID_BG: [u8; 4] = [0xFF, 0xB0, 0x20, 0x30];
 const INVALID_BG_HOVER: [u8; 4] = [0xFF, 0xB0, 0x20, 0x48];
 const HIGHLIGHT_ROW: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x38];
 const SEPARATOR: [u8; 4] = [0xE2, 0xE0, 0xDE, 0x90];
-const BORDER: [u8; 4] = [0x1E, 0x1B, 0x2E, 0x18];
-const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x70];
+const BORDER: [u8; 4] = [0xFF, 0x9E, 0xC4, 0x48];
+const HAIRLINE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x80];
 const INNER_HL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x55];
+const PAW_INK: [u8; 4] = [0x9A, 0x40, 0x68, 0xFF];
+const PAW_KICKER: [u8; 4] = [0xFF, 0x7A, 0xAF, 0xFF];
+const TITLE: &str = "给你叼来了";
+const SUBTITLE: &str = "想开哪个？";
+const ADD_LABEL: &str = "再叼一个";
+const CLOSE_HINT: &str = "拍拍收起";
+const EMPTY_TITLE: &str = "还没叼来应用";
+const EMPTY_HINT: &str = "点「再叼一个」选 exe / 快捷方式";
+pub const SAY_LAUNCH: &str = "收到，马上打开～";
+pub const SAY_FAIL: &str = "这个应用好像搬家了…";
 /// text.intense
 const LABEL: [u8; 4] = [0x0F, 0x17, 0x2B, 0xFF];
 const SECONDARY: [u8; 4] = [0x47, 0x55, 0x69, 0xC8];
@@ -54,6 +68,27 @@ pub struct MenuChromeState {
     pub hover_t: f32,
     /// Animated intensity while press is held.
     pub press_t: f32,
+    /// Closing path (settings handoff still tags this).
+    pub closing: bool,
+    /// Optional speech from the cat (launch / fail).
+    pub say: Option<&'static str>,
+    /// Windows client-area animation off → fade only, no scale.
+    pub reduced_motion: bool,
+}
+
+/// Popover grow start. Never `0` — nothing appears from nothing.
+pub const MENU_GROW_FROM: f32 = 0.95;
+/// Fade runs slightly ahead of scale (material before silhouette).
+const MENU_FADE_LEAD: f32 = 1.22;
+
+/// Card scale for visual open amount `t` (already ease-out from the clock).
+pub fn menu_visual_scale(t: f32) -> f32 {
+    MENU_GROW_FROM + (1.0 - MENU_GROW_FROM) * t.clamp(0.0, 1.0)
+}
+
+/// Card fade for visual open amount `t`. Leads scale so glass reads first.
+pub fn menu_visual_fade(t: f32) -> f32 {
+    (t.clamp(0.0, 1.0) * MENU_FADE_LEAD).min(1.0)
 }
 
 /// Device-pixel scale helper. Layout is logical; drawing is physical.
@@ -102,28 +137,149 @@ pub fn compose_menu_frame(
     let h = dpi.su(layout.window_h);
     let mut out = vec![0u8; (w * h * 4) as usize];
 
-    // ── Silk motion (card only; pet stays pinned at full opacity) ──────────
-    // open_t is a **linear** 0..1 clock from pet::tick_menu_anim.
-    // Scale/fade curves are continuous for any path of t (open or close).
-    let t_clock = layout.open_t.clamp(0.0, 1.0);
-    let t_scale = ease_out_quint(t_clock);
-    // Fade leads scale slightly so glass materializes before full size.
-    let t_fade = ease_out_cubic((t_clock * 1.22).min(1.0));
-    // Shadow softens in with a longer tail (no harsh blob on first frames).
-    let t_shadow = (t_fade * t_fade).clamp(0.0, 1.0);
+    // `open_t` is already ease-out visual 0..1 (pet::tick_menu_anim).
+    let t_vis = layout.open_t.clamp(0.0, 1.0);
+    let t_fade = menu_visual_fade(t_vis);
+    let scale = if chrome.reduced_motion {
+        1.0
+    } else {
+        menu_visual_scale(t_vis)
+    };
+    let layout_scaled;
+    let layout = if (scale - 1.0).abs() < 0.001 {
+        layout
+    } else {
+        let pivot_x = layout.pet_x + layout.pet_w * 0.5;
+        let pivot_y = layout.pet_y + layout.pet_h * 0.5;
+        layout_scaled = scale_layout_from_pivot(layout, pivot_x, pivot_y, scale);
+        &layout_scaled
+    };
 
-    // Grow from pet center — gentle start scale (0.90→1), no overshoot, no extra y.
-    let scale = 0.90 + 0.10 * t_scale;
-    let pivot_x = layout.pet_x + layout.pet_w * 0.5;
-    let pivot_y = layout.pet_y + layout.pet_h * 0.5;
-    let layout = scale_layout_from_pivot(layout, pivot_x, pivot_y, scale);
+    paint_menu_card(&mut out, w, h, dpi, layout, chrome, t_fade);
+
+    // Pet always full opacity. Plate / close hint fades with the card so the
+    // silhouette does not flash into a glass tray on frame 0.
+    draw_avatar(
+        &mut out,
+        w,
+        h,
+        dpi,
+        layout.pet_x,
+        layout.pet_y,
+        layout.pet_w,
+        layout.pet_h,
+        pet_rgba,
+        pet_w,
+        pet_h,
+        t_fade,
+    );
+    if let Some(line) = chrome.say {
+        draw_say_bubble(&mut out, w, h, dpi, layout, line, t_fade.max(0.85));
+    }
+
+    (w, h, out)
+}
+
+/// Rest-state card layer (no pet). Used as the open/close bitmap cache.
+pub fn compose_menu_card_layer(
+    layout: &RadialLayout,
+    dpr: f32,
+    chrome: MenuChromeState,
+) -> (u32, u32, Vec<u8>) {
+    let dpi = Dpi::new(dpr);
+    let w = dpi.su(layout.window_w);
+    let h = dpi.su(layout.window_h);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    paint_menu_card(&mut out, w, h, dpi, layout, chrome, 1.0);
+    (w, h, out)
+}
+
+/// Pet silhouette only — first present after resize, before the card cache exists.
+pub fn compose_menu_pet_only(
+    pet_rgba: &[u8],
+    pet_w: u32,
+    pet_h: u32,
+    layout: &RadialLayout,
+    dpr: f32,
+) -> (u32, u32, Vec<u8>) {
+    let dpi = Dpi::new(dpr);
+    let w = dpi.su(layout.window_w);
+    let h = dpi.su(layout.window_h);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    draw_avatar(
+        &mut out,
+        w,
+        h,
+        dpi,
+        layout.pet_x,
+        layout.pet_y,
+        layout.pet_w,
+        layout.pet_h,
+        pet_rgba,
+        pet_w,
+        pet_h,
+        0.0,
+    );
+    (w, h, out)
+}
+
+/// Cheap anim frame: scale+fade a rest card around the pet, then blit the pet.
+pub fn present_menu_cached(
+    dest: &mut [u8],
+    dw: u32,
+    dh: u32,
+    card: &[u8],
+    cw: u32,
+    ch: u32,
+    pet_rgba: &[u8],
+    pet_src_w: u32,
+    pet_src_h: u32,
+    layout: &RadialLayout,
+    dpr: f32,
+    scale: f32,
+    fade: f32,
+) {
+    dest.fill(0);
+    if dw == 0 || dh == 0 || dest.len() < (dw * dh * 4) as usize {
+        return;
+    }
+    let dpi = Dpi::new(dpr);
+    if fade > 0.01 {
+        blit_card_scaled_around_pet(dest, dw, dh, card, cw, ch, layout, dpi, scale, fade);
+    }
+    draw_avatar(
+        dest,
+        dw,
+        dh,
+        dpi,
+        layout.pet_x,
+        layout.pet_y,
+        layout.pet_w,
+        layout.pet_h,
+        pet_rgba,
+        pet_src_w,
+        pet_src_h,
+        fade,
+    );
+}
+
+fn paint_menu_card(
+    mut out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    layout: &RadialLayout,
+    chrome: MenuChromeState,
+    t_fade: f32,
+) {
+    let t_shadow = (t_fade * t_fade).clamp(0.0, 1.0);
 
     // Elevated glass card (rest of union window stays transparent for pin-pet).
     let cx0 = dpi.s(layout.card_x);
     let cy0 = dpi.s(layout.card_y);
     let cx1 = dpi.s(layout.card_x + layout.card_w);
     let cy1 = dpi.s(layout.card_y + layout.card_h);
-    let crad = dpi.s(18.0);
+    let crad = dpi.s(22.0);
 
     if t_fade > 0.01 {
         fill_rrect_aa(
@@ -206,6 +362,7 @@ pub fn compose_menu_frame(
             with_alpha(HAIRLINE, t_fade),
             1.0,
         );
+        draw_card_tail(&mut out, w, h, dpi, &layout, t_fade);
     }
 
     let content_x = dpi.s(content_x_from(&layout));
@@ -227,7 +384,7 @@ pub fn compose_menu_frame(
             &mut out,
             w,
             h,
-            "快捷启动",
+            TITLE,
             content_x,
             dpi.s(layout.card_y + 15.0),
             title_max,
@@ -238,41 +395,23 @@ pub fn compose_menu_frame(
             &mut out,
             w,
             h,
-            "打开常用应用",
+            SUBTITLE,
             content_x,
             dpi.s(layout.card_y + 36.0),
             title_max,
             dpi.px(12.5),
-            with_alpha(SECONDARY, title_a),
+            with_alpha(PAW_KICKER, title_a),
         );
     }
 
-    // Pet always full opacity. Plate / "轻点关闭" fades in with the card so the
-    // silhouette does not flash into a glass tray on frame 0.
-    draw_avatar(
-        &mut out,
-        w,
-        h,
-        dpi,
-        layout.pet_x,
-        layout.pet_y,
-        layout.pet_w,
-        layout.pet_h,
-        pet_rgba,
-        pet_w,
-        pet_h,
-        t_fade,
-    );
-
-    // Controls cascade after card materializes (~12% delay), soft dy.
-    let content_clock = ((t_clock - 0.10) / 0.90).clamp(0.0, 1.0);
+    // Tens/day: items fade with the card. No stagger, no extra y.
     let mut saw_shortcut = false;
     for (i, item) in layout.items.iter().enumerate() {
-        let reveal = stagger_t(content_clock, i, 0.028, 0.78) * t_fade;
+        let reveal = t_fade;
         if reveal <= 0.01 {
             continue;
         }
-        let item_dy = (1.0 - stagger_t(content_clock, i, 0.028, 0.78)) * dpi.s(5.0);
+        let item_dy = 0.0;
         let hover_w = if chrome.hover == Some(i) {
             chrome.hover_t.clamp(0.0, 1.0)
         } else {
@@ -295,11 +434,14 @@ pub fn compose_menu_frame(
         bh *= pscale;
         x = cx - bw * 0.5;
         y = cy - bh * 0.5;
-        let radius = dpi.s(11.0);
+        let radius = match &item.entry {
+            MenuEntry::Shortcut { .. } => dpi.s(14.0),
+            _ => dpi.s(11.0),
+        };
 
         match &item.entry {
             MenuEntry::AddShortcut => {
-                draw_primary_btn(
+                draw_fetch_btn(
                     &mut out,
                     w,
                     h,
@@ -308,15 +450,13 @@ pub fn compose_menu_frame(
                     y,
                     bw,
                     bh,
-                    radius,
-                    "添加应用",
                     hover_w,
                     press_w,
                     reveal,
                 );
             }
             MenuEntry::Manage => {
-                draw_gear_btn(
+                draw_settings_btn(
                     &mut out,
                     w,
                     h,
@@ -362,7 +502,7 @@ pub fn compose_menu_frame(
             content_w,
             &layout,
             dpi,
-            t_fade * ease_out_cubic(content_clock),
+            t_fade,
         );
     }
 
@@ -397,10 +537,83 @@ pub fn compose_menu_frame(
             with_alpha(TERTIARY, t_fade * 0.95),
         );
     }
+}
 
-    // No global alpha — pet stays solid; card/controls already use per-layer fade.
+fn blit_card_scaled_around_pet(
+    dest: &mut [u8],
+    dw: u32,
+    dh: u32,
+    card: &[u8],
+    cw: u32,
+    ch: u32,
+    layout: &RadialLayout,
+    dpi: Dpi,
+    scale: f32,
+    fade: f32,
+) {
+    if cw == 0 || ch == 0 || card.len() < (cw * ch * 4) as usize {
+        return;
+    }
+    let scale = scale.clamp(0.5, 1.5);
+    let fade = fade.clamp(0.0, 1.0);
+    let pivot_x = dpi.s(layout.pet_x + layout.pet_w * 0.5);
+    let pivot_y = dpi.s(layout.pet_y + layout.pet_h * 0.5);
+    let pad = dpi.s(16.0);
+    let sx0 = dpi.s(layout.card_x) - pad;
+    let sy0 = dpi.s(layout.card_y) - pad;
+    let sx1 = dpi.s(layout.card_x + layout.card_w) + pad;
+    let sy1 = dpi.s(layout.card_y + layout.card_h) + pad;
 
-    (w, h, out)
+    let map = |x: f32, y: f32| (pivot_x + (x - pivot_x) * scale, pivot_y + (y - pivot_y) * scale);
+    let corners = [
+        map(sx0, sy0),
+        map(sx1, sy0),
+        map(sx0, sy1),
+        map(sx1, sy1),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|c| c.0.floor() as i32)
+        .min()
+        .unwrap_or(0)
+        .max(0);
+    let min_y = corners
+        .iter()
+        .map(|c| c.1.floor() as i32)
+        .min()
+        .unwrap_or(0)
+        .max(0);
+    let max_x = corners
+        .iter()
+        .map(|c| c.0.ceil() as i32)
+        .max()
+        .unwrap_or(0)
+        .min(dw as i32);
+    let max_y = corners
+        .iter()
+        .map(|c| c.1.ceil() as i32)
+        .max()
+        .unwrap_or(0)
+        .min(dh as i32);
+    if max_x <= min_x || max_y <= min_y {
+        return;
+    }
+    let inv = 1.0 / scale as f64;
+    let px = pivot_x as f64;
+    let py = pivot_y as f64;
+    for dy in min_y..max_y {
+        for dx in min_x..max_x {
+            let sx = px + (dx as f64 + 0.5 - px) * inv;
+            let sy = py + (dy as f64 + 0.5 - py) * inv;
+            let mut c = sample_rgba_bilinear(card, cw, ch, sx, sy);
+            if fade < 1.0 {
+                c[3] = (c[3] as f32 * fade).round() as u8;
+            }
+            if c[3] > 0 {
+                put(dest, dw, dx, dy, c);
+            }
+        }
+    }
 }
 
 fn with_alpha(c: [u8; 4], a: f32) -> [u8; 4] {
@@ -419,6 +632,233 @@ fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     ]
 }
 
+fn draw_fetch_btn(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    x: f32,
+    y: f32,
+    bw: f32,
+    bh: f32,
+    hover_w: f32,
+    press_w: f32,
+    reveal: f32,
+) {
+    let radius = bh * 0.5;
+    let fill = lerp_rgba(
+        lerp_rgba([0xFF, 0xFF, 0xFF, 0x8C], WHITE, hover_w),
+        [0xFF, 0xEC, 0xF2, 0xE0],
+        press_w,
+    );
+    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, radius, with_alpha(fill, reveal));
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        x + 0.5,
+        y + 0.5,
+        x + bw - 0.5,
+        y + bh - 0.5,
+        radius,
+        with_alpha(ACCENT_PINK, reveal * 0.85),
+        1.4,
+    );
+    blit_text_centered(
+        out,
+        w,
+        h,
+        ADD_LABEL,
+        x,
+        y,
+        bw,
+        bh,
+        dpi.px(14.0),
+        with_alpha(PAW_INK, reveal),
+        dpi,
+    );
+}
+
+fn attach_side(layout: &RadialLayout) -> ExpandDir {
+    let pcx = layout.pet_x + layout.pet_w * 0.5;
+    let pcy = layout.pet_y + layout.pet_h * 0.5;
+    let ccx = layout.card_x + layout.card_w * 0.5;
+    let ccy = layout.card_y + layout.card_h * 0.5;
+    let dx = ccx - pcx;
+    let dy = ccy - pcy;
+    if dx.abs() >= dy.abs() {
+        if dx >= 0.0 {
+            ExpandDir::Right
+        } else {
+            ExpandDir::Left
+        }
+    } else if dy >= 0.0 {
+        ExpandDir::Down
+    } else {
+        ExpandDir::Up
+    }
+}
+
+fn draw_card_tail(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    layout: &RadialLayout,
+    fade: f32,
+) {
+    let fade = fade.clamp(0.0, 1.0);
+    if fade < 0.02 {
+        return;
+    }
+    let cream = with_alpha(CARD, fade);
+    let edge = with_alpha(BORDER, fade);
+    let len = dpi.s(14.0);
+    let half = dpi.s(9.0);
+    let (ax, ay, bx, by, tip_x, tip_y) = match attach_side(layout) {
+        ExpandDir::Right => {
+            let x = dpi.s(layout.card_x) + 1.0;
+            let y = dpi.s(layout.card_y + layout.card_h * 0.62);
+            (x, y - half, x, y + half, x - len, y + dpi.s(2.0))
+        }
+        ExpandDir::Left => {
+            let x = dpi.s(layout.card_x + layout.card_w) - 1.0;
+            let y = dpi.s(layout.card_y + layout.card_h * 0.62);
+            (x, y - half, x, y + half, x + len, y + dpi.s(2.0))
+        }
+        ExpandDir::Down => {
+            let x = dpi.s(layout.card_x + layout.card_w * 0.5);
+            let y = dpi.s(layout.card_y) + 1.0;
+            (x - half, y, x + half, y, x + dpi.s(2.0), y - len)
+        }
+        ExpandDir::Up => {
+            let x = dpi.s(layout.card_x + layout.card_w * 0.5);
+            let y = dpi.s(layout.card_y + layout.card_h) - 1.0;
+            (x - half, y, x + half, y, x + dpi.s(2.0), y + len)
+        }
+    };
+    fill_triangle(out, w, h, ax, ay, bx, by, tip_x, tip_y, cream);
+    // Soft pink bloom at the tail root — the card “grows out of” the cat.
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        ((ax + bx) * 0.5) as i32,
+        ((ay + by) * 0.5) as i32,
+        dpi.s(10.0) as i32,
+        0.85,
+        with_alpha(ACCENT_PINK, fade * 0.22),
+        with_alpha(ACCENT_PINK, 0.0),
+    );
+    let _ = edge;
+}
+
+fn draw_say_bubble(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    dpi: Dpi,
+    layout: &RadialLayout,
+    line: &str,
+    fade: f32,
+) {
+    let fade = fade.clamp(0.0, 1.0);
+    if fade < 0.05 {
+        return;
+    }
+    let max_w = dpi.su(168);
+    let Some((tw, th, tbuf)) =
+        rasterize_text(line, max_w, dpi.px(12.0), with_alpha(PAW_INK, fade))
+    else {
+        return;
+    };
+    let pad_x = dpi.s(10.0);
+    let pad_y = dpi.s(6.0);
+    let bw = tw as f32 + pad_x * 2.0;
+    let bh = th as f32 + pad_y * 2.0;
+    let toward_card = if layout.card_x + layout.card_w * 0.5 >= layout.pet_x + layout.pet_w * 0.5 {
+        1.0
+    } else {
+        -1.0
+    };
+    let x = if toward_card > 0.0 {
+        dpi.s(layout.pet_x + layout.pet_w * 0.55)
+    } else {
+        dpi.s(layout.pet_x + layout.pet_w * 0.45) - bw
+    };
+    let y = dpi.s(layout.pet_y + 4.0);
+    let x = x.clamp(dpi.s(2.0), (w as f32 - bw - 2.0).max(0.0));
+    let y = y.clamp(dpi.s(2.0), (h as f32 - bh - 2.0).max(0.0));
+    fill_rrect_aa(
+        out,
+        w,
+        h,
+        x + dpi.s(1.5),
+        y + dpi.s(2.0),
+        x + bw + dpi.s(1.5),
+        y + bh + dpi.s(2.0),
+        dpi.s(10.0),
+        with_alpha(SHADOW_B, fade),
+    );
+    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, dpi.s(10.0), with_alpha(WHITE, fade));
+    stroke_rrect_aa(
+        out,
+        w,
+        h,
+        x + 0.5,
+        y + 0.5,
+        x + bw - 0.5,
+        y + bh - 0.5,
+        dpi.s(10.0),
+        with_alpha(ACCENT_PINK, fade * 0.55),
+        1.0,
+    );
+    blit(out, w, h, &tbuf, tw, th, (x + pad_x) as u32, (y + pad_y) as u32);
+}
+
+fn fill_triangle(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32,
+    color: [u8; 4],
+) {
+    let area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if area.abs() < 0.01 {
+        return;
+    }
+    let min_x = ax.min(bx).min(cx).floor().max(0.0) as i32;
+    let min_y = ay.min(by).min(cy).floor().max(0.0) as i32;
+    let max_x = ax.max(bx).max(cx).ceil().min(w as f32) as i32;
+    let max_y = ay.max(by).max(cy).ceil().min(h as f32) as i32;
+    for py in min_y..max_y {
+        for px in min_x..max_x {
+            let x = px as f32 + 0.5;
+            let y = py as f32 + 0.5;
+            let w0 = ((bx - x) * (cy - y) - (cx - x) * (by - y)) / area;
+            let w1 = ((cx - x) * (ay - y) - (ax - x) * (cy - y)) / area;
+            let w2 = 1.0 - w0 - w1;
+            if w0 >= -0.03 && w1 >= -0.03 && w2 >= -0.03 {
+                let edge = w0.min(w1).min(w2);
+                let a = (edge * 10.0 + 0.55).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    let mut c = color;
+                    c[3] = ((color[3] as f32) * a) as u8;
+                    if c[3] > 0 {
+                        put(out, w, px, py, c);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn draw_primary_btn(
     out: &mut [u8],
     w: u32,
@@ -470,7 +910,7 @@ fn draw_primary_btn(
     );
 }
 
-fn draw_gear_btn(
+fn draw_settings_btn(
     out: &mut [u8],
     w: u32,
     h: u32,
@@ -483,92 +923,228 @@ fn draw_gear_btn(
     press_w: f32,
     reveal: f32,
 ) {
-    let _ = dpi;
-    let r = bw.min(bh) * 0.5;
-    let plate = with_alpha(
-        lerp_rgba(
-            lerp_rgba(FILL_OPAQUE, FILL_HOVER, hover_w),
-            GROUPED_PRESS,
-            press_w,
-        ),
-        reveal,
-    );
-    fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, r, plate);
-    stroke_rrect_aa(
-        out,
-        w,
-        h,
-        x + 0.5,
-        y + 0.5,
-        x + bw - 0.5,
-        y + bh - 0.5,
-        r,
-        with_alpha(SOFT_BORDER, reveal * (0.50 + 0.35 * hover_w)),
-        1.0,
-    );
-
+    let _ = (dpi, press_w);
     let cx = x + bw * 0.5;
     let cy = y + bh * 0.5;
     let s = bw.min(bh);
-    let ink = with_alpha(LABEL, reveal * (0.82 + 0.18 * hover_w));
-    // Fill most of the plate so the cog reads as a settings control at 32px.
-    draw_settings_cog(out, w, h, cx, cy, s * 0.40, ink);
+    if hover_w > 0.02 {
+        let blush = with_alpha([0xFF, 0xF4, 0xEE, 0xFF], reveal * hover_w * 0.55);
+        fill_soft_disc(
+            out,
+            w,
+            h,
+            cx.round() as i32,
+            cy.round() as i32,
+            (s * 0.52).round() as i32,
+            2.4,
+            blush,
+            with_alpha(blush, 0.0),
+        );
+    }
+    if blit_settings_paw_asset(out, w, h, cx, cy, s, reveal) {
+        return;
+    }
+    draw_paw_badge(out, w, h, cx, cy, s, reveal, hover_w);
 }
 
-/// Six-tooth settings cog: round body, square teeth, round hole.
-/// Oriented-box teeth stay readable at toolbar size (unlike a soft polar blob).
-fn draw_settings_cog(out: &mut [u8], w: u32, h: u32, cx: f32, cy: f32, radius: f32, ink: [u8; 4]) {
-    let ring_outer = radius * 0.70;
-    let hole = radius * 0.30;
-    let tooth_out = radius * 0.92;
-    let tooth_half_w = radius * 0.19;
-    let tooth_overlap = radius * 0.12;
-    let aa = 0.55_f32;
+fn settings_paw_asset() -> Option<&'static (u32, u32, Vec<u8>)> {
+    static CELL: OnceLock<Option<(u32, u32, Vec<u8>)>> = OnceLock::new();
+    CELL.get_or_init(load_settings_paw).as_ref()
+}
 
-    let r_max = radius + aa + 1.0;
-    let min_x = (cx - r_max).floor().max(0.0) as i32;
-    let min_y = (cy - r_max).floor().max(0.0) as i32;
-    let max_x = (cx + r_max).ceil().min(w as f32) as i32;
-    let max_y = (cy + r_max).ceil().min(h as f32) as i32;
+fn load_settings_paw() -> Option<(u32, u32, Vec<u8>)> {
+    for dir in settings_paw_dirs() {
+        let path = dir.join("ui").join("settings_paw.png");
+        let Ok(img) = image::open(&path) else {
+            continue;
+        };
+        let rgba = img.to_rgba8();
+        let (iw, ih) = rgba.dimensions();
+        if iw == 0 || ih == 0 {
+            continue;
+        }
+        return Some((iw, ih, rgba.into_raw()));
+    }
+    None
+}
 
-    for py in min_y..max_y {
-        for px in min_x..max_x {
-            let dx = px as f32 + 0.5 - cx;
-            let dy = py as f32 + 0.5 - cy;
-            let d = (dx * dx + dy * dy).sqrt();
-            let mut sd_teeth = f32::MAX;
-            for i in 0..6 {
-                // One tooth at 12 o'clock, then every 60°.
-                let a = -std::f32::consts::FRAC_PI_2 + i as f32 * (std::f32::consts::PI / 3.0);
-                let (sa, ca) = (a.sin(), a.cos());
-                let lx = dx * ca + dy * sa;
-                let ly = -dx * sa + dy * ca;
-                let mid = (ring_outer + tooth_out) * 0.5;
-                let hx = (tooth_out - ring_outer) * 0.5 + tooth_overlap;
-                sd_teeth = sd_teeth.min(sd_box(lx - mid, ly, hx, tooth_half_w));
-            }
-            let sd_body = d - ring_outer;
-            let sd_outer = sd_body.min(sd_teeth);
-            let sd = sd_outer.max(hole - d);
-            let cov = (aa - sd).clamp(0.0, 1.0);
-            if cov <= 0.0 {
-                continue;
-            }
-            let mut col = ink;
-            col[3] = ((ink[3] as f32) * cov) as u8;
-            if col[3] > 0 {
-                put(out, w, px, py, col);
-            }
+fn settings_paw_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("assets"));
         }
     }
+    dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"));
+    dirs.push(PathBuf::from("assets"));
+    dirs
 }
 
-fn sd_box(px: f32, py: f32, hx: f32, hy: f32) -> f32 {
-    let dx = px.abs() - hx;
-    let dy = py.abs() - hy;
-    let ax = dx.max(0.0);
-    let ay = dy.max(0.0);
-    (ax * ax + ay * ay).sqrt() + dx.min(0.0).max(dy.min(0.0))
+fn blit_settings_paw_asset(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    reveal: f32,
+) -> bool {
+    let Some((sw, sh, src)) = settings_paw_asset() else {
+        return false;
+    };
+    let dest = s.round().max(12.0) as u32;
+    let (dw, dh, mut scaled) = scale_rgba_fit(src, *sw, *sh, dest, dest);
+    let fade = reveal.clamp(0.0, 1.0);
+    if fade < 0.999 {
+        for px in scaled.chunks_exact_mut(4) {
+            px[3] = (px[3] as f32 * fade).round() as u8;
+        }
+    }
+    let dx = (cx - dw as f32 * 0.5).round() as u32;
+    let dy = (cy - dh as f32 * 0.5).round() as u32;
+    blit(out, w, h, &scaled, dw, dh, dx, dy);
+    true
+}
+
+/// Fallback if the reference PNG is missing: cream plate + 4 toes + heart pad.
+fn draw_paw_badge(
+    out: &mut [u8],
+    w: u32,
+    h: u32,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    reveal: f32,
+    hover_w: f32,
+) {
+    let plate = with_alpha([0xF6, 0xF0, 0xEA, 0xFF], reveal);
+    let plate_hi = with_alpha([0xFF, 0xFB, 0xF7, 0xFF], reveal);
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        cx.round() as i32,
+        cy.round() as i32,
+        (s * 0.48).round() as i32,
+        1.6,
+        plate_hi,
+        plate,
+    );
+
+    let fur = with_alpha([0xFF, 0xF8, 0xF4, 0xFF], reveal);
+    // Palm
+    fill_soft_ellipse(
+        out,
+        w,
+        h,
+        cx.round() as i32,
+        (cy + 0.06 * s).round() as i32,
+        (0.28 * s).round().max(4.0) as i32,
+        (0.24 * s).round().max(3.0) as i32,
+        fur,
+    );
+    // Four white toe lobes
+    let lobes = [
+        (cx - 0.20 * s, cy - 0.10 * s, 0.12 * s),
+        (cx - 0.08 * s, cy - 0.20 * s, 0.125 * s),
+        (cx + 0.08 * s, cy - 0.20 * s, 0.125 * s),
+        (cx + 0.20 * s, cy - 0.10 * s, 0.12 * s),
+    ];
+    for (lx, ly, r) in lobes {
+        fill_soft_disc(
+            out,
+            w,
+            h,
+            lx.round() as i32,
+            ly.round() as i32,
+            r.round().max(3.0) as i32,
+            1.2,
+            fur,
+            fur,
+        );
+    }
+
+    let pink = with_alpha(
+        lerp_rgba([0xFF, 0xB3, 0xC2, 0xFF], [0xFF, 0x9A, 0xB4, 0xFF], hover_w),
+        reveal,
+    );
+    let toes = [
+        (cx - 0.18 * s, cy - 0.08 * s, 0.070 * s, 0.088 * s),
+        (cx - 0.07 * s, cy - 0.18 * s, 0.072 * s, 0.095 * s),
+        (cx + 0.07 * s, cy - 0.18 * s, 0.072 * s, 0.095 * s),
+        (cx + 0.18 * s, cy - 0.08 * s, 0.070 * s, 0.088 * s),
+    ];
+    for (tx, ty, rx, ry) in toes {
+        fill_soft_ellipse(
+            out,
+            w,
+            h,
+            tx.round() as i32,
+            ty.round() as i32,
+            rx.round().max(2.0) as i32,
+            ry.round().max(2.0) as i32,
+            pink,
+        );
+        let shine = with_alpha(WHITE, reveal * 0.55);
+        fill_soft_disc(
+            out,
+            w,
+            h,
+            (tx - rx * 0.25).round() as i32,
+            (ty - ry * 0.28).round() as i32,
+            (rx * 0.35).round().max(1.0) as i32,
+            0.8,
+            shine,
+            with_alpha(shine, 0.0),
+        );
+    }
+
+    // Heart-shaped main pad
+    fill_soft_ellipse(
+        out,
+        w,
+        h,
+        cx.round() as i32,
+        (cy + 0.10 * s).round() as i32,
+        (0.16 * s).round().max(3.0) as i32,
+        (0.14 * s).round().max(3.0) as i32,
+        pink,
+    );
+    let lobe = (0.10 * s).round().max(2.0) as i32;
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        (cx - 0.06 * s).round() as i32,
+        (cy + 0.04 * s).round() as i32,
+        lobe,
+        1.0,
+        pink,
+        pink,
+    );
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        (cx + 0.06 * s).round() as i32,
+        (cy + 0.04 * s).round() as i32,
+        lobe,
+        1.0,
+        pink,
+        pink,
+    );
+    let shine = with_alpha(WHITE, reveal * 0.50);
+    fill_soft_disc(
+        out,
+        w,
+        h,
+        (cx - 0.05 * s).round() as i32,
+        (cy + 0.02 * s).round() as i32,
+        (0.055 * s).round().max(1.0) as i32,
+        1.0,
+        shine,
+        with_alpha(shine, 0.0),
+    );
 }
 
 fn draw_list_row(
@@ -762,7 +1338,7 @@ fn draw_list_row(
         (x + bw - dpi.s(16.0)) as i32,
         (y + bh * 0.5) as i32,
         dpi,
-        with_alpha(TERTIARY, reveal),
+        with_alpha(if valid { PAW_KICKER } else { TERTIARY }, reveal),
     );
 }
 
@@ -949,13 +1525,13 @@ fn draw_empty_state(
     );
 
     if let Some((tw, th, tbuf)) =
-        rasterize_text("还没有常用应用", dpi.su(220), dpi.px(14.0), with_alpha(LABEL, reveal))
+        rasterize_text(EMPTY_TITLE, dpi.su(220), dpi.px(14.0), with_alpha(LABEL, reveal))
     {
         let tx = (content_x + (content_w - tw as f32) * 0.5).round().max(0.0) as u32;
         blit(out, w, h, &tbuf, tw, th, tx, (ey + dpi.s(44.0)) as u32);
     }
     if let Some((tw, th, tbuf)) = rasterize_text(
-        "点「添加应用」选 exe / 快捷方式",
+        EMPTY_HINT,
         dpi.su(300),
         dpi.px(12.5),
         with_alpha(SECONDARY, reveal),
@@ -1078,7 +1654,7 @@ fn draw_avatar(
 
     if plate_a > 0.05 {
         if let Some((tw, th, t)) =
-            rasterize_text("轻点关闭", dpi.su(110), dpi.px(11.0), with_alpha(TERTIARY, plate_a))
+            rasterize_text(CLOSE_HINT, dpi.su(110), dpi.px(11.0), with_alpha(PAW_INK, plate_a * 0.85))
         {
             let tx = (px + (pw - tw as f32) * 0.5).round() as u32;
             let ty = (py + ph - dpi.s(18.0) - th as f32 * 0.5).round() as u32;
@@ -1648,6 +2224,505 @@ pub fn compose_settings_frame(
     (w, h, out)
 }
 
+/// Compact settings laid out for the launcher card (same size as the dock).
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsCardMetrics {
+    pub w: f32,
+    pub h: f32,
+    pub reminder_y: f32,
+    pub enable_y0: f32,
+    pub enable_y1: f32,
+    pub interval_dec: (f32, f32, f32, f32),
+    pub interval_inc: (f32, f32, f32, f32),
+    pub pause: (f32, f32, f32, f32),
+    pub pet_dec: (f32, f32, f32, f32),
+    pub pet_inc: (f32, f32, f32, f32),
+    pub list_top: f32,
+    pub list_bottom: f32,
+    pub row_h: f32,
+    pub add: (f32, f32, f32, f32),
+}
+
+pub fn settings_card_metrics(card_w: f32, card_h: f32) -> SettingsCardMetrics {
+    let w = card_w.max(200.0);
+    let h = card_h.max(240.0);
+    let reminder_y = 46.0;
+    let reminder_h = 86.0;
+    let pet_y = reminder_y + reminder_h + 6.0;
+    let pet_h = 42.0;
+    let list_top = pet_y + pet_h + 22.0;
+    let add_h = 34.0;
+    let add_y = h - 12.0 - add_h;
+    let list_bottom = (add_y - 8.0).max(list_top + 36.0);
+    SettingsCardMetrics {
+        w,
+        h,
+        reminder_y,
+        enable_y0: reminder_y + 28.0,
+        enable_y1: reminder_y + 50.0,
+        interval_dec: (16.0, reminder_y + 52.0, 44.0, 26.0),
+        interval_inc: (132.0, reminder_y + 52.0, 44.0, 26.0),
+        pause: (w - 86.0, reminder_y + 28.0, 70.0, 24.0),
+        pet_dec: (16.0, pet_y + 8.0, 36.0, 26.0),
+        pet_inc: (120.0, pet_y + 8.0, 36.0, 26.0),
+        list_top,
+        list_bottom,
+        row_h: 34.0,
+        add: (16.0, add_y, w - 32.0, add_h),
+    }
+}
+
+pub fn settings_card_visible_rows(m: &SettingsCardMetrics) -> usize {
+    let span = (m.list_bottom - m.list_top).max(0.0);
+    ((span / m.row_h).floor() as usize).max(1)
+}
+
+pub fn compose_settings_card(
+    names: &[(String, bool, bool)],
+    reminder: (bool, u32, bool),
+    pet_scale: f32,
+    dpr: f32,
+    highlight_row: Option<usize>,
+    card_w: f32,
+    card_h: f32,
+    list_scroll: usize,
+) -> (u32, u32, Vec<u8>) {
+    let (enabled, interval_min, paused) = reminder;
+    let m = settings_card_metrics(card_w, card_h);
+    let dpi = Dpi::new(dpr);
+    let w = dpi.su(m.w.round() as u32);
+    let h = dpi.su(m.h.round() as u32);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    let wf = w as f32;
+    let hf = h as f32;
+    let visible = settings_card_visible_rows(&m);
+    let max_scroll = names.len().saturating_sub(visible);
+    let scroll = list_scroll.min(max_scroll);
+
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(8.0),
+        dpi.s(10.0),
+        wf - dpi.s(4.0),
+        hf - dpi.s(4.0),
+        dpi.s(22.0),
+        with_alpha(SHADOW_B, 0.9),
+    );
+    fill_rrect_aa(&mut out, w, h, 0.0, 0.0, wf, hf, dpi.s(22.0), CARD);
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(1.5),
+        dpi.s(1.5),
+        wf - dpi.s(1.5),
+        dpi.s(18.0),
+        dpi.s(14.0),
+        INNER_HL,
+    );
+    stroke_rrect_aa(
+        &mut out,
+        w,
+        h,
+        0.5,
+        0.5,
+        wf - 0.5,
+        hf - 0.5,
+        dpi.s(22.0),
+        BORDER,
+        1.0,
+    );
+
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "设置",
+        dpi.s(16.0),
+        dpi.s(12.0),
+        dpi.su(120),
+        dpi.px(17.0),
+        LABEL,
+    );
+    if let Some((tw, th, t)) = rasterize_text("完成", dpi.su(56), dpi.px(14.0), BLUE) {
+        blit(
+            &mut out,
+            w,
+            h,
+            &t,
+            tw,
+            th,
+            w.saturating_sub(tw + dpi.su(16)),
+            dpi.s(14.0) as u32,
+        );
+    }
+
+    let rx0 = dpi.s(12.0);
+    let rx1 = wf - dpi.s(12.0);
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        rx0,
+        dpi.s(m.reminder_y),
+        rx1,
+        dpi.s(m.reminder_y + 86.0),
+        dpi.s(12.0),
+        GROUPED_BG,
+    );
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "健康提醒",
+        dpi.s(20.0),
+        dpi.s(m.reminder_y + 6.0),
+        dpi.su(140),
+        dpi.px(12.0),
+        SECONDARY,
+    );
+    let en_mark = if enabled { "●  启用" } else { "○  启用" };
+    blit_text(
+        &mut out,
+        w,
+        h,
+        en_mark,
+        dpi.s(20.0),
+        dpi.s(m.enable_y0),
+        dpi.su(120),
+        dpi.px(13.5),
+        if enabled { BLUE } else { LABEL },
+    );
+    let (px, py, pw, ph) = m.pause;
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(px),
+        dpi.s(py),
+        dpi.s(px + pw),
+        dpi.s(py + ph),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        if paused { "已暂停" } else { "暂停" },
+        dpi.s(px),
+        dpi.s(py),
+        dpi.s(pw),
+        dpi.s(ph),
+        dpi.px(12.0),
+        if paused { ORANGE } else { SECONDARY },
+        dpi,
+    );
+
+    let (dx, dy, dw, dh) = m.interval_dec;
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(dx),
+        dpi.s(dy),
+        dpi.s(dx + dw),
+        dpi.s(dy + dh),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "−",
+        dpi.s(dx),
+        dpi.s(dy),
+        dpi.s(dw),
+        dpi.s(dh),
+        dpi.px(16.0),
+        LABEL,
+        dpi,
+    );
+    let interval_label = format!("{interval_min} 分");
+    blit_text(
+        &mut out,
+        w,
+        h,
+        &interval_label,
+        dpi.s(dx + dw + 6.0),
+        dpi.s(dy + 4.0),
+        dpi.su(72),
+        dpi.px(13.0),
+        LABEL,
+    );
+    let (ix, iy, iw, ih) = m.interval_inc;
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(ix),
+        dpi.s(iy),
+        dpi.s(ix + iw),
+        dpi.s(iy + ih),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "+",
+        dpi.s(ix),
+        dpi.s(iy),
+        dpi.s(iw),
+        dpi.s(ih),
+        dpi.px(16.0),
+        LABEL,
+        dpi,
+    );
+
+    let (pdx, pdy, pdw, pdh) = m.pet_dec;
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(pdx),
+        dpi.s(pdy),
+        dpi.s(pdx + pdw),
+        dpi.s(pdy + pdh),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "−",
+        dpi.s(pdx),
+        dpi.s(pdy),
+        dpi.s(pdw),
+        dpi.s(pdh),
+        dpi.px(16.0),
+        LABEL,
+        dpi,
+    );
+    let pct = ((pet_scale * 100.0).round() as i32).clamp(50, 150);
+    blit_text(
+        &mut out,
+        w,
+        h,
+        &format!("{pct}%"),
+        dpi.s(pdx + pdw + 8.0),
+        dpi.s(pdy + 4.0),
+        dpi.su(56),
+        dpi.px(14.0),
+        LABEL,
+    );
+    let (pix, piy, piw, pih) = m.pet_inc;
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(pix),
+        dpi.s(piy),
+        dpi.s(pix + piw),
+        dpi.s(piy + pih),
+        dpi.s(8.0),
+        FILL_OPAQUE,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "+",
+        dpi.s(pix),
+        dpi.s(piy),
+        dpi.s(piw),
+        dpi.s(pih),
+        dpi.px(16.0),
+        LABEL,
+        dpi,
+    );
+
+    blit_text(
+        &mut out,
+        w,
+        h,
+        "常用应用",
+        dpi.s(16.0),
+        dpi.s(m.list_top - 16.0),
+        dpi.su(140),
+        dpi.px(12.0),
+        SECONDARY,
+    );
+
+    let vis_names: Vec<(usize, &(String, bool, bool))> = names
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .collect();
+    for (slot, (i, (name, sc_en, valid))) in vis_names.iter().enumerate() {
+        let y = dpi.s(m.list_top + slot as f32 * m.row_h);
+        let bh = dpi.s(m.row_h);
+        if highlight_row == Some(*i) {
+            fill_rrect_aa(
+                &mut out,
+                w,
+                h,
+                dpi.s(12.0),
+                y,
+                wf - dpi.s(12.0),
+                y + bh - dpi.s(2.0),
+                dpi.s(8.0),
+                HIGHLIGHT_ROW,
+            );
+        }
+        let mark = if !*valid {
+            "!"
+        } else if *sc_en {
+            "●"
+        } else {
+            "○"
+        };
+        let color = if *valid { LABEL } else { ORANGE };
+        let label = format!("{mark}  {name}");
+        if let Some((tw, th, t)) = rasterize_text(&label, dpi.su(150), dpi.px(12.5), color) {
+            let ty = (y + (bh - th as f32) * 0.5).round() as u32;
+            blit(&mut out, w, h, &t, tw, th, dpi.s(18.0) as u32, ty);
+        }
+        let mid_y = (y + bh * 0.5 - dpi.s(6.0)) as u32;
+        trailing_btn(&mut out, w, h, w - dpi.su(132), mid_y, "上", BLUE, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(100), mid_y, "下", BLUE, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(68), mid_y, "开", BLUE, dpi);
+        trailing_btn(&mut out, w, h, w - dpi.su(36), mid_y, "删", RED, dpi);
+    }
+
+    let (ax, ay, aw, ah) = m.add;
+    fill_rrect_aa(
+        &mut out,
+        w,
+        h,
+        dpi.s(ax),
+        dpi.s(ay),
+        dpi.s(ax + aw),
+        dpi.s(ay + ah),
+        dpi.s(12.0),
+        PRIMARY,
+    );
+    blit_text_centered(
+        &mut out,
+        w,
+        h,
+        "添加应用",
+        dpi.s(ax),
+        dpi.s(ay),
+        dpi.s(aw),
+        dpi.s(ah),
+        dpi.px(14.0),
+        WHITE,
+        dpi,
+    );
+
+    (w, h, out)
+}
+
+pub fn hit_settings_card(
+    local_x: f32,
+    local_y: f32,
+    card_w: f32,
+    card_h: f32,
+    row_count: usize,
+    list_scroll: usize,
+) -> Option<SettingsHit> {
+    let m = settings_card_metrics(card_w, card_h);
+    if local_x >= m.w - 64.0 && local_y <= 42.0 {
+        return Some(SettingsHit::Close);
+    }
+    if (16.0..=160.0).contains(&local_x) && (m.enable_y0..=m.enable_y1).contains(&local_y) {
+        return Some(SettingsHit::ToggleEnabled);
+    }
+    if in_rect(local_x, local_y, m.pause) {
+        return Some(SettingsHit::TogglePause);
+    }
+    if in_rect(local_x, local_y, m.interval_dec) {
+        return Some(SettingsHit::IntervalDec);
+    }
+    if in_rect(local_x, local_y, m.interval_inc) {
+        return Some(SettingsHit::IntervalInc);
+    }
+    if in_rect(local_x, local_y, m.pet_dec) {
+        return Some(SettingsHit::PetScaleDec);
+    }
+    if in_rect(local_x, local_y, m.pet_inc) {
+        return Some(SettingsHit::PetScaleInc);
+    }
+    if in_rect(local_x, local_y, m.add) {
+        return Some(SettingsHit::Add);
+    }
+    let visible = settings_card_visible_rows(&m);
+    for slot in 0..visible {
+        let i = list_scroll + slot;
+        if i >= row_count {
+            break;
+        }
+        let y0 = m.list_top + slot as f32 * m.row_h;
+        let y1 = y0 + m.row_h - 2.0;
+        if local_y < y0 || local_y > y1 {
+            continue;
+        }
+        if local_x >= m.w - 48.0 {
+            return Some(SettingsHit::RowDelete(i));
+        }
+        if local_x >= m.w - 80.0 {
+            return Some(SettingsHit::RowToggle(i));
+        }
+        if local_x >= m.w - 112.0 {
+            return Some(SettingsHit::RowDown(i));
+        }
+        if local_x >= m.w - 144.0 {
+            return Some(SettingsHit::RowUp(i));
+        }
+    }
+    None
+}
+
+fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
+    x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
+}
+
+#[cfg(test)]
+mod settings_card {
+    use super::*;
+
+    #[test]
+    fn compact_card_fits_launcher() {
+        let m = settings_card_metrics(360.0, 360.0);
+        assert!(m.list_bottom > m.list_top);
+        assert!(m.add.1 + m.add.3 <= 360.0);
+        assert!(settings_card_visible_rows(&m) >= 2);
+        let (w, h, out) = compose_settings_card(
+            &[("Chrome".into(), true, true)],
+            (true, 45, false),
+            1.0,
+            1.0,
+            None,
+            360.0,
+            360.0,
+            0,
+        );
+        assert_eq!(out.len(), (w * h * 4) as usize);
+        assert!(w > 200 && h > 200);
+        assert!(matches!(
+            hit_settings_card(330.0, 20.0, 360.0, 360.0, 1, 0),
+            Some(SettingsHit::Close)
+        ));
+    }
+}
+
 pub fn hit_settings(local_x: f32, local_y: f32, row_count: usize) -> Option<SettingsHit> {
     // local coords are logical (caller maps physical → logical)
     let w = SETTINGS_W as f32;
@@ -2027,6 +3102,44 @@ pub fn blit_rgba(
     blit(dest, dw, dh, src, sw, sh, dx, dy);
 }
 
+/// Blit `src` so its (0,0) lands at `(dest_x, dest_y)`, clipped to `clip`.
+pub fn blit_rgba_clipped(
+    dest: &mut [u8],
+    dw: u32,
+    dh: u32,
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dest_x: i32,
+    dest_y: i32,
+    clip: (i32, i32, i32, i32),
+) {
+    let (cx, cy, cw, ch) = clip;
+    let clip_x1 = cx + cw;
+    let clip_y1 = cy + ch;
+    for y in 0..sh {
+        let ty = dest_y + y as i32;
+        if ty < cy || ty >= clip_y1 || ty < 0 || ty >= dh as i32 {
+            continue;
+        }
+        for x in 0..sw {
+            let tx = dest_x + x as i32;
+            if tx < cx || tx >= clip_x1 || tx < 0 || tx >= dw as i32 {
+                continue;
+            }
+            let si = ((y * sw + x) * 4) as usize;
+            if si + 3 >= src.len() {
+                continue;
+            }
+            let c = [src[si], src[si + 1], src[si + 2], src[si + 3]];
+            if c[3] == 0 {
+                continue;
+            }
+            put(dest, dw, tx, ty, c);
+        }
+    }
+}
+
 fn scale_rgba_fit(
     src: &[u8],
     sw: u32,
@@ -2117,6 +3230,121 @@ fn blit_icon_tile(
 }
 
 #[cfg(test)]
+mod playful_dock {
+    use super::*;
+    use crate::ui::radial_menu::{layout_pinned, ExpandDir, MenuEntry};
+    use uuid::Uuid;
+
+    fn dummy_pet() -> (u32, u32, Vec<u8>) {
+        let (w, h) = (32u32, 32u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0xF4, 0xF0, 0xEC, 0xFF]);
+        }
+        (w, h, rgba)
+    }
+
+    #[test]
+    fn compose_open_frame_is_nonempty() {
+        let entries = vec![
+            MenuEntry::AddShortcut,
+            MenuEntry::Manage,
+            MenuEntry::Shortcut {
+                id: Uuid::nil(),
+                name: "Chrome".into(),
+                valid: true,
+                icon: None,
+            },
+        ];
+        let lay = layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 80.0, 128.0, 128.0),
+            (150.0, 20.0, 360.0, 360.0),
+            ExpandDir::Right,
+            1.0,
+        );
+        let (pw, ph, pet) = dummy_pet();
+        let (w, h, out) = compose_menu_frame(
+            &pet,
+            pw,
+            ph,
+            &lay,
+            1.0,
+            MenuChromeState {
+                say: Some(SAY_LAUNCH),
+                ..MenuChromeState::default()
+            },
+        );
+        assert!(w > 100 && h > 100);
+        assert_eq!(out.len(), (w * h * 4) as usize);
+        let opaque = out.chunks_exact(4).filter(|p| p[3] > 8).count();
+        assert!(opaque > 200, "card + tail + pet should paint, got {opaque}");
+    }
+
+    #[test]
+    fn compose_grows_from_pet_not_card_center() {
+        let entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
+        let mut lay = layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 160.0, 128.0, 128.0),
+            (160.0, 20.0, 360.0, 360.0),
+            ExpandDir::Right,
+            0.0,
+        );
+        lay.open_t = 0.0;
+        let closed_x = {
+            let scale = MENU_GROW_FROM;
+            let px = lay.pet_x + lay.pet_w * 0.5;
+            px + (lay.card_x - px) * scale
+        };
+        lay.open_t = 1.0;
+        let open_x = lay.card_x;
+        assert!(
+            closed_x < open_x,
+            "at t=0 the card must sit closer to the pet ({closed_x} < {open_x})"
+        );
+    }
+
+    #[test]
+    fn cached_present_paints_card_and_pet() {
+        let entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
+        let lay = layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 160.0, 128.0, 128.0),
+            (160.0, 20.0, 360.0, 360.0),
+            ExpandDir::Right,
+            1.0,
+        );
+        let (cw, ch, card) = compose_menu_card_layer(&lay, 1.0, MenuChromeState::default());
+        let (pw, ph, pet) = dummy_pet();
+        let mut out = vec![0u8; (cw * ch * 4) as usize];
+        present_menu_cached(
+            &mut out,
+            cw,
+            ch,
+            &card,
+            cw,
+            ch,
+            &pet,
+            pw,
+            ph,
+            &lay,
+            1.0,
+            MENU_GROW_FROM,
+            0.6,
+        );
+        let opaque = out.chunks_exact(4).filter(|p| p[3] > 8).count();
+        assert!(opaque > 100, "scaled card + pet should paint, got {opaque}");
+    }
+}
+
+#[cfg(test)]
 mod gear_preview {
     use super::*;
     use std::path::PathBuf;
@@ -2131,13 +3359,12 @@ mod gear_preview {
         let w = size * 3 + pad * 4;
         let h = size + pad * 2;
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        // Cream / white / dark plates so the cog silhouette is checkable.
         let plates = [
-            ([0xFF, 0xFB, 0xFA, 0xFF], pad),
-            ([0xFF, 0xFF, 0xFF, 0xFF], pad * 2 + size),
-            ([0x2A, 0x22, 0x1C, 0xFF], pad * 3 + size * 2),
+            ([0xFF, 0xFB, 0xFA, 0xFF], pad, 0.0),
+            ([0xFF, 0xFF, 0xFF, 0xFF], pad * 2 + size, 1.0),
+            ([0x2A, 0x22, 0x1C, 0xFF], pad * 3 + size * 2, 0.0),
         ];
-        for (bg, x0) in plates {
+        for (bg, x0, hover) in plates {
             fill_rrect_aa(
                 &mut rgba,
                 w,
@@ -2149,7 +3376,7 @@ mod gear_preview {
                 8.0,
                 bg,
             );
-            draw_gear_btn(
+            draw_settings_btn(
                 &mut rgba,
                 w,
                 h,
@@ -2158,12 +3385,12 @@ mod gear_preview {
                 pad as f32,
                 size as f32,
                 size as f32,
-                0.0,
+                hover,
                 0.0,
                 1.0,
             );
         }
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/_settings_gear.png");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/_settings_paw.png");
         image::save_buffer(
             &path,
             &rgba,
@@ -2171,7 +3398,7 @@ mod gear_preview {
             h,
             image::ColorType::Rgba8,
         )
-        .expect("write gear preview");
+        .expect("write settings mark preview");
         assert!(path.is_file());
     }
 }

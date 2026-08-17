@@ -11,6 +11,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{
     ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, StartCause, WindowEvent,
 };
+use winit::keyboard::{Key, NamedKey};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
 
@@ -23,11 +24,15 @@ use crate::pet::{
 };
 use crate::platform;
 use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
-use crate::render::easing::{ease_in_cubic, ease_out_cubic, ease_out_quint};
+use crate::render::easing::ease_in_out_cubic;
 use crate::render::menu_ui::{
-    blit_rgba, compose_menu_frame, compose_settings_frame, hit_settings, MenuChromeState,
-    SettingsHit, SETTINGS_H, SETTINGS_W,
+    blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
+    compose_menu_pet_only, compose_settings_card, compose_settings_frame, hit_settings,
+    hit_settings_card, menu_visual_fade, menu_visual_scale, present_menu_cached,
+    settings_card_metrics, settings_card_visible_rows, MenuChromeState, SettingsHit, SAY_FAIL,
+    SETTINGS_H, SETTINGS_W,
 };
+use crate::render::sample_rgba_bilinear;
 use crate::render::reminder_ui::{
     client_to_layout, compose_reminder_card_frame, compose_reminder_frame, food_button_layout,
     load_feed_bowl, load_reminder_card, FeedBowl, ReminderCard,
@@ -40,8 +45,8 @@ use crate::shortcut::{
     ShortcutRepository,
 };
 use crate::ui::launcher_place::{
-    logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher,
-    place_settings_near_point, settings_rect_at, snap_dpr, union_rects, DEFAULT_GAP, DEFAULT_MARGIN,
+    logical_to_physical, physical_to_logical, physical_to_logical_u32, place_launcher, snap_dpr,
+    DEFAULT_GAP, DEFAULT_MARGIN,
 };
 use crate::ui::pet_window::DragState;
 use crate::ui::radial_menu::{
@@ -59,19 +64,15 @@ pub enum UserEvent {
     FilePicked(Option<PathBuf>),
 }
 
-/// Settings open transition from a launcher anchor point (physical pixels).
+/// In-card launcher ↔ settings slide (physical pixels stay put).
 #[derive(Debug, Clone, Copy)]
 struct SettingsTransition {
-    /// Manage-button center on screen; the panel grows from here.
-    anchor: (i32, i32),
-    /// Final settings window rect (physical) once the transition settles.
-    final_rect: platform::Rect,
-    /// Launcher window rect (physical) while it crossfades away.
-    menu_rect: platform::Rect,
     started: Instant,
     duration: Duration,
     /// Linear 0..1 clock; advanced by `about_to_wait`, read by compose.
     t: f32,
+    /// true = dock → settings (in from right); false = settings → dock.
+    entering: bool,
 }
 
 pub struct App {
@@ -124,14 +125,24 @@ pub struct App {
     menu_press_t: f32,
     /// Overlay window top-left (physical) for atomic layered present during menu open.
     menu_present_pos: Option<(i32, i32)>,
+    /// Rest-state card layer (physical, no pet) for open/close scale+fade.
+    menu_card_cache: Option<(u32, u32, Vec<u8>)>,
     /// Shortcut list scroll (first visible row index). Supports many apps via wheel.
     menu_list_scroll: usize,
+    /// Rare speech (launch failure). Success closes immediately.
+    menu_say: Option<(Instant, &'static str)>,
     /// Settings list row to emphasize (from invalid launcher item).
     settings_highlight_row: Option<usize>,
     /// Settings grows from the launcher's Manage button instead of snapping center.
     settings_transition: Option<SettingsTransition>,
     /// Overlay window top-left (physical) for atomic layered present during settings transition.
     settings_present_pos: Option<(i32, i32)>,
+    /// Settings lives inside the dock card (launcher button), not a new window.
+    settings_embed: bool,
+    /// Card-sized settings snapshot for the slide.
+    settings_card_cache: Option<(u32, u32, Vec<u8>)>,
+    /// First visible row in the embedded settings list.
+    settings_list_scroll: usize,
     /// Expanded comic-bubble window while `idle_yawn` plays.
     yawn_ui_active: bool,
     yawn_place: Option<YawnPlacement>,
@@ -212,10 +223,15 @@ impl App {
             menu_hover_t: 0.0,
             menu_press_t: 0.0,
             menu_present_pos: None,
+            menu_card_cache: None,
             menu_list_scroll: 0,
+            menu_say: None,
             settings_highlight_row: None,
             settings_transition: None,
             settings_present_pos: None,
+            settings_embed: false,
+            settings_card_cache: None,
+            settings_list_scroll: 0,
             yawn_ui_active: false,
             yawn_place: None,
             yawn_present_pos: None,
@@ -411,7 +427,13 @@ impl App {
     fn sync_texture_from_pet(&mut self) {
         // Warm the icon cache and snapshot icons before borrowing `self.pet`
         // (extraction needs `&mut self`; the pet borrow below would block it).
-        let menu_icons: HashMap<Uuid, Option<Arc<IconRgba>>> = if self.menu_ui_active
+        let menu_animating = self
+            .pet
+            .as_ref()
+            .map(|p| p.is_menu_animating())
+            .unwrap_or(false);
+        let menu_icons: HashMap<Uuid, Option<Arc<IconRgba>>> = if (self.menu_ui_active
+            && !menu_animating)
             || (self.settings_ui_active && self.settings_transition.is_some())
         {
             self.shortcuts
@@ -426,6 +448,11 @@ impl App {
         let Some(pet) = self.pet.as_ref() else {
             return;
         };
+
+        if self.settings_ui_active && self.settings_embed {
+            self.compose_embedded_settings();
+            return;
+        }
 
         if self.settings_ui_active {
             let rows: Vec<(String, bool, bool)> = self
@@ -450,85 +477,6 @@ impl App {
                 dpr,
                 self.settings_highlight_row,
             );
-
-            if let Some(tr) = self.settings_transition {
-                let t = tr.t;
-                let cur = settings_rect_at(
-                    tr.anchor,
-                    tr.final_rect,
-                    SETTINGS_W as i32,
-                    SETTINGS_H as i32,
-                    t,
-                );
-                let union = union_rects(tr.menu_rect, cur);
-                let w = union.width.max(1) as u32;
-                let h = union.height.max(1) as u32;
-                let mut out = vec![0u8; (w * h * 4) as usize];
-                // Launcher card crossfades away early in the handoff.
-                let menu_t = t * 2.5;
-                if menu_t < 1.0 {
-                    if let (Some(pet), Some(layout)) = (self.pet.as_ref(), self.menu_layout.as_ref())
-                    {
-                        let clip = pet.active_clip();
-                        let mut pet_rgba = pet.display_rgba();
-                        // Pet and card share the early crossfade window, so removing
-                        // the launcher layer never snaps a half-visible pet away.
-                        fade_rgba_alpha(&mut pet_rgba, 1.0 - ease_in_cubic(menu_t));
-                        let mut l = layout.clone();
-                        // Start from the launcher's current open state and crossfade
-                        // the card away during the early handoff window.
-                        l.open_t = layout.open_t * (1.0 - ease_in_cubic(menu_t));
-                        let (mw, mh, menu_rgba) = compose_menu_frame(
-                            &pet_rgba,
-                            clip.frame_width,
-                            clip.frame_height,
-                            &l,
-                            dpr,
-                            MenuChromeState {
-                                hover: None,
-                                press: None,
-                                hover_t: 0.0,
-                                press_t: 0.0,
-                            },
-                        );
-                        if mw == tr.menu_rect.width as u32
-                            && mh == tr.menu_rect.height as u32
-                            && w >= mw
-                            && h >= mh
-                        {
-                            blit_rgba(
-                                &mut out,
-                                w,
-                                h,
-                                &menu_rgba,
-                                mw,
-                                mh,
-                                (tr.menu_rect.x - union.x) as u32,
-                                (tr.menu_rect.y - union.y) as u32,
-                            );
-                        }
-                    }
-                }
-                // Settings grows from the anchor toward its final rect.
-                let t_scale = ease_out_quint(t);
-                let scale = 0.15 + 0.85 * t_scale;
-                let fade = ease_out_cubic(t);
-                let (scaled, scaled_w, scaled_h) =
-                    scale_rgba_around_anchor(&settings_rgba, sw, sh, scale, fade);
-                let sdx = (cur.x - union.x).max(0) as u32;
-                let sdy = (cur.y - union.y).max(0) as u32;
-                if scaled_w <= w && scaled_h <= h {
-                    blit_rgba(&mut out, w, h, &scaled, scaled_w, scaled_h, sdx, sdy);
-                }
-                self.settings_present_pos = Some((union.x, union.y));
-                self.sprite_logical = (SETTINGS_W, SETTINGS_H);
-                self.hit_rgba = out;
-                self.hit_size = (w, h);
-                self.texture_dirty = false;
-                return;
-            }
-
-            // Logical size for hit-mapping; physical pixels in hit_rgba.
             self.sprite_logical = (SETTINGS_W, SETTINGS_H);
             self.hit_rgba = settings_rgba;
             self.hit_size = (sw, sh);
@@ -540,6 +488,58 @@ impl App {
         if self.menu_ui_active && pet.is_menu_open() {
             let clip = pet.active_clip();
             let pet_rgba = pet.display_rgba();
+            let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+            if pet.is_menu_animating() {
+                if let (Some(layout), Some((cw, ch, card))) =
+                    (self.menu_layout.as_ref(), self.menu_card_cache.as_ref())
+                {
+                    let fade = menu_visual_fade(pet.menu_open_t);
+                    let scale = if !platform::client_area_animation_enabled() {
+                        1.0
+                    } else {
+                        menu_visual_scale(pet.menu_open_t)
+                    };
+                    let mut out = vec![0u8; (*cw * *ch * 4) as usize];
+                    present_menu_cached(
+                        &mut out,
+                        *cw,
+                        *ch,
+                        card,
+                        *cw,
+                        *ch,
+                        &pet_rgba,
+                        clip.frame_width,
+                        clip.frame_height,
+                        layout,
+                        dpr,
+                        scale,
+                        fade,
+                    );
+                    self.sprite_logical = self.menu_logical_size;
+                    self.hit_rgba = out;
+                    self.hit_size = (*cw, *ch);
+                    self.texture_dirty = false;
+                    return;
+                }
+                // First open frame only: cache is built right after this present.
+                // Closing without a cache must fall through to live compose.
+                if !pet.menu_closing {
+                    if let Some(layout) = self.menu_layout.as_ref() {
+                        let (w, h, composed) = compose_menu_pet_only(
+                            &pet_rgba,
+                            clip.frame_width,
+                            clip.frame_height,
+                            layout,
+                            dpr,
+                        );
+                        self.sprite_logical = self.menu_logical_size;
+                        self.hit_rgba = composed;
+                        self.hit_size = (w, h);
+                        self.texture_dirty = false;
+                        return;
+                    }
+                }
+            }
             let entries = build_entries(
                 self.shortcuts.list_enabled_sorted().as_slice(),
                 |s| menu_icons.get(&s.id).cloned().flatten(),
@@ -583,12 +583,14 @@ impl App {
                     )
                 });
             layout.open_t = pet.menu_open_t;
-            let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
             let chrome = MenuChromeState {
                 hover: self.menu_hover,
                 press: self.menu_press,
                 hover_t: self.menu_hover_t,
                 press_t: self.menu_press_t,
+                closing: pet.menu_closing,
+                say: self.menu_say.map(|(_, s)| s),
+                reduced_motion: !platform::client_area_animation_enabled(),
             };
             let (w, h, composed) = compose_menu_frame(
                 &pet_rgba,
@@ -727,17 +729,25 @@ impl App {
 
         // Overlays: present at composed device-pixel size (1:1). Do not wait for
         // winit's async resize — that empty intermediate frame is the pet "flash".
-        let (win_w, win_h, present, screen_pos) = if overlay && !mirror_x {
-            let pos = if self.settings_ui_active && self.settings_transition.is_some() {
-                self.settings_present_pos
-            } else if self.menu_ui_active {
+        if overlay && !mirror_x {
+            let pos = if self.settings_embed || self.menu_ui_active {
                 self.menu_present_pos
+            } else if self.settings_ui_active && self.settings_transition.is_some() {
+                self.settings_present_pos
             } else if self.yawn_ui_active {
                 self.yawn_present_pos
             } else {
                 None
             };
-            (sw.max(1), sh.max(1), self.hit_rgba.clone(), pos)
+            if let Err(e) = platform::update_layered_rgba_ex(
+                window.as_ref(),
+                sw.max(1),
+                sh.max(1),
+                &self.hit_rgba,
+                pos,
+            ) {
+                error!("update_layered_rgba: {e}");
+            }
         } else {
             let win = window.inner_size();
             let win_w = win.width.max(1);
@@ -751,13 +761,11 @@ impl App {
                 drag_scale,
                 mirror_x,
             );
-            (win_w, win_h, present, None)
-        };
-
-        if let Err(e) =
-            platform::update_layered_rgba_ex(window.as_ref(), win_w, win_h, &present, screen_pos)
-        {
-            error!("update_layered_rgba: {e}");
+            if let Err(e) =
+                platform::update_layered_rgba_ex(window.as_ref(), win_w, win_h, &present, None)
+            {
+                error!("update_layered_rgba: {e}");
+            }
         }
     }
 
@@ -1059,6 +1067,7 @@ impl App {
             |s| self.shortcut_icon(s),
         );
         self.menu_list_scroll = 0;
+        self.menu_say = None;
         self.menu_layout = Some(layout_pinned_scroll(
             &entries,
             win_log_w,
@@ -1086,10 +1095,23 @@ impl App {
             self.click_through = false;
         }
 
-        // Compose open_t≈0 (pet solid, card invisible) and present immediately at
-        // the new size/pos — no WaitUntil delay (this was the main pet flash).
+        // Pet-only first present (card cache is still empty) so the cat never
+        // flashes while the rest card is rasterized once.
+        self.menu_card_cache = None;
         self.texture_dirty = true;
         self.redraw();
+        if let Some(layout) = self.menu_layout.as_ref() {
+            let dpr_f = self.scale_factor.clamp(1.0, 3.0) as f32;
+            let (cw, ch, card) = compose_menu_card_layer(
+                layout,
+                dpr_f,
+                MenuChromeState {
+                    reduced_motion: !platform::client_area_animation_enabled(),
+                    ..MenuChromeState::default()
+                },
+            );
+            self.menu_card_cache = Some((cw, ch, card));
+        }
 
         // Outside-click guard: clicking the desktop / another window closes the dock.
         let guard = platform::OutsideClickGuard::install(place.window);
@@ -1103,6 +1125,14 @@ impl App {
             delta = ?place.pet_screen_delta,
             "launcher dock entered (pin-pet)"
         );
+    }
+
+    /// Instant close — keyboard / any path that must not wait on motion.
+    fn exit_menu_ui_instant(&mut self, now: Instant) {
+        if let Some(pet) = self.pet.as_mut() {
+            pet.close_menu(now);
+        }
+        self.finish_exit_menu_ui(now);
     }
 
     /// Request menu close with L3 closing animation when possible.
@@ -1132,7 +1162,13 @@ impl App {
         self.menu_hover_t = 0.0;
         self.menu_press_t = 0.0;
         self.menu_present_pos = None;
+        self.menu_card_cache = None;
         self.menu_list_scroll = 0;
+        self.menu_say = None;
+        self.settings_ui_active = false;
+        self.settings_embed = false;
+        self.settings_transition = None;
+        self.settings_card_cache = None;
         self.restore_overlay_origin_window();
         // L3-05: ignore click that closed the dock + brief double-tap reopen.
         self.menu_reopen_after = Some(now + Duration::from_millis(280));
@@ -1141,7 +1177,39 @@ impl App {
 
     /// Mouse wheel: scroll shortcut list when dock is open (many apps).
     fn scroll_menu_list(&mut self, lines: i32) {
-        if !self.menu_ui_active || lines == 0 || self.settings_transition.is_some() {
+        if lines == 0 || self.settings_transition.is_some() {
+            return;
+        }
+        if self.settings_embed && self.settings_ui_active {
+            let total = self.shortcuts.list_sorted().len();
+            let vis = self
+                .menu_layout
+                .as_ref()
+                .map(|l| {
+                    settings_card_visible_rows(&settings_card_metrics(l.card_w, l.card_h))
+                })
+                .unwrap_or(3);
+            let max = total.saturating_sub(vis);
+            let next = (self.settings_list_scroll as i32 - lines).clamp(0, max as i32) as usize;
+            if next != self.settings_list_scroll {
+                self.settings_list_scroll = next;
+                self.settings_card_cache = None;
+                self.texture_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
+        if !self.menu_ui_active {
+            return;
+        }
+        if self
+            .pet
+            .as_ref()
+            .map(|p| p.is_menu_animating())
+            .unwrap_or(false)
+        {
             return;
         }
         let total = self
@@ -1155,6 +1223,7 @@ impl App {
             self.menu_list_scroll = next;
             self.menu_hover = None;
             self.menu_press = None;
+            self.menu_card_cache = None;
             self.texture_dirty = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -1167,11 +1236,10 @@ impl App {
         self.enter_settings_ui_highlight(None);
     }
 
-    /// Settings opened from a launcher button: grow from the clicked anchor to a
-    /// panel clamped beside the launcher, crossfading the card out along the way.
+    /// Settings opened from a launcher button: slide in from the card's right.
     fn begin_settings_from_launcher(
         &mut self,
-        anchor: (i32, i32),
+        _anchor: (i32, i32),
         highlight_row: Option<usize>,
         now: Instant,
     ) {
@@ -1184,66 +1252,232 @@ impl App {
         if !pet.is_menu_open() {
             return;
         }
-        let Some(menu_pos) = self.menu_present_pos else {
+        if self.menu_layout.is_none() {
             self.enter_settings_ui_highlight(highlight_row);
             return;
-        };
-        let Some(layout) = self.menu_layout.clone() else {
-            self.enter_settings_ui_highlight(highlight_row);
-            return;
-        };
-        let dpr = snap_dpr(self.scale_factor);
-        let menu_w = logical_to_physical(layout.window_w, dpr);
-        let menu_h = logical_to_physical(layout.window_h, dpr);
-        let menu_rect = platform::Rect {
-            x: menu_pos.0,
-            y: menu_pos.1,
-            width: menu_w,
-            height: menu_h,
-        };
-        let work = platform::work_area_from_point(
-            menu_rect.x + menu_rect.width / 2,
-            menu_rect.y + menu_rect.height / 2,
-        )
-        .map(|m| m.work_area)
-        .ok()
-        .or_else(|| {
-            self.window
-                .as_ref()
-                .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
-        })
-        .or_else(|| platform::primary_work_area().ok())
-        .unwrap_or(platform::Rect {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        });
-        let settings_w = logical_to_physical(SETTINGS_W, dpr);
-        let settings_h = logical_to_physical(SETTINGS_H, dpr);
-        let final_rect =
-            place_settings_near_point(anchor, settings_w, settings_h, work, DEFAULT_MARGIN);
-
+        }
         self.settings_highlight_row = highlight_row;
+        self.settings_list_scroll = 0;
+        if let Some(row) = highlight_row {
+            if let Some(layout) = self.menu_layout.as_ref() {
+                let m = settings_card_metrics(layout.card_w, layout.card_h);
+                let vis = settings_card_visible_rows(&m);
+                self.settings_list_scroll = row.saturating_sub(vis.saturating_sub(1));
+            }
+        }
         self.settings_ui_active = true;
+        self.settings_embed = true;
+        self.settings_card_cache = None;
+        if self.menu_card_cache.is_none() {
+            if let Some(layout) = self.menu_layout.as_ref() {
+                let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+                let (cw, ch, card) = compose_menu_card_layer(
+                    layout,
+                    dpr,
+                    MenuChromeState {
+                        reduced_motion: !platform::client_area_animation_enabled(),
+                        ..MenuChromeState::default()
+                    },
+                );
+                self.menu_card_cache = Some((cw, ch, card));
+            }
+        }
+        self.ensure_settings_card_cache();
         self.settings_transition = Some(SettingsTransition {
-            anchor,
-            final_rect,
-            menu_rect,
             started: now,
-            duration: Duration::from_millis(340),
+            duration: Duration::from_millis(220),
             t: 0.0,
+            entering: true,
         });
-        self.settings_present_pos = None;
-        // Keep winit at the launcher geometry during the transition: atomic
-        // layered present drives the moving union window each frame.
         self.texture_dirty = true;
         self.redraw();
-        info!(
-            anchor = ?anchor,
-            final_rect = ?final_rect,
-            "settings transition started from launcher"
+        info!("settings slide-in from launcher card");
+    }
+
+    fn begin_settings_pop(&mut self, now: Instant) {
+        if !self.settings_embed || !self.settings_ui_active {
+            self.exit_settings_ui();
+            return;
+        }
+        if self.settings_transition.is_some() {
+            return;
+        }
+        self.ensure_settings_card_cache();
+        if self.menu_card_cache.is_none() {
+            if let Some(layout) = self.menu_layout.as_ref() {
+                let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+                let (cw, ch, card) = compose_menu_card_layer(
+                    layout,
+                    dpr,
+                    MenuChromeState {
+                        reduced_motion: !platform::client_area_animation_enabled(),
+                        ..MenuChromeState::default()
+                    },
+                );
+                self.menu_card_cache = Some((cw, ch, card));
+            }
+        }
+        self.settings_transition = Some(SettingsTransition {
+            started: now,
+            duration: Duration::from_millis(220),
+            t: 0.0,
+            entering: false,
+        });
+        self.texture_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        info!("settings slide-out back to launcher");
+    }
+
+    fn ensure_settings_card_cache(&mut self) {
+        if self.settings_card_cache.is_some() {
+            return;
+        }
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let rows: Vec<(String, bool, bool)> = self
+            .shortcuts
+            .list_sorted()
+            .into_iter()
+            .map(|s| {
+                let valid = s.is_path_valid();
+                (s.name, s.enabled, valid)
+            })
+            .collect();
+        let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+        let reminder = (
+            self.config.reminder.enabled,
+            self.config.reminder.interval_minutes,
+            self.config.reminder.paused,
         );
+        let (sw, sh, buf) = compose_settings_card(
+            &rows,
+            reminder,
+            self.config.pet.scale,
+            dpr,
+            self.settings_highlight_row,
+            layout.card_w,
+            layout.card_h,
+            self.settings_list_scroll,
+        );
+        self.settings_card_cache = Some((sw, sh, buf));
+    }
+
+    fn compose_embedded_settings(&mut self) {
+        let Some(layout) = self.menu_layout.clone() else {
+            return;
+        };
+        let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+        let Some((fw, fh, pet_rgba)) = self.pet.as_ref().map(|p| {
+            let clip = p.active_clip();
+            (clip.frame_width, clip.frame_height, p.display_rgba())
+        }) else {
+            return;
+        };
+        let (ww, hh, mut out) = compose_menu_pet_only(&pet_rgba, fw, fh, &layout, dpr);
+        let d = if (dpr - dpr.round()).abs() < 0.08 {
+            dpr.round()
+        } else {
+            dpr
+        };
+        let cx = (layout.card_x * d).round() as i32;
+        let cy = (layout.card_y * d).round() as i32;
+        let cw = (layout.card_w * d).round().max(1.0) as i32;
+        let ch = (layout.card_h * d).round().max(1.0) as i32;
+        let clip_r = (cx, cy, cw, ch);
+
+        let reduced = !platform::client_area_animation_enabled();
+        if let Some(tr) = self.settings_transition {
+            self.ensure_settings_card_cache();
+            let k = if reduced {
+                if tr.t >= 1.0 {
+                    1.0
+                } else {
+                    tr.t
+                }
+            } else {
+                ease_in_out_cubic(tr.t)
+            };
+            let (menu_shift, set_shift) = if tr.entering {
+                (-(k * cw as f32).round() as i32, ((1.0 - k) * cw as f32).round() as i32)
+            } else {
+                (-((1.0 - k) * cw as f32).round() as i32, (k * cw as f32).round() as i32)
+            };
+            if reduced {
+                let fade_set = if tr.entering { k } else { 1.0 - k };
+                let fade_menu = 1.0 - fade_set;
+                if let Some((mw, mh, menu)) = self.menu_card_cache.as_ref() {
+                    let mut faded = menu.clone();
+                    fade_rgba_alpha(&mut faded, fade_menu);
+                    blit_rgba_clipped(&mut out, ww, hh, &faded, *mw, *mh, 0, 0, clip_r);
+                }
+                if let Some((sw, sh, set)) = self.settings_card_cache.as_ref() {
+                    let mut faded = set.clone();
+                    fade_rgba_alpha(&mut faded, fade_set);
+                    blit_rgba_clipped(&mut out, ww, hh, &faded, *sw, *sh, cx, cy, clip_r);
+                }
+            } else {
+                if let Some((mw, mh, menu)) = self.menu_card_cache.as_ref() {
+                    blit_rgba_clipped(
+                        &mut out,
+                        ww,
+                        hh,
+                        menu,
+                        *mw,
+                        *mh,
+                        menu_shift,
+                        0,
+                        clip_r,
+                    );
+                }
+                if let Some((sw, sh, set)) = self.settings_card_cache.as_ref() {
+                    blit_rgba_clipped(
+                        &mut out,
+                        ww,
+                        hh,
+                        set,
+                        *sw,
+                        *sh,
+                        cx + set_shift,
+                        cy,
+                        clip_r,
+                    );
+                }
+            }
+        } else {
+            let rows: Vec<(String, bool, bool)> = self
+                .shortcuts
+                .list_sorted()
+                .into_iter()
+                .map(|s| {
+                let valid = s.is_path_valid();
+                (s.name, s.enabled, valid)
+            })
+                .collect();
+            let reminder = (
+                self.config.reminder.enabled,
+                self.config.reminder.interval_minutes,
+                self.config.reminder.paused,
+            );
+            let (sw, sh, set) = compose_settings_card(
+                &rows,
+                reminder,
+                self.config.pet.scale,
+                dpr,
+                self.settings_highlight_row,
+                layout.card_w,
+                layout.card_h,
+                self.settings_list_scroll,
+            );
+            blit_rgba(&mut out, ww, hh, &set, sw, sh, cx.max(0) as u32, cy.max(0) as u32);
+        }
+
+        self.sprite_logical = self.menu_logical_size;
+        self.hit_rgba = out;
+        self.hit_size = (ww, hh);
+        self.texture_dirty = false;
     }
 
     /// Settings opened without a launcher anchor (tray): centered, no transition.
@@ -1253,6 +1487,8 @@ impl App {
         }
         self.settings_transition = None;
         self.settings_present_pos = None;
+        self.settings_embed = false;
+        self.settings_card_cache = None;
         // Close menu into settings without losing origin.
         if self.menu_ui_active {
             if let Some(pet) = self.pet.as_mut() {
@@ -1267,6 +1503,7 @@ impl App {
             self.menu_hover_t = 0.0;
             self.menu_press_t = 0.0;
             self.menu_present_pos = None;
+            self.menu_card_cache = None;
         } else {
             self.capture_overlay_origin();
         }
@@ -1285,10 +1522,16 @@ impl App {
     }
 
     fn exit_settings_ui(&mut self) {
+        if self.settings_embed && self.menu_ui_active {
+            self.begin_settings_pop(Instant::now());
+            return;
+        }
         self.settings_ui_active = false;
         self.settings_highlight_row = None;
         self.settings_transition = None;
         self.settings_present_pos = None;
+        self.settings_embed = false;
+        self.settings_card_cache = None;
         self.restore_overlay_origin_window();
         info!("settings UI exited");
     }
@@ -1308,40 +1551,27 @@ impl App {
         false
     }
 
-    /// After the grow/slide finishes, snap winit geometry to the final rect and
-    /// resume ordinary settings hit-testing.
+    /// After the in-card slide finishes: stay on the dock window.
     fn finish_settings_transition(&mut self, now: Instant) {
         let Some(tr) = self.settings_transition else {
             return;
         };
+        let entering = tr.entering;
         self.settings_transition = None;
-        self.settings_present_pos = None;
-        if let Some(pet) = self.pet.as_mut() {
-            if pet.is_menu_open() {
-                pet.close_menu(now);
-            }
+        self.settings_card_cache = None;
+        if entering {
+            self.settings_ui_active = true;
+            self.settings_embed = true;
+        } else {
+            self.settings_ui_active = false;
+            self.settings_embed = false;
+            self.settings_highlight_row = None;
+            self.settings_list_scroll = 0;
         }
-        self.menu_ui_active = false;
-        self.menu_outside_guard = None;
-        self.menu_layout = None;
-        self.menu_hover = None;
-        self.menu_press = None;
-        self.menu_hover_t = 0.0;
-        self.menu_press_t = 0.0;
-        self.menu_present_pos = None;
-        self.menu_list_scroll = 0;
-        self.resize_pet_window(SETTINGS_W, SETTINGS_H);
-        if let Some(w) = &self.window {
-            w.set_outer_position(PhysicalPosition::new(tr.final_rect.x, tr.final_rect.y));
-            let _ = platform::set_click_through(w.as_ref(), false);
-            self.click_through = false;
-        }
+        let _ = now;
         self.texture_dirty = true;
         self.redraw();
-        info!(
-            final = ?(tr.final_rect.x, tr.final_rect.y, tr.final_rect.width, tr.final_rect.height),
-            "settings transition settled"
-        );
+        info!(entering, "settings card slide settled");
     }
 
     /// Screen position (physical px) of the launcher item that opened settings.
@@ -1374,6 +1604,35 @@ impl App {
         let lx = (self.cursor_in_window.x / cw.max(1.0) * lw as f64) as f32;
         let ly = (self.cursor_in_window.y / ch.max(1.0) * lh as f64) as f32;
         Some((lx, ly))
+    }
+
+    /// Commit a row only if the pointer is still on it (tap: down highlight, up commit).
+    fn commit_menu_press(&mut self, now: Instant) {
+        let Some(idx) = self.menu_press.take() else {
+            return;
+        };
+        let still_on = self
+            .menu_cursor_logical()
+            .and_then(|(lx, ly)| {
+                self.menu_layout
+                    .as_ref()
+                    .and_then(|lay| hit_test_index(lay, lx, ly))
+            })
+            == Some(idx);
+        if still_on {
+            if let Some(entry) = self
+                .menu_layout
+                .as_ref()
+                .and_then(|lay| lay.items.get(idx))
+                .map(|it| it.entry.clone())
+            {
+                self.handle_menu_entry(entry, Some(idx), now);
+            }
+        }
+        self.texture_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn update_menu_hover(&mut self) {
@@ -1501,9 +1760,17 @@ impl App {
                 if let Some(item) = self.shortcuts.get(id).cloned() {
                     match launch(&item) {
                         Ok(()) => {
+                            // Tens/day: close now. Don't make the user wait on a line of copy.
                             self.exit_menu_ui(now);
                         }
-                        Err(e) => warn!(error = %e, "launch failed"),
+                        Err(e) => {
+                            warn!(error = %e, "launch failed");
+                            self.menu_say = Some((now, SAY_FAIL));
+                            self.texture_dirty = true;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
                     }
                 }
             }
@@ -1513,7 +1780,10 @@ impl App {
     fn handle_settings_hit(&mut self, hit: SettingsHit) {
         let now = Instant::now();
         match hit {
-            SettingsHit::Close => self.exit_settings_ui(),
+            SettingsHit::Close => {
+                self.settings_card_cache = None;
+                self.exit_settings_ui();
+            }
             SettingsHit::ToggleEnabled => {
                 let next = !self.config.reminder.enabled;
                 self.config.reminder.enabled = next;
@@ -1970,6 +2240,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.visible = false;
             }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                if !is_synthetic
+                    && event.state == ElementState::Pressed
+                    && !event.repeat
+                    && event.logical_key == Key::Named(NamedKey::Escape)
+                    && self.settings_transition.is_none()
+                {
+                    if self.settings_embed && self.settings_ui_active {
+                        self.begin_settings_pop(Instant::now());
+                    } else if self.menu_ui_active {
+                        self.exit_menu_ui_instant(Instant::now());
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.redraw();
             }
@@ -2031,7 +2319,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.update_menu_hover();
                 }
                 // Threshold drag start.
-                if self.drag.consider_drag_start() {
+                if self.menu_press.is_none() && self.drag.consider_drag_start() {
                     if let Some(pet) = self.pet.as_mut() {
                         if self.menu_ui_active {
                             pet.close_menu(now);
@@ -2052,6 +2340,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_present_pos = None;
                         self.settings_highlight_row = None;
                         self.menu_present_pos = None;
+                        self.menu_card_cache = None;
                         self.menu_list_scroll = 0;
                         // Keep overlay_origin for restore after drag end.
                     }
@@ -2095,49 +2384,88 @@ impl ApplicationHandler<UserEvent> for App {
                 if (button, state) == (WinitMouseButton::Left, ElementState::Pressed) {
                     // Settings hits (only after the open transition settles).
                     if self.settings_ui_active && self.settings_transition.is_none() {
-                        let (cw, ch) = self
-                            .window
-                            .as_ref()
-                            .map(|w| {
-                                let s = w.inner_size();
-                                (s.width as f64, s.height as f64)
-                            })
-                            .unwrap_or((SETTINGS_W as f64, SETTINGS_H as f64));
-                        let lx = self.cursor_in_window.x / cw.max(1.0) * SETTINGS_W as f64;
-                        let ly = self.cursor_in_window.y / ch.max(1.0) * SETTINGS_H as f64;
-                        let n = self.shortcuts.items().len();
-                        if let Some(hit) = hit_settings(lx as f32, ly as f32, n) {
-                            self.handle_settings_hit(hit);
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
+                        if self.settings_embed {
+                            if let (Some((lx, ly)), Some(layout)) =
+                                (self.menu_cursor_logical(), self.menu_layout.as_ref())
+                            {
+                                let n = self.shortcuts.list_sorted().len();
+                                if let Some(hit) = hit_settings_card(
+                                    lx - layout.card_x,
+                                    ly - layout.card_y,
+                                    layout.card_w,
+                                    layout.card_h,
+                                    n,
+                                    self.settings_list_scroll,
+                                ) {
+                                    self.handle_settings_hit(hit);
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
+                                }
                             }
-                            return;
+                        } else {
+                            let (cw, ch) = self
+                                .window
+                                .as_ref()
+                                .map(|w| {
+                                    let s = w.inner_size();
+                                    (s.width as f64, s.height as f64)
+                                })
+                                .unwrap_or((SETTINGS_W as f64, SETTINGS_H as f64));
+                            let lx = self.cursor_in_window.x / cw.max(1.0) * SETTINGS_W as f64;
+                            let ly = self.cursor_in_window.y / ch.max(1.0) * SETTINGS_H as f64;
+                            let n = self.shortcuts.items().len();
+                            if let Some(hit) = hit_settings(lx as f32, ly as f32, n) {
+                                self.handle_settings_hit(hit);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
                         }
                     }
 
-                    // Menu hits (map client → layout logical); ignore while closing
+                    // Menu hits. Press highlights immediately; commit is on release.
                     if self.menu_ui_active {
-                        // Settings handoff is animating; don't let the same press act twice.
-                        if self.settings_ui_active && self.settings_transition.is_some() {
+                        if self.settings_transition.is_some() {
                             return;
                         }
-                        let interactive = self
+                        if self.settings_embed {
+                            if let Some((lx, ly)) = self.menu_cursor_logical() {
+                                if let Some(layout) = self.menu_layout.as_ref() {
+                                    if hit_center(layout, lx, ly) {
+                                        self.exit_menu_ui(now);
+                                        if let Some(w) = &self.window {
+                                            w.request_redraw();
+                                        }
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                        let closing = self
                             .pet
                             .as_ref()
-                            .map(|p| p.is_menu_interactive())
+                            .map(|p| p.menu_closing)
                             .unwrap_or(false);
-                        if !interactive {
+                        if closing {
+                            // Grab mid-close: reverse from the live visual.
+                            if let Some(pet) = self.pet.as_mut() {
+                                pet.open_menu(now);
+                            }
+                            self.texture_dirty = true;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
                             return;
                         }
                         if let Some((lx, ly)) = self.menu_cursor_logical() {
                             if let Some(layout) = self.menu_layout.clone() {
                                 if let Some(idx) = hit_test_index(&layout, lx, ly) {
                                     self.menu_press = Some(idx);
+                                    self.menu_hover = Some(idx);
                                     self.texture_dirty = true;
-                                    if let Some(entry) = layout.items.get(idx) {
-                                        self.handle_menu_entry(entry.entry.clone(), Some(idx), now);
-                                    }
-                                    self.menu_press = None;
                                     if let Some(w) = &self.window {
                                         w.request_redraw();
                                     }
@@ -2150,7 +2478,6 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                     return;
                                 }
-                                // Empty card / transparent union padding → close
                                 self.exit_menu_ui(now);
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
@@ -2241,6 +2568,9 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // --- Release: click opens menu or ends drag ---
                 if (button, state) == (WinitMouseButton::Left, ElementState::Released) {
+                    if self.menu_ui_active && self.menu_press.is_some() {
+                        self.commit_menu_press(now);
+                    }
                     let was_dragging = self.drag.dragging;
                     let was_click = self.drag.finish_press();
                     let _ = self
@@ -2407,9 +2737,23 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            if let Some((t0, _)) = self.menu_say {
+                let elapsed = now.saturating_duration_since(t0);
+                if elapsed >= Duration::from_millis(1400) {
+                    self.menu_say = None;
+                    self.texture_dirty = true;
+                    need_redraw = true;
+                } else {
+                    need_redraw = true;
+                }
+            }
             if self.menu_ui_active {
                 let ht = if self.menu_hover.is_some() { 1.0 } else { 0.0 };
-                let pt = if self.menu_press.is_some() { 1.0 } else { 0.0 };
+                let pt = if self.menu_press.is_some() && self.menu_hover == self.menu_press {
+                    1.0
+                } else {
+                    0.0
+                };
                 let nh = crate::render::easing::approach(self.menu_hover_t, ht, 14.0, dt);
                 let np = crate::render::easing::approach(self.menu_press_t, pt, 18.0, dt);
                 if (nh - self.menu_hover_t).abs() > 0.002 || (np - self.menu_press_t).abs() > 0.002
@@ -2517,10 +2861,27 @@ impl ApplicationHandler<UserEvent> for App {
             if let (Some(cursor), Some((pos, size)), Some(pet)) =
                 (cursor_pt, window_info, self.pet.as_mut())
             {
-                let pet_center = Point::new(
-                    pos.x as f64 + size.width as f64 / 2.0,
-                    pos.y as f64 + size.height as f64 / 2.0,
-                );
+                let pet_center = if self.menu_ui_active {
+                    if let (Some((wx, wy)), Some(lay)) =
+                        (self.menu_present_pos, self.menu_layout.as_ref())
+                    {
+                        let d = snap_dpr(self.scale_factor);
+                        Point::new(
+                            wx as f64 + (lay.pet_x as f64 + lay.pet_w as f64 * 0.5) * d,
+                            wy as f64 + (lay.pet_y as f64 + lay.pet_h as f64 * 0.5) * d,
+                        )
+                    } else {
+                        Point::new(
+                            pos.x as f64 + size.width as f64 / 2.0,
+                            pos.y as f64 + size.height as f64 / 2.0,
+                        )
+                    }
+                } else {
+                    Point::new(
+                        pos.x as f64 + size.width as f64 / 2.0,
+                        pos.y as f64 + size.height as f64 / 2.0,
+                    )
+                };
                 let track = !self.drag.dragging && !pet.state.is_reminder();
                 pet.update_gaze(cursor, pet_center, track);
             }
@@ -2892,63 +3253,6 @@ fn scale_rgba_around_anchor(
         }
     }
     (out, dw, dh)
-}
-
-/// Bilinear sample of tightly-packed RGBA8. Transparent outside bounds.
-fn sample_rgba_bilinear(src: &[u8], w: u32, h: u32, x: f64, y: f64) -> [u8; 4] {
-    if w == 0 || h == 0 {
-        return [0, 0, 0, 0];
-    }
-    let x0 = x.floor() as i32;
-    let y0 = y.floor() as i32;
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
-    let fx = (x - x0 as f64).clamp(0.0, 1.0);
-    let fy = (y - y0 as f64).clamp(0.0, 1.0);
-
-    let p = |ix: i32, iy: i32| -> [f64; 4] {
-        if ix < 0 || iy < 0 || ix >= w as i32 || iy >= h as i32 {
-            return [0.0, 0.0, 0.0, 0.0];
-        }
-        let i = ((iy as u32 * w + ix as u32) * 4) as usize;
-        [
-            src[i] as f64,
-            src[i + 1] as f64,
-            src[i + 2] as f64,
-            src[i + 3] as f64,
-        ]
-    };
-
-    // Premultiply for correct alpha blend of edge pixels.
-    let fetch = |ix: i32, iy: i32| -> [f64; 4] {
-        let c = p(ix, iy);
-        let a = c[3] / 255.0;
-        [c[0] * a, c[1] * a, c[2] * a, c[3]]
-    };
-
-    let c00 = fetch(x0, y0);
-    let c10 = fetch(x1, y0);
-    let c01 = fetch(x0, y1);
-    let c11 = fetch(x1, y1);
-
-    let mut out = [0.0f64; 4];
-    for i in 0..4 {
-        let top = c00[i] * (1.0 - fx) + c10[i] * fx;
-        let bot = c01[i] * (1.0 - fx) + c11[i] * fx;
-        out[i] = top * (1.0 - fy) + bot * fy;
-    }
-
-    let a = out[3].clamp(0.0, 255.0);
-    if a < 0.5 {
-        return [0, 0, 0, 0];
-    }
-    let inv = 255.0 / a;
-    [
-        (out[0] * inv).clamp(0.0, 255.0).round() as u8,
-        (out[1] * inv).clamp(0.0, 255.0).round() as u8,
-        (out[2] * inv).clamp(0.0, 255.0).round() as u8,
-        a.round() as u8,
-    ]
 }
 
 fn init_logging() -> Result<(), AppError> {

@@ -56,6 +56,15 @@ pub fn ease_out_back(t: f32) -> f32 {
     1.0 + c3 * t1 * t1 * t1 + c1 * t1 * t1
 }
 
+/// Soft present (~3% overshoot). Dock open: the cat “hands” the card over.
+pub fn ease_out_back_soft(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let c1 = 1.12;
+    let c3 = c1 + 1.0;
+    let t1 = t - 1.0;
+    1.0 + c3 * t1 * t1 * t1 + c1 * t1 * t1
+}
+
 /// Linear interpolation.
 #[inline]
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -90,4 +99,21 @@ pub fn stagger_t(global_t: f32, index: usize, delay_per: f32, span: f32) -> f32 
 pub const EASE_SNAPPY_LABEL: &str = "ease.snappy";
 pub const EASE_SMOOTH_LABEL: &str = "ease.smooth";
 pub const EASE_OUT_BACK_LABEL: &str = "ease.out_back";
+pub const EASE_OUT_BACK_SOFT_LABEL: &str = "ease.out_back_soft";
 pub const EASE_OUT_QUINT_LABEL: &str = "ease.out_quint";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn back_soft_settles_and_overshoots() {
+        assert!((ease_out_back_soft(0.0) - 0.0).abs() < 1e-5);
+        assert!((ease_out_back_soft(1.0) - 1.0).abs() < 1e-5);
+        let mid = (0..20)
+            .map(|i| ease_out_back_soft(i as f32 / 19.0))
+            .fold(0.0f32, f32::max);
+        assert!(mid > 1.0, "soft back must overshoot, got {mid}");
+        assert!(mid < 1.08, "soft back overshoot should stay tiny, got {mid}");
+    }
+}

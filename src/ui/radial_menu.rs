@@ -35,7 +35,7 @@ pub const TITLE_BAND: f32 = 56.0;
 pub const CARD_MARGIN: f32 = 12.0;
 pub const PRIMARY_H: f32 = 40.0;
 pub const PRIMARY_GAP: f32 = 8.0;
-/// Settings gear in the title band (logical px).
+/// Settings paw-mark hit target in the title band (logical px).
 pub const GEAR_SIZE: f32 = 32.0;
 pub const ROW_H: f32 = 42.0;
 pub const ROW_GAP: f32 = 4.0;
@@ -465,7 +465,7 @@ mod tests {
             .items
             .iter()
             .find(|it| matches!(it.entry, MenuEntry::Manage))
-            .expect("settings gear");
+            .expect("settings paw mark");
         let add = lay
             .items
             .iter()
@@ -477,7 +477,7 @@ mod tests {
         assert!(gear.x + gear.w <= lay.card_x + lay.card_w + 0.5);
         assert!(
             gear.y + gear.h <= add.y + 0.5,
-            "gear must stay in the title band above 添加应用"
+            "paw mark must stay in the title band above 添加应用"
         );
         assert!(
             (add.x - lay.card_x).abs() < 24.0,
@@ -485,7 +485,7 @@ mod tests {
         );
         assert!(
             gear.x > add.x + add.w * 0.5,
-            "gear stays on the right, away from title"
+            "paw mark stays on the right, away from title"
         );
     }
 

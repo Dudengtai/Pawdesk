@@ -25,9 +25,9 @@
 **当前拍板（实现向）**
 
 - 启动坞 = **钉宠锚点 + Appica 暖玻璃卡片**（非径向环、非系统 Acrylic）。  
-- 菜单 / 设置 / 提醒叠层：CPU 自绘 + HiDPI 物理像素；开合 scale+fade + 子项 stagger + hover/press 插值。  
+- 菜单 / 设置 / 提醒叠层：CPU 自绘 + HiDPI 物理像素；开合对静帧卡层 scale+fade + hover/press 插值。  
 - **观感目标**：点宠 → **卡片从身边长出**；宠不闪、不跳、不弹（宠始终全不透明；托盘渐入）。  
-- 点右上角齿轮 → **设置从齿轮中心长出**并停靠坞旁；托盘打开设置仍居中。  
+- 点右上角肉垫印 → **设置从该印中心长出**并停靠坞旁；托盘打开设置仍居中。  
 - 开坞 / 设置转场呈现 **~60fps**；几何开局锁定；同帧原子 present（防空帧闪）。  
 - 列表：**视口约 4 行 + 滚轮滚动**（软上限 128，**不是**封顶 5 个）。  
 - 文字：Windows **GDI 栅格**（hinted）；更精致字体渲染 **后期再做**。  
@@ -218,7 +218,7 @@
 
 | 区域 | 内容 |
 | --- | --- |
-| 标题 | 「快捷启动」+ 短说明；**右上角齿轮**进设置 |
+| 标题 | 「快捷启动」+ 短说明；**右上角肉垫印**进设置 |
 | 主按钮 | 添加应用（**纯色实心** slate，无顶高光条、无底外阴影） |
 | 列表 | 常用应用行（图标圆点 + 名 + chevron）；**固定视口 + 滚轮**（紧接添加按钮） |
 | 滚动提示 | 有更多时底部：「↓ 滚轮查看更多 · 共 N 个」 |
@@ -242,13 +242,13 @@
 
 | 阶段 | 参数 |
 | --- | --- |
-| 时钟 | `menu_open_t` 为 **0..1 线性时间**（开 ~**380ms** / 关 ~**240ms**）；视觉曲线在 compose 内计算 |
-| 打开 scale | `ease.out_quint`：**0.90→1.0**，绕**宠心**生长，**无 overshoot** |
-| 打开 fade | `ease.out_cubic`，时钟 ×1.22 封顶，**略领先** scale（先见材质再定形） |
+| 时钟 | `menu_open_t` 为 **0..1 视觉量**（开 ~**180ms** / 关 ~**140ms**，ease-out 两端）；可从当前值反转 |
+| 打开 scale | **0.95→1.0**，绕**宠心**生长，**无 overshoot** |
+| 打开 fade | 时钟 ×1.22 封顶，**略领先** scale（先见材质再定形） |
 | 阴影 | 随 fade 的平方渐入，避免首帧硬阴影 |
 | 宠物 | **始终全不透明**；不参与全局 alpha；托盘 alpha = 卡 fade |
-| 子项 stagger | 卡显形后再 cascade（时钟约 10% 延迟）；opacity + 轻 y **5px** |
-| 关闭 | 线性收回；同一 scale/fade 映射，连续反转 |
+| 子项 | 跟卡一起 fade/scale；**无 stagger**（开合走静帧缓存，不能每帧重绘行） |
+| 关闭 | 同一 scale/fade 映射，连续反转 |
 | Hover | ~100ms `approach` 插值底色 / 阴影 |
 | Press | scale **0.97** + translateY +1px；~80ms 入、松开回弹 |
 | 布局 | **开局锁定 placement**，中途不二次 flip；hit-test 用**最终几何**（视觉偏移不改 hit） |
@@ -258,7 +258,7 @@
 控件配方：
 
 - **Primary**：深 slate 实心「添加应用」+ 细描边（**禁止**厚顶高光 / 底阴影，否则像「两道影」）  
-- **Gear**：标题带右上圆形命中区，进设置  
+- **肉垫印**：标题右上 32px 命中区，进设置（参考奶油圆牌亮面四趾爪印 `assets/ui/settings_paw.png`）  
 - **List row**：avatar 首字母 / `!`、hover 轻抬升、chevron  
 
 **禁止（已踩过的坑）**
@@ -276,7 +276,7 @@
 - 启动成功 → 关坞动画。  
 - **添加应用**：系统文件框打开期间 **坞保持**；launcher **不闪、不掉置顶**。  
 - 文件框默认落在 Shell **虚拟桌面**（用户桌面 ∪ 公共桌面），可见桌面上全部 `.lnk` / `.url` / `.exe`。  
-- 齿轮 → 进设置：**从右上角齿轮中心丝滑生长**，最终停靠在启动坞旁（锚点 + 工作区钳制）；启动坞卡层在转场前段同步淡出，避免硬切。托盘打开设置仍居中。暂停提醒只在托盘 / 设置页。  
+- 肉垫印 → 进设置：**从右上角肉垫印中心丝滑生长**，最终停靠在启动坞旁（锚点 + 工作区钳制）；启动坞卡层在转场前段同步淡出，避免硬切。托盘打开设置仍居中。暂停提醒只在托盘 / 设置页。  
 - 关坞后 **~280ms** 防连环重开。
 
 ### 5.7 桌宠反馈（可选增强）
@@ -326,7 +326,7 @@
 
 ### 7.1 设置面板
 
-- 打开方式：从启动坞右上角齿轮或失效行点击时，面板以该控件为锚点、约 **340ms** 从 **15%** 生长到 100%（`ease.out_quint` scale + `ease.out_cubic` fade），最终停靠在工作区内启动坞旁；托盘「打开设置」保持居中直开。
+- 打开方式：从启动坞右上角肉垫印或失效行点击时，**窗与猫钉死**，设置在原 360×360 卡内从右侧滑入（220ms ease-in-out）；「完成」反转滑回启动坞。托盘「打开设置」保持居中直开。
 - 与启动坞同一套玻璃 / 圆角 / 字号气质。  
 - 分区顺序：  
   1. **健康提醒**（开关、间隔、暂停）  
@@ -351,8 +351,8 @@
 
 | 交互 | 反馈 | 曲线 |
 | --- | --- | --- |
-| 单击开坞 | 卡 scale 0.90→1 + fade（宠钉住不闪）+ 轻 cascade；**~60fps** | out_quint ~380ms |
-| 关坞 | 卡连续收回；宠保持 | linear clock ~240ms |
+| 单击开坞 | 卡 scale 0.95→1 + fade（宠钉住不闪）；静帧缓存 ~60fps | out_quint ~180ms |
+| 关坞 | 卡连续收回；宠保持 | out_quint ~140ms |
 | 开坞首帧 | 原子 present（尺寸+坐标+像素同帧）；托盘未显、剪影连续 | tech §5.4 |
 | 管理 → 设置 | 面板从按钮中心 **15%→100%** 生长 + fade；启动坞卡层前段淡出；最终停靠坞旁 | out_quint + out_cubic ~340ms |
 | 托盘 → 设置 | 居中直开（无生长转场） | — |
@@ -397,10 +397,10 @@ assets/tray/icon.png
 | 设置旁停靠 / 生长矩形 | `place_settings_near_point` · `settings_rect_at` · `union_rects` |
 | 设置转场时钟 | `app::SettingsTransition` · `begin_settings_from_launcher` · `tick/finish_settings_transition` |
 | 转场合成 blit | `menu_ui::blit_rgba` + `scale_rgba_around_anchor`（app） |
-| Appica 玻璃坞 / 控件 | `render/menu_ui.rs`（token、flat primary、soft/row、stagger） |
+| Appica 玻璃坞 / 控件 | `render/menu_ui.rs`（token、flat primary、soft/row、静帧缓存） |
 | UI 文字 | `render/text.rs` → **GDI** YaHei UI（后期可再精致化） |
 | 缓动 / stagger / approach | `render/easing.rs` |
-| open_t 线性时钟 | `pet::tick_menu_anim`（开 380ms / 关 240ms） |
+| open_t 视觉时钟 | `pet::tick_menu_anim`（开 180ms / 关 140ms，ease-out 两端） |
 | 视觉曲线 + 宠不闪 | `compose_menu_frame`（per-layer fade；宠全不透明；托盘渐入） |
 | hover/press 插值 | `app` `menu_hover_t` / `menu_press_t` + `MenuChromeState` |
 | 列表滚动 | `menu_list_scroll` + `layout_pinned_scroll` + `MouseWheel`；视口 `LIST_VISIBLE_ROWS=5` |

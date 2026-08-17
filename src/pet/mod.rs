@@ -84,13 +84,13 @@ pub struct PetController {
     /// Food button rect in window client coords (logical px), set while Showing.
     pub food_button_rect: Option<(f32, f32, f32, f32)>,
     // ── M4 menu ──
-    /// Visual progress 0→1 open, 1→0 while closing (task §14 L3).
+    /// Visual 0..1 (already ease-out). Compose uses this as-is.
     pub menu_open_t: f32,
     pub menu_anim_started: Option<Instant>,
     /// True while playing close animation (still `MenuOpen` until done).
     pub menu_closing: bool,
-    /// `menu_open_t` at the moment close started (for reverse lerp).
-    menu_close_from_t: f32,
+    /// Visual `menu_open_t` at the start of the current open/close segment.
+    menu_seg_from: f32,
     /// Horizontal facing while watching: -1 = face left, 1 = face right.
     /// Smoothed toward [`Self::face_dir_target`] each tick for soft flips.
     pub face_dir: f32,
@@ -159,7 +159,7 @@ impl PetController {
             menu_open_t: 0.0,
             menu_anim_started: None,
             menu_closing: false,
-            menu_close_from_t: 1.0,
+            menu_seg_from: 0.0,
             face_dir: 1.0,
             face_dir_target: 1.0,
             display_frame_f: 0.0,
@@ -309,11 +309,19 @@ impl PetController {
                 self.state = PetState::Idle(IDLE_BASE.to_string());
             }
         }
+        if matches!(self.state, PetState::MenuOpen) && self.menu_closing {
+            // Reverse a close from the current visual — no jump back to 0.
+            self.menu_closing = false;
+            self.menu_seg_from = self.menu_open_t.clamp(0.0, 1.0);
+            self.menu_anim_started = Some(now);
+            info!(from = self.menu_seg_from, "menu reopen from close");
+            return true;
+        }
         if let Ok(s) = try_transition(&self.state, PetState::MenuOpen) {
             self.state = s;
             self.menu_open_t = 0.0;
             self.menu_closing = false;
-            self.menu_close_from_t = 1.0;
+            self.menu_seg_from = 0.0;
             self.menu_anim_started = Some(now);
             self.switch_clip_for_state(now);
             info!("menu opened");
@@ -350,10 +358,15 @@ impl PetController {
             return false;
         }
         self.menu_closing = true;
-        self.menu_close_from_t = self.menu_open_t.clamp(0.0, 1.0);
+        self.menu_seg_from = self.menu_open_t.clamp(0.0, 1.0);
         self.menu_anim_started = Some(now);
-        info!(from = self.menu_close_from_t, "menu close anim start");
+        info!(from = self.menu_seg_from, "menu close anim start");
         true
+    }
+
+    /// True while the dock is interpolating open or closed.
+    pub fn is_menu_animating(&self) -> bool {
+        matches!(self.state, PetState::MenuOpen) && self.menu_anim_started.is_some()
     }
 
     /// Advance open/close animation.
@@ -362,19 +375,18 @@ impl PetController {
         if !matches!(self.state, PetState::MenuOpen) {
             return (false, false);
         }
-        // Silk open: longer settle, no overshoot. Linear clock in pet; compose multi-curves.
-        // Close slightly shorter with ease-in feel via compose.
-        const OPEN_DUR: f32 = 0.38;
-        const CLOSE_DUR: f32 = 0.24;
+        // Tens/day popover: 180 / 140. Quint ease-out both legs, from current visual.
+        const OPEN_DUR: f32 = 0.18;
+        const CLOSE_DUR: f32 = 0.14;
 
         if self.menu_closing {
             let Some(start) = self.menu_anim_started else {
                 self.close_menu(now);
                 return (true, true);
             };
-            // Linear 1→0 clock; visual ease applied in compose for smooth reverse.
             let u = (now.duration_since(start).as_secs_f32() / CLOSE_DUR).clamp(0.0, 1.0);
-            self.menu_open_t = self.menu_close_from_t * (1.0 - u);
+            let k = crate::render::easing::ease_out_quint(u);
+            self.menu_open_t = self.menu_seg_from * (1.0 - k);
             if u >= 1.0 {
                 self.menu_open_t = 0.0;
                 self.menu_anim_started = None;
@@ -387,10 +399,10 @@ impl PetController {
             return (true, false);
         }
 
-        // Opening — store **linear** 0→1; compose applies ease_out_quint / fade lead.
         if let Some(start) = self.menu_anim_started {
             let u = (now.duration_since(start).as_secs_f32() / OPEN_DUR).clamp(0.0, 1.0);
-            self.menu_open_t = u;
+            let k = crate::render::easing::ease_out_quint(u);
+            self.menu_open_t = self.menu_seg_from + (1.0 - self.menu_seg_from) * k;
             if u >= 1.0 {
                 self.menu_open_t = 1.0;
                 self.menu_anim_started = None;
@@ -1348,5 +1360,46 @@ mod master_identity_tests {
             PetState::Reminder(ReminderStage::Showing)
         ));
         assert_eq!(pet.player.clip_name(), IDLE_BASE);
+    }
+
+    #[test]
+    fn menu_close_ease_out_starts_immediately() {
+        let t0 = Instant::now();
+        let mut pet = load_pet(t0);
+        assert!(pet.open_menu(t0));
+        let opened = t0 + Duration::from_millis(180);
+        let (dirty, done) = pet.tick_menu_anim(opened);
+        assert!(dirty || pet.menu_open_t >= 0.99);
+        assert!(!done);
+        assert!(pet.menu_open_t >= 0.99);
+        assert!(pet.begin_close_menu(opened));
+        let mid = opened + Duration::from_millis(28); // 20% of 140ms
+        pet.tick_menu_anim(mid);
+        assert!(
+            pet.menu_open_t < 0.65,
+            "ease-out close must drop fast, got {}",
+            pet.menu_open_t
+        );
+        assert!(pet.menu_open_t > 0.20, "must not vanish in 28ms");
+    }
+
+    #[test]
+    fn menu_reopen_from_close_keeps_visual() {
+        let t0 = Instant::now();
+        let mut pet = load_pet(t0);
+        assert!(pet.open_menu(t0));
+        pet.tick_menu_anim(t0 + Duration::from_millis(180));
+        assert!(pet.begin_close_menu(t0 + Duration::from_millis(180)));
+        let mid = t0 + Duration::from_millis(180 + 40);
+        pet.tick_menu_anim(mid);
+        let vis = pet.menu_open_t;
+        assert!(vis > 0.0 && vis < 1.0);
+        assert!(pet.open_menu(mid));
+        assert!(!pet.menu_closing);
+        assert!(
+            (pet.menu_open_t - vis).abs() < 0.02,
+            "reopen must start from current visual {vis}, got {}",
+            pet.menu_open_t
+        );
     }
 }

@@ -242,28 +242,28 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 函数 | 作用 |
 | --- | --- |
 | `place_settings_near_point(anchor, w, h, work, margin)` | 以锚点为中心种子，`shift` 钳进 work，得到最终设置矩形 |
-| `settings_rect_at(anchor, final, w, h, t)` | 转场中插值：中心 anchor→final，scale **0.15→1**（`ease_out_quint`）；`t=1` ≡ `final` |
+| `settings_rect_at(anchor, final, w, h, t)` | 转场中插值：中心 anchor→final，scale **0.90→1**（`ease_out_quint`）；`t=1` ≡ `final` |
 
 ### 5.3 接线与绘制
 
 | 步骤 | 位置 |
 | --- | --- |
-| 开坞 | `app::enter_menu_ui`：探头 snap → `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → `menu_present_pos` → resize → **立即 `redraw()`** |
+| 开坞 | `app::enter_menu_ui`：探头 snap → `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → `menu_present_pos` → resize → **宠物-only 立即 present** → 合成静帧卡层缓存 |
 | 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + **视口内**快捷行；宠在 **pet_local** |
 | 列表数据 | `build_entries`：全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限 |
-| 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll`（转场中禁用） |
-| 绘制 | `compose_menu_frame`：Appica token；flat primary；卡层 fade/scale；宠全不透明；滚动提示文案 |
-| 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium） |
-| 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **线性** 0..1；开 **380ms** / 关 **240ms** |
-| 视觉曲线 | compose：`ease_out_quint` scale 0.90→1；`ease_out_cubic` fade 略领先；子项 `stagger_t` |
+| 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll`（转场中 / 开合动画中禁用） |
+| 绘制 | 开合：`present_menu_cached` 对静帧卡层 scale+fade + 钉宠；落定后 `compose_menu_frame` live（hover/press） |
+| 文字 | `render/text.rs`：**GDI** 白底黑字 → 覆盖率 → 着色（YaHei UI Medium）；开合不重跑 GDI |
+| 动画时钟 | `pet::tick_menu_anim`：`menu_open_t` **视觉** 0..1（ease-out 两端）；开 **180ms** / 关 **140ms** |
+| 视觉曲线 | `menu_visual_scale` 0.95→1 绕宠心；`menu_visual_fade` ×1.22 领先；无 stagger |
 | 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t }`；`app` 每帧 `approach` 插值 |
-| 齿轮→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
+| 肉垫印→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
 | 托盘→设置 | `enter_settings_ui` / `enter_settings_ui_highlight`：居中直开，**无** `settings_transition` |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
 | 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定 / 托盘直开设置） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
-卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=5`；右上角齿轮进设置；**禁止**把产品做成「最多 5 个就装不下」。  
+卡片：`CARD_LOGICAL_W/H` ≈ **360×360**；`LIST_VISIBLE_ROWS=5`；右上角肉垫印进设置；**禁止**把产品做成「最多 5 个就装不下」。  
 设置：失效项可 `settings_highlight_row` 高亮列表行；设置面板共用同一 token。
 
 ### 5.4 呈现与防闪（重要）
@@ -273,7 +273,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
 | 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
-| 设置转场 | 点击齿轮 / 失效行 → `begin_settings_from_launcher`：锚点 = 控件中心，`place_settings_near_point` 钳制最终矩形；`settings_transition` 线性 340ms，60fps，union(启动坞, 当前设置) 合成 + `update_layered_rgba_ex(screen_pos)` 原子 present；前 40% 启动坞卡层与宠物淡出，设置层 `scale_rgba_around_anchor` 从 15% 生长（`ease_out_quint` + `ease_out_cubic`），t=1 后 `finish_settings_transition` 同步 winit 几何 |
+| 设置转场 | 点击肉垫印 / 失效行 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。「完成」反转滑回。托盘设置仍居中 420×640 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
 | 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
 | 转场命中 | 生长期间 **不**接 settings hit；t=1 后 `finish_settings_transition` 再开 |

@@ -120,10 +120,13 @@ pub fn place_settings_near_point(
     r
 }
 
+/// Settings grow start scale. Never `0` — same rule as the dock popover.
+pub const SETTINGS_GROW_FROM: f32 = 0.90;
+
 /// Settings rect while it grows from `anchor` toward `final_rect`.
 ///
-/// `t` is the linear transition clock 0..1. Scale starts at 15% and settles with
-/// the same `ease_out_quint` used by the launcher; the center eases from the
+/// `t` is the linear transition clock 0..1. Scale starts at [`SETTINGS_GROW_FROM`]
+/// and settles with `ease_out_quint`; the center eases from the
 /// anchor to the final rect center, so `t=1` exactly equals `final_rect`.
 pub fn settings_rect_at(
     anchor: (i32, i32),
@@ -133,7 +136,7 @@ pub fn settings_rect_at(
     t: f32,
 ) -> Rect {
     let k = ease_out_quint(t);
-    let s = 0.15 + 0.85 * k;
+    let s = SETTINGS_GROW_FROM + (1.0 - SETTINGS_GROW_FROM) * k;
     let w = ((settings_w as f32) * s).round().max(1.0) as i32;
     let h = ((settings_h as f32) * s).round().max(1.0) as i32;
     let fcx = final_rect.x + final_rect.width / 2;
@@ -569,6 +572,11 @@ mod tests {
         assert!(r.width > 0 && r.height > 0);
         assert_eq!(r.x + r.width / 2, 400);
         assert_eq!(r.y + r.height / 2, 300);
+        assert!(
+            (r.width as f32 - 420.0 * SETTINGS_GROW_FROM).abs() < 2.0,
+            "t=0 must start near full size, not from a speck; got {}",
+            r.width
+        );
     }
 
     #[test]
