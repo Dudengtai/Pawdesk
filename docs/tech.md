@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.17**（2026-08-17：坞卡无外阴影 + 拖动分层合成） |
-| 依据 | `prd.md` v0.7.7 · `design.md` v0.20 |
+| 版本 | **v0.18**（2026-08-17：取消托盘暂停/打开设置；改大小预览） |
+| 依据 | `prd.md` v0.7.8 · `design.md` v0.21 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -168,8 +168,8 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | 实际边长 | `pet_logical_size(scale)` = round(128 × scale)，钳位约 64–256 |
 | 默认 | **0.6**（schema v3 迁移会把旧 `1.0` 拉到默认） |
 | 范围 / 步进 | **0.5–1.5** / **0.1**（`clamp_pet_scale` / `step_pet_scale`） |
-| 入口 | 设置页 `−`/`+`；托盘 `PetScaleUp` / `PetScaleDown` |
-| 生效 | 待机即时 `resize_pet_window`；设置内改配置，退出设置回宠窗时用新尺寸 |
+| 入口 | 设置页 `−`/`+`（`pet_scale_draft` 预览，「完成」写入）；托盘 `PetScaleUp` / `PetScaleDown` |
+| 生效 | 待机即时改窗 + `idle_present_pos` 原子 ULW；设置内只改绘制比例，不重排叠层窗；「完成」后 `sync_menu_pet_slot_to_effective_scale` 保持新尺寸回待机 |
 | 建窗 | `create_window` 用 `pet_size()`，并强制物理 resize（防 DPI 忽略 LogicalSize） |
 
 ---
@@ -208,7 +208,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 宠物 | 128×`pet.scale` 逻辑（默认 ~77） | 日常；用户可调 |
 | 启动坞 | union(宠, 卡) | `place_launcher` |
 | 提醒 | 固定提醒窗 | 居中 |
-| 设置 | 420×320 逻辑 | 启动坞转场后停靠坞旁；托盘直开居中 |
+| 设置 | 启动坞卡内滑入 | 仅肉垫印入口；窗几何锁在坞上 |
 
 `overlay_origin`：进叠层前宠物 top-left；退出恢复；**禁止**把坞临时坐标写入配置。
 
@@ -258,11 +258,11 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 视觉曲线 | `menu_visual_scale` 0.95→1 绕宠心；`menu_visual_fade` ×1.22 领先；无 stagger；坞卡无外投影，顶高光 `fill_top_sheen` 裁进圆角 |
 | 交互 chrome | `MenuChromeState { hover, press, hover_t, press_t, drag, drag_draft, rows_blank }`；`app` 每帧 `approach` 插值 |
 | 列表拖动 | `ui/list_drag.rs`：400ms 长按 + 8px slop → `Dragging`；插入下标按指针 y；空碗命中删条目 |
-| 拖动合成 | 按下即 `prerender_drag_images`（拎起行 / 碗 / 文案）+ `prerender_list_rows` + 空白卡层；`DragLayersKey` 只在 scroll/总数/hover/press/say 变时重建；每帧 `present_menu_drag` 只 blit 行到 `drag_slot_y` + 拎起行 + 碗 |
-| 肉垫印→设置 | `handle_menu_entry` → `menu_anchor_screen_for` → `begin_settings_from_launcher`（见 §5.4） |
-| 托盘→设置 | `enter_settings_ui`：居中直开，**无** `settings_transition` |
+| 拖动合成 | 按下即 `prerender_drag_images`（拎起行无投影 / 碗 / 文案）+ `prerender_list_rows` + 空白卡层；`DragLayersKey` 只在 scroll/总数/hover/press/say 变时重建；每帧 `present_menu_drag` 只 blit 行到 `drag_slot_y` + 拎起行 + 碗 |
+| 肉垫印→设置 | `handle_menu_entry` → `begin_settings_from_launcher`（见 §5.4）；**唯一**设置入口 |
+| 设置「暂停」 | 不写 `reminder.paused`；`menu_say = SAY_NO_PAUSE` + `pet.begin_sly_pause`（`sly_pause` 1 帧，只换脸，~2.8s） |
 | 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
-| 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定 / 托盘直开设置） |
+| 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
 卡片：`CARD_LOGICAL_W/H` ≈ **360×450**；`LIST_VISIBLE_ROWS=5`；「再叼一个」与列表之间固定「最近启用」分区（标题 + 整宽圆角框，框内最多 **6** 个图标；`launch_count` 降序，并列 `last_launched_at_ms` 新的在前；空框仍保留）；列表前有「应用列表」标题与之隔离；右上角肉垫印进设置；**禁止**把产品做成「最多 5 个就装不下」。  
@@ -275,7 +275,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
 | 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
-| 设置转场 | 点击肉垫印 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。「完成」反转滑回。托盘设置仍居中 420×320 |
+| 设置转场 | 点击肉垫印 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。「完成」反转滑回，宠保持提交后的尺寸 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
 | 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
 | 转场命中 | 生长期间 **不**接 settings hit；t=1 后 `finish_settings_transition` 再开 |
@@ -353,7 +353,7 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 
 ### 7.3 托盘命令
 
-`TrayCommand`：`ShowPet` · `HidePet` · `PetScaleUp` · `PetScaleDown` · `ToggleReminderPause` · `OpenSettings` · `Exit`。
+`TrayCommand`：`ShowPet` · `HidePet` · `PetScaleUp` · `PetScaleDown` · `Exit`。
 
 ### 7.4 添加应用 / 文件选择（`shortcut/picker.rs`）
 
@@ -479,3 +479,4 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.15** | **2026-08-17** | 启动坞「最近启用」：`launch_count` / `last_launched_at_ms` + `rank_frequent` + `MenuEntry::Recent`；卡高 **360×450**；design **v0.18** · prd **v0.7.5** |
 | **v0.16** | **2026-08-17** | 坞内长按拖动：`list_drag` + 空碗删除；设置去掉常用应用（420×320）；失效行文件框修复；design **v0.19** · prd **v0.7.6** |
 | **v0.17** | **2026-08-17** | 坞卡去掉外投影；宠自由剪影且不随卡 scale；拖动分层：长按预热 `ghost/bowl/hint` + 空白卡 + 行位图，插缝只 blit；design **v0.20** · prd **v0.7.7** |
+| **v0.18** | **2026-08-17** | 取消托盘暂停/打开设置；设置暂停 `SAY_NO_PAUSE` + `sly_pause`；`pet_scale_draft` 预览 + `idle_present_pos`；拎起行无投影；design **v0.21** · prd **v0.7.8** |

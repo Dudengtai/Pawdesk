@@ -8,7 +8,7 @@ mod state;
 
 pub use animation::{
     AnimationClip, AnimationLibrary, AnimationPlayer, IdlePicker, IDLE_BASE, IDLE_YAWN,
-    IDLE_ACTION_INTERVAL_SECS, blend_rgba_premul,
+    IDLE_ACTION_INTERVAL_SECS, SLY_PAUSE, SLY_PAUSE_HOLD, blend_rgba_premul,
 };
 pub use look::LookController;
 pub use interaction::{DistanceLevel, InteractionDetector};
@@ -112,6 +112,8 @@ pub struct PetController {
     blink_rng: u32,
     look: LookController,
     look_last: Instant,
+    /// Hold the sly sit pose until this instant (pause-button refusal).
+    sly_until: Option<Instant>,
 }
 
 impl PetController {
@@ -173,7 +175,48 @@ impl PetController {
             blink_rng: seed_blink_rng(now),
             look: LookController::default(),
             look_last: now,
+            sly_until: None,
         }
+    }
+
+    pub fn is_sly_pause(&self) -> bool {
+        self.sly_until.is_some() && self.player.clip_name() == SLY_PAUSE
+    }
+
+    /// Snap to the sly clasped-paws sit. No crossfade — blending two faces ghosts.
+    pub fn begin_sly_pause(&mut self, now: Instant) {
+        let Some(clip) = self.library.get(SLY_PAUSE) else {
+            warn!("sly_pause clip missing — pause refuse stays on current sit");
+            return;
+        };
+        self.sly_until = Some(now + SLY_PAUSE_HOLD);
+        self.crossfade_from = None;
+        self.crossfade_started = None;
+        self.crossfade_t = 1.0;
+        self.crossfade_display = false;
+        self.player = AnimationPlayer::start(clip, now);
+        self.current_frame = 0;
+        self.display_frame_f = 0.0;
+        info!("pet sly pause pose");
+    }
+
+    fn end_sly_pause(&mut self, now: Instant) {
+        self.sly_until = None;
+        if self.player.clip_name() != SLY_PAUSE {
+            return;
+        }
+        let Some(clip) = self.library.get(IDLE_BASE) else {
+            return;
+        };
+        self.crossfade_from = None;
+        self.crossfade_started = None;
+        self.crossfade_t = 1.0;
+        self.crossfade_display = false;
+        self.player = AnimationPlayer::start(clip, now);
+        self.current_frame = 0;
+        self.display_frame_f = 0.0;
+        self.blink_anchor = now;
+        info!("pet sly pause ended -> base blink");
     }
 
     /// RGBA for current display.
@@ -440,6 +483,12 @@ impl PetController {
         let mut changed = self.tick_crossfade(now);
         changed |= self.tick_face_dir(now);
         changed |= self.tick_look(now);
+        if let Some(until) = self.sly_until {
+            if now >= until {
+                self.end_sly_pause(now);
+                changed = true;
+            }
+        }
 
         // Dragging: stay on the master sit. The old `dragging` swing clip is a
         // different cat and must not flash when the window starts moving.
@@ -1265,6 +1314,9 @@ impl PetController {
     }
 
     fn switch_clip_for_state(&mut self, now: Instant) {
+        if self.sly_until.is_some_and(|t| now < t) {
+            return;
+        }
         let clip_name = match &self.state {
             PetState::Idle(name) => name.clone(),
             // Use base sit+blink (not warped watch) — head-sway clips caused double nose/mouth.
@@ -1320,6 +1372,29 @@ mod master_identity_tests {
     fn load_pet(now: Instant) -> PetController {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pets/cow-cat");
         PetController::new(AnimationLibrary::load_all(&dir), now)
+    }
+
+    #[test]
+    fn sly_pause_holds_then_returns_to_sit() {
+        let now = Instant::now();
+        let mut pet = load_pet(now);
+        assert!(
+            pet.library.get(SLY_PAUSE).is_some(),
+            "sly_pause clip must load from assets"
+        );
+        pet.open_menu(now);
+        pet.begin_sly_pause(now);
+        assert_eq!(pet.player.clip_name(), SLY_PAUSE);
+        assert!(pet.is_sly_pause());
+        pet.switch_clip_for_state(now);
+        assert_eq!(
+            pet.player.clip_name(),
+            SLY_PAUSE,
+            "menu clip switch must not wipe the sly pose"
+        );
+        pet.tick(now + SLY_PAUSE_HOLD + Duration::from_millis(20));
+        assert_eq!(pet.player.clip_name(), IDLE_BASE);
+        assert!(!pet.is_sly_pause());
     }
 
     #[test]

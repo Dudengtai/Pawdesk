@@ -14,8 +14,6 @@ pub struct TrayHandle {
     pub exit_id: tray_icon::menu::MenuId,
     pub show_id: tray_icon::menu::MenuId,
     pub hide_id: tray_icon::menu::MenuId,
-    pub pause_id: tray_icon::menu::MenuId,
-    pub settings_id: tray_icon::menu::MenuId,
     pub scale_up_id: tray_icon::menu::MenuId,
     pub scale_down_id: tray_icon::menu::MenuId,
 }
@@ -28,16 +26,12 @@ impl TrayHandle {
         let hide = MenuItem::new("隐藏宠物", true, None);
         let scale_up = MenuItem::new("宠物变大", true, None);
         let scale_down = MenuItem::new("宠物变小", true, None);
-        let pause = MenuItem::new("暂停提醒", true, None);
-        let settings = MenuItem::new("打开设置", true, None);
         let exit = MenuItem::new("退出", true, None);
 
         let show_id = show.id().clone();
         let hide_id = hide.id().clone();
         let scale_up_id = scale_up.id().clone();
         let scale_down_id = scale_down.id().clone();
-        let pause_id = pause.id().clone();
-        let settings_id = settings.id().clone();
         let exit_id = exit.id().clone();
 
         let menu = Menu::new();
@@ -50,12 +44,6 @@ impl TrayHandle {
         menu.append(&scale_up)
             .map_err(|e| AppError::Platform(format!("tray menu append: {e}")))?;
         menu.append(&scale_down)
-            .map_err(|e| AppError::Platform(format!("tray menu append: {e}")))?;
-        menu.append(&PredefinedMenuItem::separator())
-            .map_err(|e| AppError::Platform(format!("tray menu append: {e}")))?;
-        menu.append(&pause)
-            .map_err(|e| AppError::Platform(format!("tray menu append: {e}")))?;
-        menu.append(&settings)
             .map_err(|e| AppError::Platform(format!("tray menu append: {e}")))?;
         menu.append(&PredefinedMenuItem::separator())
             .map_err(|e| AppError::Platform(format!("tray menu append: {e}")))?;
@@ -76,8 +64,6 @@ impl TrayHandle {
             exit_id,
             show_id,
             hide_id,
-            pause_id,
-            settings_id,
             scale_up_id,
             scale_down_id,
         })
@@ -93,10 +79,6 @@ impl TrayHandle {
                     Some(TrayCommand::ShowPet)
                 } else if event.id == self.hide_id {
                     Some(TrayCommand::HidePet)
-                } else if event.id == self.pause_id {
-                    Some(TrayCommand::ToggleReminderPause)
-                } else if event.id == self.settings_id {
-                    Some(TrayCommand::OpenSettings)
                 } else if event.id == self.scale_up_id {
                     Some(TrayCommand::PetScaleUp)
                 } else if event.id == self.scale_down_id {

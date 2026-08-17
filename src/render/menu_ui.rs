@@ -36,6 +36,8 @@ const EMPTY_HINT: &str = "点「再叼一个」选 exe / 快捷方式";
 pub const SAY_LAUNCH: &str = "收到，马上打开～";
 pub const SAY_FAIL: &str = "这个应用好像搬家了…";
 pub const SAY_EATEN: &str = "唔，吃掉啦";
+/// Settings 「暂停」 is decorative: the cat refuses in first person.
+pub const SAY_NO_PAUSE: &str = "我没有这个功能，\n该喝水喝水，该活动活动";
 const DELETE_HINT: &str = "喂给我删除";
 /// text.intense
 const LABEL: [u8; 4] = [0x0F, 0x17, 0x2B, 0xFF];
@@ -56,7 +58,6 @@ const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 const ACCENT_PINK: [u8; 4] = [0xFF, 0x9E, 0xC4, 0xFF];
 const SHADOW_A: [u8; 4] = [0x0F, 0x17, 0x2B, 0x0A];
 const SHADOW_B: [u8; 4] = [0x0F, 0x17, 0x2B, 0x12];
-const SHADOW_C: [u8; 4] = [0x0F, 0x17, 0x2B, 0x1C];
 const SHADOW_BTN: [u8; 4] = [0x0F, 0x17, 0x2B, 0x28];
 
 /// Live list-drag overlay (not Copy — holds the row snapshot).
@@ -75,7 +76,7 @@ pub struct MenuDragChrome {
     pub over_bowl: bool,
     pub row_w: f32,
     pub row_h: f32,
-    /// Pre-rendered lifted row (shadow baked in), device px. Built once at drag
+    /// Pre-rendered lifted row (no drop shadow), device px. Built once at drag
     /// start so per-frame drag composition never re-rasterizes text / icons.
     pub ghost_img: Option<(u32, u32, Vec<u8>)>,
     /// Pre-rendered delete bowl at rest size (see [`prerender_drag_images`]).
@@ -227,7 +228,16 @@ pub fn compose_menu_frame(
         pet_h,
     );
     if let Some(line) = chrome.say {
-        draw_say_bubble(&mut out, w, h, dpi, layout, line, t_fade.max(0.85));
+        draw_say_bubble(
+            &mut out,
+            w,
+            h,
+            dpi.dpr,
+            Some(layout),
+            None,
+            line,
+            t_fade.max(0.85),
+        );
     }
     // The delete bowl after the pet so its hint never sits under the silhouette.
     if let Some(drag) = chrome.drag.as_ref() {
@@ -271,6 +281,42 @@ pub fn compose_menu_pet_only(
         layout.pet_y,
         layout.pet_w,
         layout.pet_h,
+        pet_rgba,
+        pet_w,
+        pet_h,
+    );
+    (w, h, out)
+}
+
+/// Settings live-size preview: the pet drawn inside its fixed layout rect,
+/// scaled by `scale_ratio`. The rect grows right/down from the layout rect's
+/// top-left — the same anchor the real pet window resize uses — so the
+/// previewed desk position matches where the pet rests after commit.
+pub fn compose_menu_pet_preview(
+    pet_rgba: &[u8],
+    pet_w: u32,
+    pet_h: u32,
+    layout: &RadialLayout,
+    dpr: f32,
+    scale_ratio: f32,
+) -> (u32, u32, Vec<u8>) {
+    let dpi = Dpi::new(dpr);
+    let w = dpi.su(layout.window_w);
+    let h = dpi.su(layout.window_h);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    let k = scale_ratio.clamp(0.001, 4.0);
+    let pw = layout.pet_w * k;
+    let ph = layout.pet_h * k;
+    let px = layout.pet_x;
+    let py = layout.pet_y;
+    draw_avatar(
+        &mut out,
+        w,
+        dpi,
+        px,
+        py,
+        pw,
+        ph,
         pet_rgba,
         pet_w,
         pet_h,
@@ -400,7 +446,7 @@ pub fn present_menu_drag(
         pet_src_h,
     );
     if let Some(line) = say {
-        draw_say_bubble(dest, dw, dh, dpi, layout, line, 1.0);
+        draw_say_bubble(dest, dw, dh, dpi.dpr, Some(layout), None, line, 1.0);
     }
     let Some(drag) = drag else {
         return;
@@ -437,7 +483,7 @@ pub fn present_menu_drag(
         k += 1;
     }
 
-    // Lifted row: pre-rendered bitmap (shadow baked in) at the pointer.
+    // Lifted row: pre-rendered bitmap at the pointer.
     if let Some((iw, ih, img)) = &drag.ghost_img {
         let lift = GHOST_LIFT;
         let bw = dpi.s(drag.row_w) * lift;
@@ -1012,12 +1058,14 @@ fn draw_card_tail(
     let _ = edge;
 }
 
-fn draw_say_bubble(
+/// Comic say-bubble next to the pet (or at `fallback_xy` logical px).
+pub fn draw_say_bubble(
     out: &mut [u8],
     w: u32,
     h: u32,
-    dpi: Dpi,
-    layout: &RadialLayout,
+    dpr: f32,
+    layout: Option<&RadialLayout>,
+    fallback_xy: Option<(f32, f32)>,
     line: &str,
     fade: f32,
 ) {
@@ -1025,29 +1073,41 @@ fn draw_say_bubble(
     if fade < 0.05 {
         return;
     }
-    let max_w = dpi.su(168);
+    let dpi = Dpi::new(dpr);
+    let max_w = dpi.su(200);
     let Some((tw, th, tbuf)) =
         rasterize_text(line, max_w, dpi.px(12.0), with_alpha(PAW_INK, fade))
     else {
         return;
     };
     let pad_x = dpi.s(10.0);
-    let pad_y = dpi.s(6.0);
+    let pad_y = dpi.s(7.0);
     let bw = tw as f32 + pad_x * 2.0;
     let bh = th as f32 + pad_y * 2.0;
-    let toward_card = if layout.card_x + layout.card_w * 0.5 >= layout.pet_x + layout.pet_w * 0.5 {
-        1.0
+    let tail_w = dpi.s(7.0);
+    let (mut x, mut y, toward_card) = if let Some(layout) = layout {
+        let toward_card =
+            if layout.card_x + layout.card_w * 0.5 >= layout.pet_x + layout.pet_w * 0.5 {
+                1.0
+            } else {
+                -1.0
+            };
+        // Sit beside the pet, not over the face: start past the silhouette
+        // (plus a small gap for the tail). Vertically pin to the head band.
+        let gap = dpi.s(8.0);
+        let x = if toward_card > 0.0 {
+            dpi.s(layout.pet_x + layout.pet_w) + gap
+        } else {
+            dpi.s(layout.pet_x) - bw - gap
+        };
+        (x, dpi.s(layout.pet_y + layout.pet_h * 0.06), toward_card)
+    } else if let Some((lx, ly)) = fallback_xy {
+        (dpi.s(lx), dpi.s(ly), 1.0)
     } else {
-        -1.0
+        (dpi.s(16.0), dpi.s(16.0), 1.0)
     };
-    let x = if toward_card > 0.0 {
-        dpi.s(layout.pet_x + layout.pet_w * 0.55)
-    } else {
-        dpi.s(layout.pet_x + layout.pet_w * 0.45) - bw
-    };
-    let y = dpi.s(layout.pet_y + 4.0);
-    let x = x.clamp(dpi.s(2.0), (w as f32 - bw - 2.0).max(0.0));
-    let y = y.clamp(dpi.s(2.0), (h as f32 - bh - 2.0).max(0.0));
+    x = x.clamp(dpi.s(2.0) + tail_w, (w as f32 - bw - 2.0).max(0.0));
+    y = y.clamp(dpi.s(2.0), (h as f32 - bh - 2.0).max(0.0));
     fill_rrect_aa(
         out,
         w,
@@ -1060,6 +1120,36 @@ fn draw_say_bubble(
         with_alpha(SHADOW_B, fade),
     );
     fill_rrect_aa(out, w, h, x, y, x + bw, y + bh, dpi.s(10.0), with_alpha(WHITE, fade));
+    // Tail pointing at the cat (or up at the pause chip on the standalone card).
+    let ty = y + bh * 0.62;
+    let white = with_alpha(WHITE, fade);
+    if toward_card > 0.0 {
+        fill_triangle(
+            out,
+            w,
+            h,
+            x - tail_w,
+            ty,
+            x + 1.0,
+            ty - dpi.s(6.0),
+            x + 1.0,
+            ty + dpi.s(6.0),
+            white,
+        );
+    } else {
+        fill_triangle(
+            out,
+            w,
+            h,
+            x + bw + tail_w,
+            ty,
+            x + bw - 1.0,
+            ty - dpi.s(6.0),
+            x + bw - 1.0,
+            ty + dpi.s(6.0),
+            white,
+        );
+    }
     stroke_rrect_aa(
         out,
         w,
@@ -1521,9 +1611,9 @@ fn draw_list_row(
 
 /// Lift factor for the dragged row (visual pop).
 const GHOST_LIFT: f32 = 1.04;
-/// Slack around the pre-rendered ghost so the +3/+5 shadow fits without clipping.
-fn ghost_pad(dpi: Dpi) -> (f32, f32) {
-    (dpi.s(6.0), dpi.s(8.0))
+/// Extra pixels around the pre-rendered ghost (none — the row has no drop shadow).
+fn ghost_pad(_dpi: Dpi) -> (f32, f32) {
+    (0.0, 0.0)
 }
 
 /// Pre-render every per-frame drag overlay (lifted row, delete bowl, hint) so
@@ -1532,24 +1622,13 @@ fn ghost_pad(dpi: Dpi) -> (f32, f32) {
 pub fn prerender_drag_images(drag: &mut MenuDragChrome, dpr: f32) {
     let dpi = Dpi::new(dpr);
 
-    // Lifted row: shadow + row bitmap with the shadow offsets baked in.
+    // Lifted row only — no offset drop shadow under the card.
     let bw = dpi.s(drag.row_w) * GHOST_LIFT;
     let bh = dpi.s(drag.row_h) * GHOST_LIFT;
     let (pad_x, pad_y) = ghost_pad(dpi);
     let gw = (bw + pad_x * 2.0).ceil().max(1.0) as u32;
     let gh = (bh + pad_y * 2.0).ceil().max(1.0) as u32;
     let mut img = vec![0u8; (gw * gh * 4) as usize];
-    fill_rrect_aa(
-        &mut img,
-        gw,
-        gh,
-        pad_x + dpi.s(3.0),
-        pad_y + dpi.s(5.0),
-        pad_x + bw + dpi.s(3.0),
-        pad_y + bh + dpi.s(5.0),
-        dpi.s(14.0),
-        with_alpha(SHADOW_C, 0.85),
-    );
     draw_list_row(
         &mut img,
         gw,
@@ -1604,17 +1683,6 @@ fn draw_drag_ghost(
     let bh = dpi.s(drag.row_h) * GHOST_LIFT;
     let x = dpi.s(drag.pointer_x - drag.grab_dx) - (bw - dpi.s(drag.row_w)) * 0.5;
     let y = dpi.s(drag.pointer_y - drag.grab_dy) - (bh - dpi.s(drag.row_h)) * 0.5;
-    fill_rrect_aa(
-        out,
-        w,
-        h,
-        x + dpi.s(3.0),
-        y + dpi.s(5.0),
-        x + bw + dpi.s(3.0),
-        y + bh + dpi.s(5.0),
-        dpi.s(14.0),
-        with_alpha(SHADOW_C, reveal * 0.85),
-    );
     draw_list_row(
         out,
         w,
@@ -2263,7 +2331,8 @@ const PET_CARD_H: f32 = 72.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SettingsHit {
-    Close,
+    /// Top-right 「完成」: commit the pending pet-size preview and close.
+    Done,
     ToggleEnabled,
     IntervalDec,
     IntervalInc,
@@ -2278,8 +2347,9 @@ pub fn compose_settings_frame(
     reminder: (bool, u32, bool),
     pet_scale: f32,
     dpr: f32,
+    say: Option<&str>,
 ) -> (u32, u32, Vec<u8>) {
-    let (enabled, interval_min, paused) = reminder;
+    let (enabled, interval_min, _paused) = reminder;
     let dpi = Dpi::new(dpr);
     let w = dpi.su(SETTINGS_W);
     let h = dpi.su(SETTINGS_H);
@@ -2487,13 +2557,7 @@ pub fn compose_settings_frame(
         dpi,
     );
 
-    let status = if !enabled {
-        "已关闭"
-    } else if paused {
-        "已暂停"
-    } else {
-        "运行中"
-    };
+    let status = if !enabled { "已关闭" } else { "运行中" };
     blit_text(
         &mut out,
         w,
@@ -2503,10 +2567,10 @@ pub fn compose_settings_frame(
         dpi.s(REMINDER_CARD_TOP + 70.0),
         dpi.su(90),
         dpi.px(13.5),
-        if paused || !enabled { ORANGE } else { BLUE },
+        if !enabled { ORANGE } else { BLUE },
     );
-    // Pause toggle chip
-    let pause_label = if paused { "恢复" } else { "暂停" };
+    // Pause chip — kept as a button, no longer toggles a real pause.
+    let pause_label = "暂停";
     fill_rrect_aa(
         &mut out,
         w,
@@ -2644,6 +2708,19 @@ pub fn compose_settings_frame(
         TERTIARY,
     );
 
+    if let Some(line) = say {
+        draw_say_bubble(
+            &mut out,
+            w,
+            h,
+            dpr,
+            None,
+            Some((20.0, REMINDER_CARD_TOP + 100.0)),
+            line,
+            1.0,
+        );
+    }
+
     (w, h, out)
 }
 
@@ -2677,11 +2754,11 @@ pub fn settings_card_metrics(card_w: f32, card_h: f32) -> SettingsCardMetrics {
         enable_y0: reminder_y + 28.0,
         enable_y1: reminder_y + 50.0,
         interval_dec: (16.0, reminder_y + 52.0, 44.0, 26.0),
-        interval_inc: (132.0, reminder_y + 52.0, 44.0, 26.0),
+        interval_inc: (112.0, reminder_y + 52.0, 44.0, 26.0),
         pause: (w - 86.0, reminder_y + 28.0, 70.0, 24.0),
         pet_y,
-        pet_dec: (16.0, pet_y + 36.0, 36.0, 26.0),
-        pet_inc: (104.0, pet_y + 36.0, 36.0, 26.0),
+        pet_dec: (16.0, pet_y + 36.0, 44.0, 26.0),
+        pet_inc: (112.0, pet_y + 36.0, 44.0, 26.0),
     }
 }
 
@@ -2692,7 +2769,7 @@ pub fn compose_settings_card(
     card_w: f32,
     card_h: f32,
 ) -> (u32, u32, Vec<u8>) {
-    let (enabled, interval_min, paused) = reminder;
+    let (enabled, interval_min, _paused) = reminder;
     let m = settings_card_metrics(card_w, card_h);
     let dpi = Dpi::new(dpr);
     let w = dpi.su(m.w.round() as u32);
@@ -2775,6 +2852,18 @@ pub fn compose_settings_card(
         dpi.s(12.0),
         GROUPED_BG,
     );
+    stroke_rrect_aa(
+        &mut out,
+        w,
+        h,
+        rx0 + 0.5,
+        dpi.s(m.reminder_y) + 0.5,
+        rx1 - 0.5,
+        dpi.s(m.reminder_y + 86.0) - 0.5,
+        dpi.s(12.0),
+        SOFT_BORDER,
+        1.0,
+    );
     blit_text(
         &mut out,
         w,
@@ -2814,13 +2903,13 @@ pub fn compose_settings_card(
         &mut out,
         w,
         h,
-        if paused { "已暂停" } else { "暂停" },
+        "暂停",
         dpi.s(px),
         dpi.s(py),
         dpi.s(pw),
         dpi.s(ph),
         dpi.px(12.0),
-        if paused { ORANGE } else { SECONDARY },
+        SECONDARY,
         dpi,
     );
 
@@ -2850,16 +2939,18 @@ pub fn compose_settings_card(
         dpi,
     );
     let interval_label = format!("{interval_min} 分");
-    blit_text(
+    blit_text_centered(
         &mut out,
         w,
         h,
         &interval_label,
-        dpi.s(dx + dw + 6.0),
-        dpi.s(dy + 4.0),
-        dpi.su(72),
+        dpi.s(dx),
+        dpi.s(dy),
+        dpi.s(m.interval_inc.0 + m.interval_inc.2 - dx),
+        dpi.s(dh),
         dpi.px(13.0),
         LABEL,
+        dpi,
     );
     let (ix, iy, iw, ih) = m.interval_inc;
     fill_rrect_aa(
@@ -2949,16 +3040,18 @@ pub fn compose_settings_card(
         dpi,
     );
     let pct = ((pet_scale * 100.0).round() as i32).clamp(50, 150);
-    blit_text(
+    blit_text_centered(
         &mut out,
         w,
         h,
         &format!("{pct}%"),
-        dpi.s(pdx + pdw + 8.0),
-        dpi.s(pdy + 4.0),
-        dpi.su(56),
+        dpi.s(pdx),
+        dpi.s(pdy),
+        dpi.s(m.pet_inc.0 + m.pet_inc.2 - pdx),
+        dpi.s(pdh),
         dpi.px(14.0),
         LABEL,
+        dpi,
     );
     let (pix, piy, piw, pih) = m.pet_inc;
     fill_rrect_aa(
@@ -3009,7 +3102,7 @@ pub fn hit_settings_card(
 ) -> Option<SettingsHit> {
     let m = settings_card_metrics(card_w, card_h);
     if local_x >= m.w - 64.0 && local_y <= 42.0 {
-        return Some(SettingsHit::Close);
+        return Some(SettingsHit::Done);
     }
     if (16.0..=160.0).contains(&local_x) && (m.enable_y0..=m.enable_y1).contains(&local_y) {
         return Some(SettingsHit::ToggleEnabled);
@@ -3049,9 +3142,44 @@ mod settings_card {
         assert!(w > 200 && h > 200);
         assert!(matches!(
             hit_settings_card(330.0, 20.0, 360.0, 360.0),
-            Some(SettingsHit::Close)
+            Some(SettingsHit::Done)
         ));
         assert!(hit_settings_card(180.0, 300.0, 360.0, 360.0).is_none());
+    }
+
+    #[test]
+    fn pause_chip_stays_a_button() {
+        let m = settings_card_metrics(360.0, 360.0);
+        assert!(matches!(
+            hit_settings_card(m.pause.0 + 8.0, m.pause.1 + 8.0, 360.0, 360.0),
+            Some(SettingsHit::TogglePause)
+        ));
+        // Even if the leftover paused flag is true, the chip is still 「暂停」
+        // (same label as the running state) — no 「已暂停」/「恢复」.
+        let (w, h, running) = compose_settings_card((true, 45, false), 1.0, 1.0, 360.0, 360.0);
+        let (_, _, leftover) = compose_settings_card((true, 45, true), 1.0, 1.0, 360.0, 360.0);
+        assert_eq!(running.len(), leftover.len());
+        let _ = (w, h);
+    }
+
+    #[test]
+    fn say_no_pause_bubble_paints() {
+        if !cfg!(windows) {
+            return;
+        }
+        let mut buf = vec![0u8; 400 * 200 * 4];
+        draw_say_bubble(
+            &mut buf,
+            400,
+            200,
+            1.0,
+            None,
+            Some((20.0, 20.0)),
+            SAY_NO_PAUSE,
+            1.0,
+        );
+        let inked = buf.chunks_exact(4).filter(|p| p[3] > 20).count();
+        assert!(inked > 80, "refusal bubble must paint, inked={inked}");
     }
 
     #[test]
@@ -3087,6 +3215,13 @@ mod settings_card {
     }
 
     #[test]
+    fn standalone_done_hit_region() {
+        // Top-right 「完成」 commits; card-control rows do not.
+        assert!(matches!(hit_settings(400.0, 20.0), Some(SettingsHit::Done)));
+        assert!(hit_settings(60.0, 60.0).is_none());
+    }
+
+    #[test]
     #[ignore]
     fn dump_settings_card_preview() {
         let (w, h, out) = compose_settings_card((true, 45, false), 1.0, 2.0, 360.0, 360.0);
@@ -3100,7 +3235,7 @@ pub fn hit_settings(local_x: f32, local_y: f32) -> Option<SettingsHit> {
     // local coords are logical (caller maps physical → logical)
     let w = SETTINGS_W as f32;
     if local_x >= w - 72.0 && local_y <= 52.0 {
-        return Some(SettingsHit::Close);
+        return Some(SettingsHit::Done);
     }
     // Enable toggle row
     if (24.0..=300.0).contains(&local_x)
@@ -3853,6 +3988,35 @@ mod playful_dock {
     }
 
     #[test]
+    fn say_bubble_stays_off_the_pet_face() {
+        if !cfg!(windows) {
+            return;
+        }
+        let lay = three_shortcut_layout();
+        let w = 500u32;
+        let h = 480u32;
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        draw_say_bubble(&mut buf, w, h, 1.0, Some(&lay), None, SAY_NO_PAUSE, 1.0);
+        // Face lives in the upper-center of the pet slot; a bubble starting
+        // at 0.55·pet_w used to paint here.
+        let x0 = lay.pet_x as u32;
+        let x1 = (lay.pet_x + lay.pet_w * 0.72) as u32;
+        let y0 = lay.pet_y as u32;
+        let y1 = (lay.pet_y + lay.pet_h * 0.55) as u32;
+        let mut face_ink = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if buf[((y * w + x) * 4 + 3) as usize] > 20 {
+                    face_ink += 1;
+                }
+            }
+        }
+        assert_eq!(face_ink, 0, "say bubble must not cover the pet face, ink={face_ink}");
+        let total = buf.chunks_exact(4).filter(|p| p[3] > 20).count();
+        assert!(total > 80, "bubble must still paint beside the pet");
+    }
+
+    #[test]
     fn menu_pet_geometry_matches_idle_present() {
         let lay = three_shortcut_layout();
         let (pw, ph, pet) = dummy_pet();
@@ -3892,14 +4056,44 @@ mod playful_dock {
     }
 
     #[test]
+    fn pet_preview_scales_from_top_left_anchor() {
+        let lay = three_shortcut_layout(); // pet rect (8, 80, 128, 128)
+        let (pw, ph, pet) = dummy_pet();
+        let (w, _h, base) = compose_menu_pet_preview(&pet, pw, ph, &lay, 1.0, 1.0);
+        let (_w2, _h2, big) = compose_menu_pet_preview(&pet, pw, ph, &lay, 1.0, 1.5);
+        let (_w3, _h3, small) = compose_menu_pet_preview(&pet, pw, ph, &lay, 1.0, 0.5);
+        let ink = |buf: &[u8]| buf.chunks_exact(4).filter(|p| p[3] > 0).count();
+        assert!(ink(&big) > ink(&base), "bigger ratio must draw more pet pixels");
+        assert!(ink(&base) > ink(&small), "smaller ratio must draw fewer pet pixels");
+        let any_ink = |buf: &[u8], y: u32| {
+            (0..w).any(|x| buf[((y * w + x) * 4 + 3) as usize] > 0)
+        };
+        // Top-left anchored like the real window resize: top edge stays put,
+        // the pet extends right/down (feet drop) as it grows.
+        let top_row = |buf: &[u8]| {
+            (0..480u32).find(|&y| any_ink(buf, y)).unwrap_or(u32::MAX)
+        };
+        let bottom_row = |buf: &[u8]| {
+            (0..480u32).rev().find(|&y| any_ink(buf, y)).unwrap_or(0)
+        };
+        let t_base = top_row(&base);
+        assert_eq!(top_row(&big), t_base, "top edge must not move when growing");
+        assert_eq!(top_row(&small), t_base, "top edge must not move when shrinking");
+        assert!(
+            bottom_row(&big) > bottom_row(&base) && bottom_row(&base) > bottom_row(&small),
+            "bottom edge must follow the growing pet (window top-left fixed)"
+        );
+    }
+
+    #[test]
     fn prerender_drag_images_fills_expected_sizes() {
         let mut drag = drag_chrome("App2");
         prerender_drag_images(&mut drag, 2.0);
 
-        // Ghost: row 300×42 lifted 1.04×, + 6/8 dp pad each side, at 2× dpr.
+        // Ghost: row 300×42 lifted 1.04×, no shadow pad, at 2× dpr.
         let (gw, gh, img) = drag.ghost_img.as_ref().expect("ghost must pre-render");
-        assert!((*gw as f32 - (300.0 * 1.04 * 2.0 + 24.0)).abs() <= 2.0, "gw={gw}");
-        assert!((*gh as f32 - (42.0 * 1.04 * 2.0 + 32.0)).abs() <= 2.0, "gh={gh}");
+        assert!((*gw as f32 - (300.0 * 1.04 * 2.0)).abs() <= 2.0, "gw={gw}");
+        assert!((*gh as f32 - (42.0 * 1.04 * 2.0)).abs() <= 2.0, "gh={gh}");
         assert_eq!(img.len(), (*gw * *gh * 4) as usize);
         let opaque = img.chunks_exact(4).filter(|p| p[3] > 8).count();
         assert!(opaque > 100, "ghost row painted, got {opaque}");
@@ -4052,14 +4246,14 @@ mod playful_dock {
 
         assert_eq!((w, h), (cw, ch));
 
-        // Lifted row box: pointer − grab, lifted 1.04×, shadow/pad margins.
+        // Lifted row box: pointer − grab, lifted 1.04×, no shadow pad.
         let gx = 220.0f32 - 40.0 - (300.0f32 * 1.04 - 300.0) * 0.5;
         let gy = 240.0f32 - 16.0 - (42.0f32 * 1.04 - 42.0) * 0.5;
         let gbox = (
-            (gx - 9.0).floor().max(0.0) as i32,
-            (gy - 11.0).floor().max(0.0) as i32,
-            (300.0f32 * 1.04 + 30.0).ceil() as i32,
-            (42.0f32 * 1.04 + 22.0).ceil() as i32,
+            (gx - 2.0).floor().max(0.0) as i32,
+            (gy - 2.0).floor().max(0.0) as i32,
+            (300.0f32 * 1.04 + 4.0).ceil() as i32,
+            (42.0f32 * 1.04 + 4.0).ceil() as i32,
         );
         // List viewport box: shifted rows live inside it (2 px tolerance).
         let (row_x, row_w) = lay

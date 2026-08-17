@@ -27,10 +27,12 @@ use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
 use crate::render::easing::ease_in_out_cubic;
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
-    compose_menu_pet_only, compose_settings_card, compose_settings_frame, hit_settings,
+    compose_menu_pet_only, compose_menu_pet_preview, compose_settings_card,
+    compose_settings_frame, draw_say_bubble, hit_settings,
     hit_settings_card, menu_visual_fade, menu_visual_scale, prerender_drag_images,
     prerender_list_rows, present_menu_cached, present_menu_drag, MenuChromeState,
-    MenuDragChrome, SettingsHit, SAY_EATEN, SAY_FAIL, SETTINGS_H, SETTINGS_W,
+    MenuDragChrome, SettingsHit, SAY_EATEN, SAY_FAIL, SAY_NO_PAUSE, SETTINGS_H,
+    SETTINGS_W,
 };
 use crate::render::sample_rgba_bilinear;
 use crate::render::reminder_ui::{
@@ -186,12 +188,19 @@ pub struct App {
     settings_embed: bool,
     /// Card-sized settings snapshot for the slide.
     settings_card_cache: Option<(u32, u32, Vec<u8>)>,
+    /// Uncommitted pet-size preview while settings is open (None = use config).
+    pet_scale_draft: Option<f32>,
     /// Expanded comic-bubble window while `idle_yawn` plays.
     yawn_ui_active: bool,
     yawn_place: Option<YawnPlacement>,
     yawn_present_pos: Option<(i32, i32)>,
     /// Pet position before menu/settings expand (window top-left, physical).
     overlay_origin: Option<Point>,
+    /// Idle present lock: keep ULW at this screen pos + `pet_size()` until
+    /// winit's async resize catches up. Prevents the one-frame jump when an
+    /// overlay HWND is torn down (or the pet scale changes) and `inner_size`
+    /// still belongs to the previous window.
+    idle_present_pos: Option<(i32, i32)>,
     /// Current pet frame RGBA for alpha hit-testing (normal pet size).
     hit_rgba: Vec<u8>,
     hit_size: (u32, u32),
@@ -209,10 +218,16 @@ impl App {
         let (_bg_tx, bg_rx) = std::sync::mpsc::channel();
         drop(_bg_tx);
         let now = Instant::now();
+        // Pause was removed as a product feature; leftover configs must not
+        // leave the reminder stuck silent.
+        if config.reminder.paused {
+            config.reminder.paused = false;
+            saver.mark_dirty();
+        }
         let interval = ReminderScheduler::resolve_interval(config.reminder.interval_minutes);
         let mut scheduler = ReminderScheduler::new(
             config.reminder.enabled,
-            config.reminder.paused,
+            false,
             interval,
             now,
         );
@@ -284,10 +299,12 @@ impl App {
             settings_present_pos: None,
             settings_embed: false,
             settings_card_cache: None,
+            pet_scale_draft: None,
             yawn_ui_active: false,
             yawn_place: None,
             yawn_present_pos: None,
             overlay_origin: None,
+            idle_present_pos: None,
             hit_rgba: Vec::new(),
             hit_size: (128, 128),
             _bg_rx: Some(bg_rx),
@@ -348,6 +365,26 @@ impl App {
     /// Pet window edge in logical px (design 128 × config scale).
     fn pet_size(&self) -> u32 {
         pet_logical_size(self.config.pet.scale)
+    }
+
+    /// Scale shown/persisted right now: the settings preview draft when one is
+    /// pending, otherwise the committed config value.
+    fn effective_pet_scale(&self) -> f32 {
+        self.pet_scale_draft.unwrap_or(self.config.pet.scale)
+    }
+
+    /// Grow/shrink the dock pet draw-rect in place. Does not move the overlay
+    /// window or the card — that would jitter the cat on 「完成」.
+    fn sync_menu_pet_slot_to_effective_scale(&mut self) {
+        let s = pet_logical_size(self.effective_pet_scale()) as f32;
+        let Some(lay) = self.menu_layout.as_mut() else {
+            return;
+        };
+        if (lay.pet_w - s).abs() < 0.01 && (lay.pet_h - s).abs() < 0.01 {
+            return;
+        }
+        lay.pet_w = s;
+        lay.pet_h = s;
     }
 
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), AppError> {
@@ -478,6 +515,13 @@ impl App {
     }
 
     fn sync_texture_from_pet(&mut self) {
+        // Keep the dock pet slot at the size the user last chose (preview
+        // draft, or the committed scale after 「完成」). Window / card stay
+        // locked — only the draw rect grows from the slot's top-left — so
+        // the launcher does not snap back to the open-time size.
+        if self.menu_ui_active {
+            self.sync_menu_pet_slot_to_effective_scale();
+        }
         // Warm the icon cache and snapshot icons before borrowing `self.pet`
         // (extraction needs `&mut self`; the pet borrow below would block it).
         let menu_animating = self
@@ -516,8 +560,9 @@ impl App {
             );
             let (sw, sh, settings_rgba) = compose_settings_frame(
                 reminder,
-                self.config.pet.scale,
+                self.effective_pet_scale(),
                 dpr,
+                self.menu_say.map(|(_, s)| s),
             );
             self.sprite_logical = (SETTINGS_W, SETTINGS_H);
             self.hit_rgba = settings_rgba;
@@ -851,9 +896,16 @@ impl App {
                 error!("update_layered_rgba: {e}");
             }
         } else {
-            let win = window.inner_size();
-            let win_w = win.width.max(1);
-            let win_h = win.height.max(1);
+            // While the idle lock is set, present at the committed pet size and
+            // desk spot — do not use the stale HWND inner_size (still the
+            // overlay, or the pre-scale window).
+            let (win_w, win_h, pos) = if let Some(pos) = self.idle_present_pos {
+                let (pw, ph) = self.idle_target_phys();
+                (pw.max(1), ph.max(1), Some(pos))
+            } else {
+                let win = window.inner_size();
+                (win.width.max(1), win.height.max(1), None)
+            };
             let present = scale_rgba_centered(
                 &self.hit_rgba,
                 sw,
@@ -864,7 +916,7 @@ impl App {
                 mirror_x,
             );
             if let Err(e) =
-                platform::update_layered_rgba_ex(window.as_ref(), win_w, win_h, &present, None)
+                platform::update_layered_rgba_ex(window.as_ref(), win_w, win_h, &present, pos)
             {
                 error!("update_layered_rgba: {e}");
             }
@@ -941,7 +993,28 @@ impl App {
         info!(logical_w, logical_h, phys_w, phys_h, dpr, "pet window resized");
     }
 
+    /// Physical idle pet HWND size for the committed scale (matches `resize_pet_window`).
+    fn idle_target_phys(&self) -> (u32, u32) {
+        let dpr = snap_dpr(self.scale_factor);
+        let s = logical_to_physical(self.pet_size(), dpr) as u32;
+        (s.max(1), s.max(1))
+    }
+
+    /// Tear down an overlay (or apply a live scale) without a one-frame jump:
+    /// lock ULW to `origin` + the committed pet size, then ask winit to catch up.
+    fn begin_idle_present_at(&mut self, origin: Point) {
+        self.idle_present_pos = Some((origin.x as i32, origin.y as i32));
+        let s = self.pet_size();
+        self.resize_pet_window(s, s);
+        if let Some(w) = &self.window {
+            w.set_outer_position(PhysicalPosition::new(origin.x as i32, origin.y as i32));
+        }
+        self.texture_dirty = true;
+        self.redraw();
+    }
+
     fn enter_reminder_ui(&mut self) {
+        self.idle_present_pos = None;
         let center =
             self.work_area_center_top_left(REMINDER_WINDOW_W as i32, REMINDER_WINDOW_H as i32);
         self.reminder_ui_active = true;
@@ -968,12 +1041,7 @@ impl App {
         if let Some(pet) = self.pet.as_mut() {
             pet.food_button_rect = None;
         }
-        let s = self.pet_size();
-        self.resize_pet_window(s, s);
-        if let Some(w) = &self.window {
-            w.set_outer_position(PhysicalPosition::new(top_left.x as i32, top_left.y as i32));
-        }
-        self.texture_dirty = true;
+        self.begin_idle_present_at(top_left);
     }
 
     fn enter_yawn_ui(&mut self) {
@@ -983,6 +1051,7 @@ impl App {
         if self.yawn_ui_active {
             return;
         }
+        self.idle_present_pos = None;
         self.capture_overlay_origin();
         let dpr = snap_dpr(self.scale_factor);
         let origin = self.overlay_origin.unwrap_or(Point::new(100.0, 100.0));
@@ -1066,6 +1135,8 @@ impl App {
     }
 
     fn restore_overlay_origin_window(&mut self) {
+        // Any preview draft dies here: without 「完成」the pet keeps its committed size.
+        self.pet_scale_draft = None;
         let origin = self
             .overlay_origin
             .take()
@@ -1077,18 +1148,17 @@ impl App {
         self.yawn_place = None;
         self.yawn_present_pos = None;
         self.menu_layout = None;
-        let s = self.pet_size();
-        self.resize_pet_window(s, s);
-        if let Some(w) = &self.window {
-            w.set_outer_position(PhysicalPosition::new(origin.x as i32, origin.y as i32));
-        }
-        self.texture_dirty = true;
+        // Atomic ULW at the pre-overlay desk spot + committed size. winit
+        // resize is async; without the lock the next frame would letterbox
+        // the pet into the leftover overlay HWND and the feet would jump.
+        self.begin_idle_present_at(origin);
     }
 
     fn enter_menu_ui(&mut self, now: Instant) {
         if self.reminder_ui_active || self.settings_ui_active {
             return;
         }
+        self.idle_present_pos = None;
 
         // L2: leave edge-hide before capture so pin uses fully-visible home.
         if let Some(pet) = self.pet.as_mut() {
@@ -1279,6 +1349,7 @@ impl App {
         self.settings_embed = false;
         self.settings_transition = None;
         self.settings_card_cache = None;
+        self.pet_scale_draft = None;
         self.restore_overlay_origin_window();
         // L3-05: ignore click that closed the dock + brief double-tap reopen.
         self.menu_reopen_after = Some(now + Duration::from_millis(280));
@@ -1347,6 +1418,9 @@ impl App {
             self.enter_settings_ui_plain();
             return;
         }
+        // Fresh session: any previously discarded preview draft must not leak
+        // into this one (config is always the source of truth on entry).
+        self.pet_scale_draft = None;
         self.settings_ui_active = true;
         self.settings_embed = true;
         self.settings_card_cache = None;
@@ -1381,6 +1455,10 @@ impl App {
             self.exit_settings_ui();
             return;
         }
+        // Leaving the settings session ends the preview: on Esc this discards
+        // the draft (pet slides back at the committed size); on 「完成」 the
+        // draft was already committed, so this is a no-op.
+        self.pet_scale_draft = None;
         if self.settings_transition.is_some() {
             return;
         }
@@ -1427,7 +1505,7 @@ impl App {
         );
         let (sw, sh, buf) = compose_settings_card(
             reminder,
-            self.config.pet.scale,
+            self.effective_pet_scale(),
             dpr,
             layout.card_w,
             layout.card_h,
@@ -1446,7 +1524,17 @@ impl App {
         }) else {
             return;
         };
-        let (ww, hh, mut out) = compose_menu_pet_only(&pet_rgba, fw, fh, &layout, dpr);
+        // Pet preview: scale the avatar within its fixed layout rect so +/−
+        // resizes the cat next to the card in real time. The layout rect was
+        // sized from the scale in effect when the card opened, so the ratio is
+        // (desired logical size) / (rect size) — after 「完成」 the draft is
+        // gone but the committed config still yields the preview size, so the
+        // pop-back slide never snaps the pet back to the stale open-time size.
+        let preview_k = (pet_logical_size(self.effective_pet_scale()) as f32
+            / layout.pet_w.max(1.0))
+            .clamp(0.001, 4.0);
+        let (ww, hh, mut out) =
+            compose_menu_pet_preview(&pet_rgba, fw, fh, &layout, dpr, preview_k);
         let d = if (dpr - dpr.round()).abs() < 0.08 {
             dpr.round()
         } else {
@@ -1524,12 +1612,16 @@ impl App {
             );
             let (sw, sh, set) = compose_settings_card(
                 reminder,
-                self.config.pet.scale,
+                self.effective_pet_scale(),
                 dpr,
                 layout.card_w,
                 layout.card_h,
             );
             blit_rgba(&mut out, ww, hh, &set, sw, sh, cx.max(0) as u32, cy.max(0) as u32);
+        }
+
+        if let Some((_, line)) = self.menu_say {
+            draw_say_bubble(&mut out, ww, hh, dpr, Some(&layout), None, line, 1.0);
         }
 
         self.sprite_logical = self.menu_logical_size;
@@ -1543,6 +1635,9 @@ impl App {
         if self.reminder_ui_active {
             return;
         }
+        // Fresh settings session — start from the committed size, not a stale draft.
+        self.idle_present_pos = None;
+        self.pet_scale_draft = None;
         self.settings_transition = None;
         self.settings_present_pos = None;
         self.settings_embed = false;
@@ -1621,6 +1716,7 @@ impl App {
         } else {
             self.settings_ui_active = false;
             self.settings_embed = false;
+            self.sync_menu_pet_slot_to_effective_scale();
         }
         let _ = now;
         self.texture_dirty = true;
@@ -2201,8 +2297,19 @@ impl App {
         let now = Instant::now();
         self.settings_card_cache = None;
         match hit {
-            SettingsHit::Close => {
-                self.settings_card_cache = None;
+            SettingsHit::Done => {
+                // Commit the pending pet-size preview, then close as before.
+                // Overlay geometry stays locked — the pet is already drawn at
+                // the new size via preview_k, and moving the HWND here is the
+                // jump the user sees on 「完成」.
+                if let Some(draft) = self.pet_scale_draft.take() {
+                    self.config.pet.scale = draft;
+                    if let Some(saver) = self.saver.as_mut() {
+                        saver.mark_dirty();
+                    }
+                    info!(scale = draft, "settings: pet size committed");
+                }
+                self.sync_menu_pet_slot_to_effective_scale();
                 self.exit_settings_ui();
             }
             SettingsHit::ToggleEnabled => {
@@ -2240,22 +2347,42 @@ impl App {
                 }
             }
             SettingsHit::TogglePause => {
-                if let Some(s) = self.scheduler.as_mut() {
-                    let paused = s.toggle_paused(now);
-                    self.config.reminder.paused = paused;
-                    self.persist_reminder_config();
-                    self.sync_tray_tooltip();
-                    self.texture_dirty = true;
-                    info!(paused, "settings: reminder pause toggled");
+                // Button stays; the feature does not. The cat refuses out loud.
+                self.menu_say = Some((now, SAY_NO_PAUSE));
+                if let Some(pet) = self.pet.as_mut() {
+                    pet.begin_sly_pause(now);
                 }
+                self.texture_dirty = true;
+                info!("settings: pause refused (no such feature)");
             }
             SettingsHit::PetScaleDec => {
-                self.nudge_pet_scale(-1);
+                self.preview_pet_scale(-1);
             }
             SettingsHit::PetScaleInc => {
-                self.nudge_pet_scale(1);
+                self.preview_pet_scale(1);
             }
         }
+    }
+
+    /// Preview pet scale by N steps without committing: updates the draft and
+    /// redraws the live preview; only 「完成」 persists it.
+    fn preview_pet_scale(&mut self, delta_steps: i32) {
+        let base = self.pet_scale_draft.unwrap_or(self.config.pet.scale);
+        let next = crate::config::step_pet_scale(base, delta_steps);
+        if (next - base).abs() < 0.001 {
+            info!(scale = base, "pet scale preview already at limit");
+            return;
+        }
+        self.pet_scale_draft = Some(next);
+        self.texture_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        info!(
+            preview = next,
+            logical = pet_logical_size(next),
+            "pet scale preview changed"
+        );
     }
 
     fn persist_reminder_config(&mut self) {
@@ -2271,8 +2398,6 @@ impl App {
         };
         let tip = if !self.config.reminder.enabled {
             "PawDesk — 提醒已关闭"
-        } else if self.config.reminder.paused {
-            "PawDesk — 提醒已暂停"
         } else {
             "PawDesk — 桌面互动宠物"
         };
@@ -2427,26 +2552,6 @@ impl App {
                     self.try_start_reminder(now);
                 }
             }
-            TrayCommand::ToggleReminderPause => {
-                let now = Instant::now();
-                if let Some(s) = self.scheduler.as_mut() {
-                    let paused = s.toggle_paused(now);
-                    self.config.reminder.paused = paused;
-                    self.persist_reminder_config();
-                    self.sync_tray_tooltip();
-                    info!(paused, "tray: reminder pause toggled");
-                }
-            }
-            TrayCommand::OpenSettings => {
-                info!("tray: OpenSettings");
-                if !self.visible {
-                    if let Some(w) = &self.window {
-                        w.set_visible(true);
-                        self.visible = true;
-                    }
-                }
-                self.enter_settings_ui();
-            }
             TrayCommand::PetScaleUp => {
                 info!("tray: PetScaleUp");
                 self.nudge_pet_scale(1);
@@ -2476,12 +2581,15 @@ impl App {
         let overlay =
             self.settings_ui_active || self.menu_ui_active || self.reminder_ui_active;
         if !overlay {
+            if let Some(w) = &self.window {
+                if let Ok(pos) = w.outer_position() {
+                    self.idle_present_pos = Some((pos.x, pos.y));
+                }
+            }
             let s = self.pet_size();
             self.resize_pet_window(s, s);
             self.texture_dirty = true;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            self.redraw();
         } else {
             // Settings panel still open — just refresh the percentage label.
             self.texture_dirty = true;
@@ -2652,6 +2760,15 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(_size) => {
                 // Layered present uses current inner_size each frame; no swapchain.
                 // After minimize/restore Windows may change size — force a clean present.
+                if self.idle_present_pos.is_some() {
+                    if let Some(w) = &self.window {
+                        let inner = w.inner_size();
+                        let (pw, ph) = self.idle_target_phys();
+                        if inner.width == pw && inner.height == ph {
+                            self.idle_present_pos = None;
+                        }
+                    }
+                }
                 self.texture_dirty = true;
                 if self.visible {
                     self.redraw();
@@ -2709,6 +2826,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Threshold drag start.
                 if self.menu_press.is_none() && !self.list_drag.is_active() && self.drag.consider_drag_start() {
+                    // Follow the HWND from the first drag frame; a leftover idle
+                    // lock would pin the sprite to the pre-drag desk spot.
+                    self.idle_present_pos = None;
                     if let Some(pet) = self.pet.as_mut() {
                         if self.menu_ui_active {
                             pet.close_menu(now);
@@ -2747,14 +2867,12 @@ impl ApplicationHandler<UserEvent> for App {
                         let s = self.pet_size();
                         self.resize_pet_window(s, s);
                     } else if self.overlay_origin.is_some() && !self.menu_ui_active {
-                        let s = self.pet_size();
-                        self.resize_pet_window(s, s);
                         if let Some(o) = self.overlay_origin {
-                            if let Some(w) = &self.window {
-                                w.set_outer_position(PhysicalPosition::new(o.x as i32, o.y as i32));
-                            }
+                            self.begin_idle_present_at(o);
                         }
                     }
+                    // Drag owns the HWND now — don't keep the restore lock.
+                    self.idle_present_pos = None;
                     self.texture_dirty = true;
                 }
                 if let Some(w) = self.window.as_ref() {
@@ -3121,9 +3239,10 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            if let Some((t0, _)) = self.menu_say {
+            if let Some((t0, line)) = self.menu_say {
+                let hold_ms = if line == SAY_NO_PAUSE { 2800 } else { 1400 };
                 let elapsed = now.saturating_duration_since(t0);
-                if elapsed >= Duration::from_millis(1400) {
+                if elapsed >= Duration::from_millis(hold_ms) {
                     self.menu_say = None;
                     self.texture_dirty = true;
                     need_redraw = true;
@@ -3699,6 +3818,116 @@ mod tests {
         assert_eq!(px[3], 128);
         assert_eq!(&px[4..7], &[40, 50, 60]);
         assert_eq!(px[7], 64);
+    }
+
+    #[test]
+    fn done_commits_scale_without_moving_overlay() {
+        // 「完成」 writes the preview into config but must not relayout or
+        // resize the dock window — that jump is the jitter after clicking Done.
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let old_scale = app.config.pet.scale;
+        let old_pet = pet_logical_size(old_scale) as f32;
+        app.menu_ui_active = true;
+        app.settings_ui_active = true;
+        app.settings_embed = true;
+        app.menu_present_pos = Some((40, 50));
+        app.menu_layout = Some(layout_pinned_scroll(
+            &[],
+            400,
+            400,
+            (8.0, 80.0, old_pet, old_pet),
+            (100.0, 20.0, 360.0, 450.0),
+            crate::ui::radial_menu::ExpandDir::Right,
+            1.0,
+            0,
+        ));
+        app.pet_scale_draft = Some(0.9);
+
+        app.handle_settings_hit(SettingsHit::Done);
+
+        assert!(
+            (app.config.pet.scale - 0.9).abs() < 0.001,
+            "draft must be committed"
+        );
+        assert!(app.pet_scale_draft.is_none(), "committed draft must be cleared");
+        assert_eq!(
+            app.menu_present_pos,
+            Some((40, 50)),
+            "overlay present target must stay put"
+        );
+        let lay = app.menu_layout.as_ref().expect("launcher layout stays");
+        assert!(
+            (lay.pet_x - 8.0).abs() < 0.01 && (lay.pet_y - 80.0).abs() < 0.01,
+            "pet slot origin must not move"
+        );
+        let new_pet = pet_logical_size(0.9) as f32;
+        assert!(
+            (lay.pet_w - new_pet).abs() < 0.01 && (lay.pet_h - new_pet).abs() < 0.01,
+            "launcher pet slot must keep the committed size, not snap back to {old_pet}"
+        );
+        assert!(
+            (lay.card_x - 100.0).abs() < 0.01 && (lay.card_w - 360.0).abs() < 0.01,
+            "card geometry must stay locked"
+        );
+    }
+
+    #[test]
+    fn restore_locks_idle_present_at_origin() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        app.overlay_origin = Some(Point::new(100.0, 200.0));
+        app.config.pet.scale = 0.9;
+        app.scale_factor = 1.0;
+        app.restore_overlay_origin_window();
+        assert_eq!(
+            app.idle_present_pos,
+            Some((100, 200)),
+            "idle ULW must lock to the pre-overlay desk spot"
+        );
+        assert!(app.overlay_origin.is_none(), "origin is consumed on restore");
+        let expected = pet_logical_size(0.9);
+        assert_eq!(
+            app.idle_target_phys(),
+            (expected, expected),
+            "lock size is the committed pet window"
+        );
+    }
+
+    #[test]
+    fn pause_click_refuses_without_toggling() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        assert!(!app.config.reminder.paused);
+        app.handle_settings_hit(SettingsHit::TogglePause);
+        assert!(
+            !app.config.reminder.paused,
+            "pause button must not persist a paused state"
+        );
+        assert_eq!(
+            app.menu_say.map(|(_, s)| s),
+            Some(SAY_NO_PAUSE),
+            "cat must refuse out loud"
+        );
+    }
+
+    #[test]
+    fn startup_clears_leftover_paused() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let mut config = crate::config::AppConfig::default();
+        config.reminder.paused = true;
+        let app = App::new(PathBuf::from("."), config, saver);
+        assert!(
+            !app.config.reminder.paused,
+            "stale paused configs must not keep reminders silent"
+        );
     }
 
     #[test]

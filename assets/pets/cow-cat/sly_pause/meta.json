@@ -1,0 +1,17 @@
+{
+  "name": "sly_pause",
+  "frame_width": 256,
+  "frame_height": 256,
+  "frames": 1,
+  "fps": 1.0,
+  "loop": false,
+  "anchor": {
+    "x": 128,
+    "y": 236
+  },
+  "files": [
+    "000.png"
+  ],
+  "source": "idle_blink/000 face-only composite",
+  "notes": "Same sit body/paws/tail as idle_blink/000. Only the face is sly."
+}

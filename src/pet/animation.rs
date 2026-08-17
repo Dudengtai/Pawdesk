@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -156,6 +156,7 @@ impl AnimationLibrary {
             "look_diag",
             "idle_yawn",
             "idle_stretch",
+            SLY_PAUSE,
         ];
         let mut clips = Vec::new();
         for name in names {
@@ -224,7 +225,7 @@ impl AnimationLibrary {
     pub fn load_all(pet_dir: &Path) -> Self {
         let mut clips = Vec::new();
 
-        // Idle set: base blink + look-yaw strip + one-shot actions
+        // Idle set: base blink + look-yaw strip + one-shot actions + sly hold
         let names = [
             IDLE_BASE,
             "look_yaw",
@@ -232,6 +233,7 @@ impl AnimationLibrary {
             "look_diag",
             "idle_yawn",
             "idle_stretch",
+            SLY_PAUSE,
         ];
         for name in names {
             let dir = pet_dir.join(name);
@@ -521,6 +523,10 @@ impl AnimationPlayer {
 
 /// Default sit+blink clip name (looping base idle).
 pub const IDLE_BASE: &str = "idle_blink";
+/// One-frame sly sit (clasped paws) shown when the cat refuses to pause.
+pub const SLY_PAUSE: &str = "sly_pause";
+/// How long the sly pose is held (matches the refusal bubble).
+pub const SLY_PAUSE_HOLD: Duration = Duration::from_millis(2800);
 
 /// Seconds between random one-shot idle actions while sitting / watching.
 /// Product: one cute action about every minute (low-disturbance desktop pet).
