@@ -105,6 +105,178 @@ pub fn load_feed_bowl(path: &Path) -> Option<FeedBowl> {
     })
 }
 
+/// Card blit onto a travel overlay (physical pixels).
+pub struct OverlayCardBlit<'a> {
+    pub card: &'a ReminderCard,
+    pub bowl: Option<&'a FeedBowl>,
+    pub feeding: bool,
+    pub alpha: f32,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Compose the reminder travel overlay: pet slot + optional faded card.
+///
+/// `overlay_w` / `overlay_h` and the pet/card rects are **physical** pixels
+/// (pass `dpr = 1` into slot helpers). Transparent pixels stay 0 so the
+/// desktop shows through.
+pub fn compose_reminder_overlay(
+    overlay_w: u32,
+    overlay_h: u32,
+    pet_rgba: &[u8],
+    pet_src_w: u32,
+    pet_src_h: u32,
+    pet_x: f32,
+    pet_y: f32,
+    pet_w: f32,
+    pet_h: f32,
+    pet_alpha: f32,
+    card: Option<OverlayCardBlit<'_>>,
+) -> (u32, u32, Vec<u8>) {
+    let w = overlay_w.max(1);
+    let h = overlay_h.max(1);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+
+    if pet_alpha > 0.01 && pet_w > 0.5 && pet_h > 0.5 {
+        let (_, _, pet_buf) = crate::render::menu_ui::compose_pet_in_slot(
+            pet_rgba,
+            pet_src_w,
+            pet_src_h,
+            w,
+            h,
+            pet_x,
+            pet_y,
+            pet_w,
+            pet_h,
+            1.0,
+        );
+        if pet_alpha >= 0.995 {
+            out = pet_buf;
+        } else {
+            apply_uniform_alpha(&pet_buf, &mut out, pet_alpha);
+        }
+    }
+
+    if let Some(blit) = card {
+        if blit.alpha > 0.01 && blit.w > 0 && blit.h > 0 {
+            let (_, _, frame) =
+                compose_reminder_card_frame(blit.card, blit.bowl, blit.feeding);
+            let scaled = scale_rgba_to(&frame, blit.card.w, blit.card.h, blit.w, blit.h);
+            blit_alpha(
+                &mut out,
+                w,
+                h,
+                &scaled,
+                blit.w,
+                blit.h,
+                blit.x,
+                blit.y,
+                blit.alpha,
+            );
+        }
+    }
+
+    (w, h, out)
+}
+
+fn apply_uniform_alpha(src: &[u8], dest: &mut [u8], a: f32) {
+    let n = src.len().min(dest.len());
+    let a = a.clamp(0.0, 1.0);
+    for i in (0..n).step_by(4) {
+        let sa = src[i + 3] as f32 * a;
+        if sa <= 0.5 {
+            continue;
+        }
+        dest[i] = (src[i] as f32 * a).round().min(255.0) as u8;
+        dest[i + 1] = (src[i + 1] as f32 * a).round().min(255.0) as u8;
+        dest[i + 2] = (src[i + 2] as f32 * a).round().min(255.0) as u8;
+        dest[i + 3] = sa.round().min(255.0) as u8;
+    }
+}
+
+fn scale_rgba_to(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return vec![0, 0, 0, 0];
+    }
+    if sw == dw && sh == dh {
+        return src.to_vec();
+    }
+    let mut out = vec![0u8; (dw * dh * 4) as usize];
+    for y in 0..dh {
+        for x in 0..dw {
+            let fx = (x as f32 + 0.5) * sw as f32 / dw as f32 - 0.5;
+            let fy = (y as f32 + 0.5) * sh as f32 / dh as f32 - 0.5;
+            let x0 = fx.floor() as i32;
+            let y0 = fy.floor() as i32;
+            let tx = fx - x0 as f32;
+            let ty = fy - y0 as f32;
+            let mut acc = [0.0f32; 4];
+            for (oy, wy) in [(0, 1.0 - ty), (1, ty)] {
+                for (ox, wx) in [(0, 1.0 - tx), (1, tx)] {
+                    let sx = (x0 + ox).clamp(0, sw as i32 - 1) as u32;
+                    let sy = (y0 + oy).clamp(0, sh as i32 - 1) as u32;
+                    let si = ((sy * sw + sx) * 4) as usize;
+                    let wgt = wx * wy;
+                    for k in 0..4 {
+                        acc[k] += src[si + k] as f32 * wgt;
+                    }
+                }
+            }
+            let di = ((y * dw + x) * 4) as usize;
+            for k in 0..4 {
+                out[di + k] = acc[k].round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+fn blit_alpha(
+    dest: &mut [u8],
+    dw: u32,
+    dh: u32,
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dx: i32,
+    dy: i32,
+    alpha: f32,
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return;
+    }
+    for y in 0..sh {
+        let ty = dy + y as i32;
+        if ty < 0 || ty >= dh as i32 {
+            continue;
+        }
+        for x in 0..sw {
+            let tx = dx + x as i32;
+            if tx < 0 || tx >= dw as i32 {
+                continue;
+            }
+            let si = ((y * sw + x) * 4) as usize;
+            if si + 3 >= src.len() {
+                continue;
+            }
+            let mut c = [src[si], src[si + 1], src[si + 2], src[si + 3]];
+            if c[3] == 0 {
+                continue;
+            }
+            if alpha < 0.995 {
+                c[0] = (c[0] as f32 * alpha).round() as u8;
+                c[1] = (c[1] as f32 * alpha).round() as u8;
+                c[2] = (c[2] as f32 * alpha).round() as u8;
+                c[3] = (c[3] as f32 * alpha).round() as u8;
+            }
+            put(dest, dw, tx, ty, c);
+        }
+    }
+}
+
 /// Final reminder frame: cat art + comic bubble + kibble bowl.
 pub fn compose_reminder_card_frame(
     card: &ReminderCard,
@@ -500,6 +672,26 @@ mod card_tests {
         let n = rgba.chunks_exact(4).count() as f64;
         let opaque = rgba.chunks_exact(4).filter(|p| p[3] > 200).count() as f64;
         opaque / n.max(1.0)
+    }
+
+    #[test]
+    fn overlay_buffer_matches_window() {
+        let pet = vec![0u8; 256 * 256 * 4];
+        let (w, h, buf) = compose_reminder_overlay(
+            800,
+            500,
+            &pet,
+            256,
+            256,
+            20.0,
+            30.0,
+            77.0,
+            77.0,
+            1.0,
+            None,
+        );
+        assert_eq!((w, h), (800, 500));
+        assert_eq!(buf.len(), 800 * 500 * 4);
     }
 
     #[test]

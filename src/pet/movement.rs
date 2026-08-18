@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use crate::event::Point;
 use crate::render::easing::{ease_in_out_cubic, ease_smooth};
 
-/// Reminder hop: stay put while gathering (matches clip 0.00–0.18).
-pub const REMINDER_GATHER_END: f32 = 0.18;
-/// Reminder hop: land and sit (matches clip 0.88–1.00).
-pub const REMINDER_LAND_START: f32 = 0.88;
+/// Reminder hop: stay put while gathering (squash).
+pub const REMINDER_GATHER_END: f32 = 0.16;
+/// Reminder hop: land and sit (squash back).
+pub const REMINDER_LAND_START: f32 = 0.84;
 /// Already at destination — skip the hop.
 pub const REMINDER_HOP_NEAR_PX: f64 = 56.0;
 
@@ -115,7 +115,8 @@ impl MovementController {
     /// while moving, or the final position when the movement just completed (and
     /// `is_active` becomes `false`). Returns `None` when idle.
     ///
-    /// Reminder travel uses a **parabolic hop arc**; edge hide/restore slides.
+    /// Reminder travel uses a **parabolic hop arc in overlay-local slots**;
+    /// edge hide/restore still slides the HWND.
     pub fn tick(&mut self, now: Instant) -> Option<Point> {
         if !self.active {
             return None;
@@ -178,12 +179,12 @@ impl MovementController {
     }
 }
 
-/// Peak lift in screen px (up = smaller y). Shared by cursor pounce and reminder hop.
+/// Peak lift in the same units as `start`/`dest` (overlay-local px).
 pub fn hop_arc_height(distance: f64) -> f64 {
-    (28.0 + distance * 0.08).clamp(24.0, 64.0)
+    (32.0 + distance * 0.06).clamp(28.0, 72.0)
 }
 
-/// Window path for reminder travel: gather in place, ease-in-out flight, sit on land.
+/// Overlay-local slot path: gather in place, ease-in-out flight, sit on land.
 pub fn reminder_hop_pos(start: Point, dest: Point, t: f32) -> Point {
     let t = t.clamp(0.0, 1.0);
     if t <= REMINDER_GATHER_END {
@@ -203,23 +204,58 @@ pub fn reminder_hop_pos(start: Point, dest: Point, t: f32) -> Point {
     Point::new(x, y)
 }
 
+/// Sit squash / stretch for overlay travel. `(scale_x, scale_y)`; feet stay put.
+pub fn reminder_squash_at(t: f32) -> (f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    if t <= REMINDER_GATHER_END {
+        let u = if REMINDER_GATHER_END <= f32::EPSILON {
+            1.0
+        } else {
+            t / REMINDER_GATHER_END
+        };
+        let k = ease_smooth(u);
+        return (lerp(1.0, 1.08, k), lerp(1.0, 0.90, k));
+    }
+    if t >= REMINDER_LAND_START {
+        let span = (1.0 - REMINDER_LAND_START).max(f32::EPSILON);
+        let u = ((t - REMINDER_LAND_START) / span).clamp(0.0, 1.0);
+        if u < 0.45 {
+            let v = u / 0.45;
+            return (lerp(0.92, 1.08, v), lerp(1.10, 0.90, v));
+        }
+        let v = ((u - 0.45) / 0.55).clamp(0.0, 1.0);
+        return (lerp(1.08, 1.0, v), lerp(0.90, 1.0, v));
+    }
+    let span = REMINDER_LAND_START - REMINDER_GATHER_END;
+    let u = ((t - REMINDER_GATHER_END) / span).clamp(0.0, 1.0);
+    if u < 0.12 {
+        let v = u / 0.12;
+        return (lerp(1.08, 0.92, v), lerp(0.90, 1.10, v));
+    }
+    (0.92, 1.10)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
+
 /// Suggested duration based on distance (PET-07).
 /// Edge hide/restore: 250 ms.
 pub const EDGE_DURATION: Duration = Duration::from_millis(250);
 /// Legacy alias — prefer [`reminder_hop_duration`].
 pub const REMINDER_MOVE_DURATION: Duration = Duration::from_millis(700);
 
-/// Reminder hop length from window travel distance.
+/// Reminder hop length from overlay-slot travel distance.
 pub fn reminder_hop_duration(distance: f64) -> Duration {
     if distance < REMINDER_HOP_NEAR_PX {
         return Duration::ZERO;
     }
     let ms = if distance <= 400.0 {
         let u = ((distance - REMINDER_HOP_NEAR_PX) / (400.0 - REMINDER_HOP_NEAR_PX)).clamp(0.0, 1.0);
-        550.0 + u * 250.0
+        480.0 + u * 160.0
     } else {
         let u = ((distance - 400.0) / 800.0).clamp(0.0, 1.0);
-        800.0 + u * 300.0
+        640.0 + u * 160.0
     };
     Duration::from_millis(ms.round() as u64)
 }
@@ -372,8 +408,21 @@ mod tests {
     fn reminder_hop_duration_near_is_zero() {
         assert_eq!(reminder_hop_duration(0.0), Duration::ZERO);
         assert_eq!(reminder_hop_duration(REMINDER_HOP_NEAR_PX - 1.0), Duration::ZERO);
-        assert!(reminder_hop_duration(80.0) >= Duration::from_millis(550));
-        assert!(reminder_hop_duration(2000.0) <= Duration::from_millis(1100));
+        assert!(reminder_hop_duration(80.0) >= Duration::from_millis(480));
+        assert!(reminder_hop_duration(2000.0) <= Duration::from_millis(800));
+    }
+
+    #[test]
+    fn reminder_squash_gather_then_stretch() {
+        let (sx0, sy0) = reminder_squash_at(0.0);
+        assert!((sx0 - 1.0).abs() < 0.02 && (sy0 - 1.0).abs() < 0.02);
+        let (sx_g, sy_g) = reminder_squash_at(REMINDER_GATHER_END);
+        assert!(sx_g > 1.02 && sy_g < 0.96, "gather squash sx={sx_g} sy={sy_g}");
+        let mid = (REMINDER_GATHER_END + REMINDER_LAND_START) * 0.5;
+        let (sx_a, sy_a) = reminder_squash_at(mid);
+        assert!(sx_a < 0.96 && sy_a > 1.04, "air stretch sx={sx_a} sy={sy_a}");
+        let (sx1, sy1) = reminder_squash_at(1.0);
+        assert!((sx1 - 1.0).abs() < 0.02 && (sy1 - 1.0).abs() < 0.02);
     }
 
     #[test]

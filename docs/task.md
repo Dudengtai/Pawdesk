@@ -6,10 +6,10 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.29**（2026-08-18：设置放大预留叠层，尾巴不被裁） |
-| 依据文档 | `prd.md` v0.7.10、`tech.md` v0.23、`design.md` v0.25 |
+| 当前版本 | **v0.31**（2026-08-18：提醒叠层内轻跃） |
+| 依据文档 | `prd.md` v0.7.12、`tech.md` v0.25、`design.md` v0.27 |
 | 环境参考 | `env.md` |
-| 状态 | **M0–M6 可日常使用**；**M7**：母版 / 眨眼 / 跟随 / 哈欠 / 伸懒腰已接入 |
+| 状态 | **M0–M6 可日常使用**；**M7**：母版 / 眨眼 / 跟随 / 哈欠 / 伸懒腰 / 舔爪洗脸已接入 |
 | **下一步** | PET-M06 拖拽拎起 + 回坐 |
 
 ### 1.1 使用说明
@@ -54,6 +54,8 @@
 | **v0.27** | **2026-08-18** | 宠物大小 **50%–100%**（设置/托盘同一钳位）；设置改大小不扩叠层（卡完整、不抖），完成钉新原点；设置卡去顶高光；prd **v0.7.9** · tech **v0.19** · design **v0.22** |
 | **v0.28** | **2026-08-18** | **开坞偶发闪一下**：根因是关坞缩 HWND 再开坞放大，layered 位图被丢；`dock_hwnd` 关坞不缩窗；再开尺寸相同只 ULW；design **v0.23** · tech **v0.20** |
 | **v0.29** | **2026-08-18** | **设置放大裁尾巴**：开坞/进设置按 100% 预留叠层；完成兜底扩画布；关坞 HWND 只长大；prd **v0.7.10** · tech **v0.23** · design **v0.25** |
+| **v0.30** | **2026-08-18** | **PET-M10 舔爪洗脸** `idle_groom` 110f@50 进调度池，与哈欠/伸懒腰轮播；`pack_idle_groom.py`；无气泡、不拓窗；prd **v0.7.11** · tech **v0.24** · design **v0.26** |
+| **v0.31** | **2026-08-18** | **PET-M11 提醒叠层轻跃**：旅途不再搬小窗 / 不播 `reminder_hop`；`place_reminder_travel` + sit+squash + 同缓冲出卡；prd **v0.7.12** · tech **v0.25** · design **v0.27** |
 
 ### 1.3 2026-08-11 精灵与呈现收口（已落地）
 
@@ -241,7 +243,7 @@ foundation (工程/错误/日志/事件总线)
 | --- | --- | --- | --- | --- | --- | --- |
 | PET-01 | `PetState` 枚举与合法转换表（集中状态机，禁止 UI 直改） | M1 | P0 | FOUND-05 | tech §6.1, prd §5.7 | [x] |
 | PET-02 | 动画控制器：基于时间的帧推进、循环、结束回调 | M1 | P0 | RND-03, ASSET-03 | tech §8.2 | [x] |
-| PET-03 | 待机 base 眨眼 + 每 **60s** one-shot（**`idle_yawn` / `idle_stretch` 轮播**） | M1 | P0 | PET-02 | tech §6.1/§8.2, design §4.3 | [x] |
+| PET-03 | 待机 base 眨眼 + 每 **60s** one-shot（**`idle_yawn` / `idle_stretch` / `idle_groom` 轮播**） | M1 | P0 | PET-02 | tech §6.1/§8.2, design §4.3 | [x] |
 | PET-04 | `Dragging`：按下移动进入、释放回 Idle；拖动反馈 | M1 | P0 | PET-01, WIN-03 | prd F-UI-02, design §10 | [x] |
 | PET-05 | `HiddenAtEdge`：阈值、隐藏比例、探头命中、点击恢复 | M2 | P0 | PET-01, PLAT-01 | tech §7.2, design §5.2, prd F-AN-03 | [x] |
 | PET-06 | 鼠标距离：`Watching`（中/近距）；飞扑路径已删除 | M2 | P0 | PET-01 | tech §6.1, prd F-AN-04 | [x] |
@@ -612,20 +614,21 @@ foundation (工程/错误/日志/事件总线)
 | PET-A04 | 形象重绘 / 瘦版统一 | 用户拍板后再做 | [ ] |
 | PET-A05 | 提醒/投喂动作精修 | 进场 hop 见 PET-M09；到位 / 投喂用母版坐姿 + `tishi` 卡片 | [x] |
 | PET-A06 | 宠物大小可调 | 设置 + 托盘；`pet.scale` 持久化 | [x] 2026-08-06 已测 |
-| **PET-A07** | **动画精修** | 已并入 §15 母版线 | **[x]** 眨眼 / 跟随 / 哈欠 / 伸懒腰 |
+| **PET-A07** | **动画精修** | 已并入 §15 母版线 | **[x]** 眨眼 / 跟随 / 哈欠 / 伸懒腰 / 舔爪洗脸 |
 
 ### 11.3 实现备忘（长期有效）
 
 - 代码入口：`src/app.rs`、`src/pet/*`、`src/render/menu_ui.rs`、`src/render/text.rs`、`src/ui/radial_menu.rs`、`src/ui/tray.rs`、`src/platform/windows.rs`、`src/config/*`
-- **待机**：`idle_blink` + 头眼跟随 + **60s `idle_yawn` / `idle_stretch` 轮播**；`Watching` 不扑
+- **待机**：`idle_blink` + 头眼跟随 + **60s `idle_yawn` / `idle_stretch` / `idle_groom` 轮播**；`Watching` 不扑
 - **哈欠**：`tools/pack_idle_yawn.py`；气泡 `src/render/yawn_bubble.rs`；间隔 `PAWDESK_CUTE_SECS`；overlay 猫先 `scale_rgba_centered` 再合成，与待机同边距
 - **伸懒腰**：`tools/pack_idle_stretch.py`；110f@50；7 档；峰值眯眼吐舌；1024 抠边；无气泡、不拓窗；书挡 ≡ `idle_blink/000`
+- **舔爪洗脸**：`tools/pack_idle_groom.py`；110f@50；sit→抬左爪→舔→擦颊→擦耳→再舔→回落；无气泡、不拓窗；书挡 ≡ `idle_blink/000`
 - **显示大小**：`config.pet.scale` 默认 **0.6**；`pet_logical_size`；设置 `PetScaleDec/Inc`；托盘变大/变小；schema **v3** 迁移
 - **飞扑**：已删除（无开关、无 `Approaching` / `playing_interaction`）
 - **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `mockups/launcher-pin-flip.*`
 - **呈现**：CPU RGBA → `UpdateLayeredWindow(ULW_ALPHA)` 预乘 BGRA；禁止宠物 HWND 挂 DXGI/wgpu
 - **色键**：仅品红；**禁止黑键**
-- **工具**：`tools/pack_idle_stretch.py`、`pack_idle_yawn.py`、`pack_pitch_from_gen.py`、`pack_reminder_hop.py`、`despill_pet_edges.py`、`package.ps1`、`make-installer.ps1`
+- **工具**：`tools/pack_idle_stretch.py`、`pack_idle_yawn.py`、`pack_idle_groom.py`、`pack_pitch_from_gen.py`、`pack_reminder_hop.py`、`despill_pet_edges.py`、`package.ps1`、`make-installer.ps1`
 - **配置坑**：勿用 PowerShell `Set-Content`/`ConvertTo-Json` 乱写 `config.json`（易 BOM/非法 JSON → 回退 bak 的旧 scale）
 - **添加应用**：`shortcut/picker.rs` → Windows 原生 `IFileOpenDialog`；`build_pick_context` + 后台 STA；虚拟桌面；不切 z-order（tech §7.4）
 - **构建产物**：`target/debug` 开发 · `target/release` 正式 · `dist/PawDesk` 仅 package 快照（不会随 cargo 自动更新）
@@ -640,7 +643,8 @@ foundation (工程/错误/日志/事件总线)
 | `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 13 / 5 / 4；yaw 只用偶数关键帧；pitch 已按母版重画 |
 | `idle_yawn` | 60s oneshot | **77f @30**；峰值气泡；进出同待机缩放 |
 | `idle_stretch` | 60s oneshot | **110f @50**；7 档；峰值眯眼吐舌；无气泡、不拓窗 |
-| `reminder_hop` | 提醒进场 / 回程 | **41f @30**；sit→攒劲→起跳→空中→落地 |
+| `idle_groom` | 60s oneshot | **110f @50**；抬爪/舔/擦颊/擦耳；无气泡、不拓窗 |
+| `reminder_hop` | **下盘不用** | 旧 hop clip 仍在磁盘；旅途走叠层 sit+squash |
 
 ### 11.4 透明底注意事项
 
@@ -669,13 +673,13 @@ foundation (工程/错误/日志/事件总线)
 ### 12.2 已交付能力摘要
 
 - 分层真透明桌宠 + 配置持久化 + 托盘完整菜单  
-- **待机真眨眼** + **头眼跟随** + **60s 哈欠 / 伸懒腰轮播**；距离迟滞 / Watching 驻留  
+- **待机真眨眼** + **头眼跟随** + **60s 哈欠 / 伸懒腰 / 舔爪洗脸轮播**；距离迟滞 / Watching 驻留  
 - **宠物大小可调**（设置步进 + 托盘变大/变小；**50%–100%** 同一钳位；默认 0.6；schema v3；设置放大预留叠层，剪影不被裁）  
 - 提醒闭环 + 设置内开关/间隔（「暂停」只开玩笑）  
 - 快捷启动坞（钉宠玻璃卡）+ **原生**异步文件选择（虚拟桌面 / 不闪）  
 - 隐藏不抢提醒；显示后 pending；工作区钳制  
 - 便携：`dist/PawDesk/`（需 `package.ps1` 刷新）  
-- **动画（当前）**：`IDLE_ACTION_ENABLED = ["idle_yawn", "idle_stretch"]`  
+- **动画（当前）**：`IDLE_ACTION_ENABLED = ["idle_yawn", "idle_stretch", "idle_groom"]`  
 - **其后**：PET-M06 拖拽拎起；飞扑仍关
 
 ### 12.3 本地路径
@@ -1006,7 +1010,9 @@ close → restore origin（禁 persist 临时坐标）
 | PET-M05 | 跟随条带：yaw 关键帧 + pitch + 对角；虹膜微移；竖耳取消 | [x] 运行时跳过 yaw 光流补帧；身体锁定 |
 | PET-M07 | 哈欠 `idle_yawn` + 气泡「困死我了…」 | [x] 2026-08-13 |
 | PET-M08 | 伸懒腰 `idle_stretch` 与哈欠轮播 | [x] 2026-08-14 |
-| PET-M09 | 提醒轻跃到中央 / 回原位（`reminder_hop`） | [x] 2026-08-14 |
+| PET-M09 | 提醒轻跃到中央 / 回原位（`reminder_hop`） | [x] 2026-08-14（已被 PET-M11 替换） |
+| PET-M10 | 舔爪洗脸 `idle_groom` 与哈欠/伸懒腰轮播 | [x] 2026-08-18 |
+| PET-M11 | 提醒叠层内轻跃（HWND 钉死，sit+squash，同缓冲出卡） | [x] 2026-08-18 |
 | PET-M06 | 拖拽拎起 + 回坐 | [ ] |
 
 **母版文件**
@@ -1034,7 +1040,7 @@ close → restore origin（禁 persist 临时坐标）
 
 ### 15.6 哈欠（已落地）
 
-- `IDLE_ACTION_ENABLED = ["idle_yawn", "idle_stretch"]`；约 60s（`PAWDESK_CUTE_SECS` 可缩短）
+- `IDLE_ACTION_ENABLED = ["idle_yawn", "idle_stretch", "idle_groom"]`；约 60s（`PAWDESK_CUTE_SECS` 可缩短）
 - ~77f @30：坐 → 半张 → 大张 hold → 原路回坐；五官贴回母版，外轮廓不换
 - 峰值漫画气泡「困死我了…」（运行时画，默认头右侧）
 - 哈欠中停转头/眨眼；拖动或开坞打断并回坐
@@ -1057,3 +1063,11 @@ close → restore origin（禁 persist 临时坐标）
 - 256、不拓窗、无气泡；帧 0 / 末 sit ≡ `idle_blink/000`
 - 身体跟键走；不把坐姿整脸贴到已离位的头上（会双头）
 - 旧 `_video/`（含 `stretch.mp4`）已从仓库删除，不当身份、不加载
+
+### 15.9 舔爪洗脸（已落地）
+
+- 与哈欠 / 伸懒腰轮播；`tools/pack_idle_groom.py`；**110f @50**（2.20s）
+- 分镜：坐书挡 → 抬左爪 → 舔爪 → 擦左颊 → 擦左耳 → 再舔 → 回落 → sit（不倒放整段）
+- 表情：抬爪睁眼；舔闭眼满足 + 小粉舌贴爪垫；擦脸闭眼、舌收回
+- 画风：从 `sit_master` edit-chain；墨线 + 排线/网点
+- 256、不拓窗、无气泡；帧 0 / 末 sit ≡ `idle_blink/000`

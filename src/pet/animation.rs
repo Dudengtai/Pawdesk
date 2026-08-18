@@ -156,6 +156,7 @@ impl AnimationLibrary {
             "look_diag",
             "idle_yawn",
             "idle_stretch",
+            IDLE_GROOM,
             SLY_PAUSE,
         ];
         let mut clips = Vec::new();
@@ -233,6 +234,7 @@ impl AnimationLibrary {
             "look_diag",
             "idle_yawn",
             "idle_stretch",
+            IDLE_GROOM,
             SLY_PAUSE,
         ];
         for name in names {
@@ -537,9 +539,10 @@ pub const IDLE_ACTION_INTERVAL_SECS: f32 = 60.0;
 /// Re-enable only after those actions are remade on the confirmed master.
 pub const IDLE_YAWN: &str = "idle_yawn";
 pub const IDLE_STRETCH: &str = "idle_stretch";
+pub const IDLE_GROOM: &str = "idle_groom";
 
-/// One-shot pool. Master yawn + stretch; old cute/sleep/wag stay off.
-pub const IDLE_ACTION_ENABLED: &[&str] = &[IDLE_YAWN, IDLE_STRETCH];
+/// One-shot pool. Master yawn + stretch + groom; old cute/sleep/wag stay off.
+pub const IDLE_ACTION_ENABLED: &[&str] = &[IDLE_YAWN, IDLE_STRETCH, IDLE_GROOM];
 
 /// Picks one-shot idle actions on a fixed wall-clock interval.
 ///
@@ -698,6 +701,16 @@ mod idle_picker_tests {
     }
 
     #[test]
+    fn idle_groom_loads_from_disk() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pets/cow-cat");
+        let lib = AnimationLibrary::load_idle_set(&dir);
+        let clip = lib.get(IDLE_GROOM).expect("idle_groom must ship on disk");
+        assert_eq!(clip.frame_count, 110);
+        assert!(!clip.looping);
+        assert!(clip.fps >= 49.0);
+    }
+
+    #[test]
     fn reminder_hop_loads_from_disk() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pets/cow-cat");
         let clips = AnimationLibrary::load_interaction_set(&dir);
@@ -710,8 +723,8 @@ mod idle_picker_tests {
     }
 
     #[test]
-    fn enabled_pool_is_master_yawn_and_stretch() {
-        assert_eq!(IDLE_ACTION_ENABLED, &[IDLE_YAWN, IDLE_STRETCH]);
+    fn enabled_pool_is_master_yawn_stretch_groom() {
+        assert_eq!(IDLE_ACTION_ENABLED, &[IDLE_YAWN, IDLE_STRETCH, IDLE_GROOM]);
     }
 
     #[test]
@@ -730,6 +743,30 @@ mod idle_picker_tests {
             .take_action(t0 + Duration::from_secs(183))
             .unwrap();
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn three_action_pool_skips_the_last_two() {
+        let t0 = Instant::now();
+        let mut p = IdlePicker::new(
+            vec![IDLE_YAWN.into(), IDLE_STRETCH.into(), IDLE_GROOM.into()],
+            t0,
+        );
+        let a = p.take_action(t0 + Duration::from_secs(61)).unwrap();
+        let b = p
+            .take_action(t0 + Duration::from_secs(122))
+            .unwrap();
+        let c = p
+            .take_action(t0 + Duration::from_secs(183))
+            .unwrap();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        let d = p
+            .take_action(t0 + Duration::from_secs(244))
+            .unwrap();
+        assert_ne!(d, b);
+        assert_ne!(d, c);
     }
 
     #[test]

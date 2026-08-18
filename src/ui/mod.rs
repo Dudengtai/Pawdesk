@@ -4,4 +4,5 @@ pub mod launcher_place;
 pub mod list_drag;
 pub mod pet_window;
 pub mod radial_menu;
+pub mod reminder_place;
 pub mod tray;

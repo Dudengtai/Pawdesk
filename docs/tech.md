@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.23**（2026-08-18：开坞/进设置按 100% 预留叠层，完成不裁尾巴） |
-| 依据 | `prd.md` v0.7.10 · `design.md` v0.25 |
+| 版本 | **v0.25**（2026-08-18：提醒旅途叠层内轻跃） |
+| 依据 | `prd.md` v0.7.12 · `design.md` v0.27 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -139,25 +139,28 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | `look_yaw` / `look_pitch` / `look_diag` | 头跟随 | 姿态条；运行时只用手写关键帧 + 身体锁定（预乘混合）；虹膜另叠。`look_pitch` 由母版品红静帧软抠重画（`tools/pack_pitch_from_gen.py`） |
 | `idle_yawn` | 60s one-shot | ~77f @30；母版脸哈欠；峰值画气泡「困死我了…」 |
 | `idle_stretch` | 60s one-shot | 110f @50（2.20s，压过 `ACTION_MIN_SECS=2.2`）；7 档 sit→转→下蹲→探→半峰→峰→倒放；峰值眯眼吐舌；无气泡、不拓窗 |
-| `reminder_hop` | 提醒进场 / 回程 | 41f @30；sit→攒劲→起跳→空中→落地→sit；进度锁相；缺文件回退 `idle_blink` |
+| `idle_groom` | 60s one-shot | 110f @50（2.20s）；sit→抬左爪→舔→擦颊→擦耳→再舔→回落→sit；无气泡、不拓窗 |
+| `reminder_hop` | **下盘不用** | 旧小窗 hop clip 仍在磁盘；旅途改为叠层内 sit+squash，运行时不再切换此 clip |
 
 **待机规则**
 
 - Base：`idle_blink`。随机 **2.8–6.2s** 眨一次（约 200ms；约 18% 双眨）。  
 - 头眼：`src/pet/look.rs`。瞳孔先跟（~75ms），头后跟（~155ms）。`look_yaw` 13 帧条带只取偶数关键帧（光流补帧会抖）。下半身锁 `idle_blink/000`（预乘 lerp，避免交界发黑）。死区外才换姿态条。眨眼时保持转头，不弹回正面。禁止整图镜像。  
-- 墙钟约 **60s** 播 `IDLE_ACTION_ENABLED`（**`idle_yawn` + `idle_stretch` 轮播**）。本地可 `PAWDESK_CUTE_SECS`。Watching / 躲边不饿死计时；躲边到点先 restore。oneshot 中停转头/眨眼。  
+- 墙钟约 **60s** 播 `IDLE_ACTION_ENABLED`（**`idle_yawn` + `idle_stretch` + `idle_groom` 轮播**）。本地可 `PAWDESK_CUTE_SECS`。Watching / 躲边不饿死计时；躲边到点先 restore。oneshot 中停转头/眨眼。  
 - 哈欠：`tools/pack_idle_yawn.py` 把五官贴回母版坐姿。进场帧 0 书挡；出场 `go_idle_with_settle`。峰值 `src/render/yawn_bubble.rs` 画漫画气泡；窗向右扩（原点不动），贴右屏才 flip 左。  
 - 哈欠呈现：overlay 里的猫必须先走待机同一套 `scale_rgba_centered` letterbox（左右/顶/爪边距），再 `compose_yawn_frame`。禁止把 256 图铺满 `pet_phys`（进出哈欠会突然放大/缩小）。书挡帧与 `idle_blink/000` 像素一致。  
 - 伸懒腰：`tools/pack_idle_stretch.py`。母版 edit-chain 5 键 + sit 书挡 hold；回程倒放去程。帧 0 / 末 sit ≡ `idle_blink/000`。**不拓窗、无气泡**，走普通 letterbox。  
 - 伸懒腰打包：源图 1024 品红软抠 → 去暗晕 → 预乘缩到 256 → 轮廓去品红边。禁止先缩再抠（中间帧会发虚）。禁止整段 i2v 抽帧进盘；禁止把坐姿整脸贴到已离位的头上（会双头）。键须保住母版墨线粗细与毛发排线/网点。  
 - 伸懒腰表情：坐/转/下蹲睁眼；探轻笑；半峰开始眯；峰值开心眯眼 + 张嘴吐舌（参考 `_master/stretch_expr_ref.png`）。  
+- 舔爪洗脸：`tools/pack_idle_groom.py`。母版 edit-chain 4 键（抬爪 / 舔 / 擦颊 / 擦耳）+ sit 书挡 hold；回落复用抬爪，再舔复用舔，**不倒放整段**。帧 0 / 末 sit ≡ `idle_blink/000`。只抬观众左侧前爪；舔键闭眼 + 小粉舌贴爪垫；擦脸舌收回。**不拓窗、无气泡**，走普通 letterbox。  
+- 舔爪洗脸打包：源图品红软抠 → 去暗晕 → 预乘缩到 256 → 轮廓去品红边。禁止整段 i2v 抽帧进盘；禁止把坐姿整脸贴到已离位的头上。  
 - 播帧：最近邻，禁亚帧混合。oneshot 回 base 约 100ms 书挡。  
 - 呈现：密集 clip **本帧直接 present**。缩放预乘双线性。  
-- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` / **`idle_stretch`** + **`reminder_hop`**（缺则跳过、旅途回退坐姿）。拖动 / 贴边 / 提醒卡片到位均保持母版坐姿。旧写实猫 clip 与飞扑路径已下盘。
+- 加载：`AnimationLibrary` 只读 `idle_blink` / look 三带 / `idle_yawn` / **`idle_stretch`** / **`idle_groom`**（`reminder_hop` 可仍在磁盘，运行时不切）。拖动 / 贴边 / 提醒旅途与卡片到位均保持母版坐姿。旧写实猫 clip 与飞扑路径已下盘。
 
 ### 3.3 移动
 
-`movement`：提醒 hop 到屏幕中心 / 回原位、边缘 hide/restore。缓动见 design `ease.smooth`。
+`movement`：提醒旅途在**叠层局部槽**里 hop（HWND 钉死）；边缘 hide/restore 仍滑窗。缓动见 design `ease.smooth` / `ease_in_out_cubic`。
 
 ### 3.4 显示缩放（`pet.scale`）
 
@@ -319,9 +322,12 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 ### 6.2 流程
 
 ```text
-Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距跳过；躲边先 snap restore）
-    → Showing：tishi 整图 contain-fit 进 640×360（16:9）；96×96 猫粮碗落气泡下方左空档
-    → Feeding（~900ms）→ reminder_hop 轻跃回原位 → Idle
+Due → 存原位（躲边先 snap restore）
+    → 一次 sync_layered_hwnd 长大到 union(原位宠, 中央 640×360 卡, 弧线包围盒)
+    → 叠层内 sit+squash 轻跃到卡中心宠槽（近距跳过；禁止每帧 set_outer_position）
+    → Showing：同缓冲 fade 出 tishi + 96×96 碗；16ms 直呈
+    → Feeding（~900ms）→ 卡 fade 出 → 叠层内轻跃回原位槽
+    → begin_idle_present_at(原位) 一次缩回 → Idle
 ```
 
 拖动中 due → pending；松手后再进。隐藏宠物时 due 可 pending，显示后再出。
@@ -497,3 +503,5 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.21** | **2026-08-18** | 提醒窗 640×360 16:9：插画铺满、碗 96px 落左下；`layout_food_button` 复用 `food_button_layout`；design **v0.24** |
 | **v0.22** | **2026-08-18** | 设置改大小后关坞缩回旧尺寸：完成 / `finish_exit_menu_ui` 把 `menu_layout` 宠槽抄回 `dock_hwnd`；design **v0.24** |
 | **v0.23** | **2026-08-18** | 开坞/进设置 `overlay_pad_for_max_pet` 预留 100% 宠；`±` 不再裁尾巴；完成兜底 `grow_overlay_to_contain_pet_slot`；dock HWND 只长大不缩小；design **v0.25** · prd **v0.7.10** |
+| **v0.24** | **2026-08-18** | 母版 `idle_groom`（110f@50，抬爪/舔/擦颊/擦耳，不拓窗）进 `IDLE_ACTION_ENABLED`；`pack_idle_groom.py`；design **v0.26** · prd **v0.7.11** |
+| **v0.25** | **2026-08-18** | 提醒旅途叠层：`place_reminder_travel` + overlay-local hop + 一次 `sync_layered_hwnd` + 60fps 直呈；运行时不再切 `reminder_hop`；design **v0.27** · prd **v0.7.12** |

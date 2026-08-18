@@ -19,12 +19,12 @@ use crate::config::{AppConfig, ConfigRepository, DebouncedSaver, PET_SCALE_MAX};
 use crate::error::AppError;
 use crate::event::{AppEvent, Point, TrayCommand};
 use crate::pet::{
-    pet_logical_size, AnimationLibrary, PetController, PetState, ReminderStage, REMINDER_WINDOW_H,
-    REMINDER_WINDOW_W,
+    hop_arc_height, pet_logical_size, AnimationLibrary, PetController, PetState, ReminderStage,
+    REMINDER_WINDOW_H, REMINDER_WINDOW_W,
 };
 use crate::platform;
 use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
-use crate::render::easing::ease_in_out_cubic;
+use crate::render::easing::{ease_in_out_cubic, ease_out_cubic};
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
     compose_menu_pet_only, compose_pet_in_slot, compose_settings_card,
@@ -36,8 +36,9 @@ use crate::render::menu_ui::{
 };
 use crate::render::sample_rgba_bilinear;
 use crate::render::reminder_ui::{
-    client_to_layout, compose_reminder_card_frame, compose_reminder_frame, food_button_layout,
-    load_feed_bowl, load_reminder_card, FeedBowl, ReminderCard,
+    compose_reminder_card_frame, compose_reminder_frame, compose_reminder_overlay,
+    food_button_layout, load_feed_bowl, load_reminder_card, FeedBowl, OverlayCardBlit,
+    ReminderCard,
 };
 use crate::render::yawn_bubble::{compose_yawn_frame, place_yawn_bubble, YawnPlacement};
 // Present path uses CPU + UpdateLayeredWindow only (no wgpu surface on the pet HWND).
@@ -55,6 +56,7 @@ use crate::ui::list_drag::{
     bowl_rect, edge_scroll_delta, insert_index_from_y, pointer_dist, reorder_ids, should_start_drag,
     ListDrag, SLOP_PX,
 };
+use crate::ui::reminder_place::{place_reminder_travel, ReminderPlacement};
 use crate::ui::pet_window::DragState;
 use crate::ui::radial_menu::{
     self, build_entries, clamp_list_scroll, count_shortcuts, hit_center, hit_test_index,
@@ -156,8 +158,18 @@ pub struct App {
     texture_dirty: bool,
     last_clip_name: String,
     scale_factor: f64,
-    /// True while expanded reminder window is showing UI.
+    /// True while the reminder travel overlay is up (hop + card + return).
     reminder_ui_active: bool,
+    /// Overlay geometry for the current reminder (physical px).
+    reminder_place: Option<ReminderPlacement>,
+    /// Overlay HWND top-left for atomic ULW (physical).
+    reminder_present_pos: Option<(i32, i32)>,
+    /// Pet slot top-left inside the overlay (physical).
+    reminder_slot: Option<Point>,
+    /// 0 = pet only, 1 = card only.
+    reminder_card_t: f32,
+    /// Card fade: (started, from, to, duration).
+    reminder_card_anim: Option<(Instant, f32, f32, Duration)>,
     /// Whole-image reminder card (tishi.png mockup), None → composed fallback.
     reminder_card: Option<ReminderCard>,
     /// Kibble bowl used as the feed control.
@@ -302,6 +314,11 @@ impl App {
             last_clip_name: String::new(),
             scale_factor: 1.0,
             reminder_ui_active: false,
+            reminder_place: None,
+            reminder_present_pos: None,
+            reminder_slot: None,
+            reminder_card_t: 0.0,
+            reminder_card_anim: None,
             reminder_card,
             feed_bowl,
             feed_persist_pending: false,
@@ -969,13 +986,63 @@ impl App {
             return;
         }
 
-        if self.reminder_ui_active
-            && matches!(
-                pet.state,
-                PetState::Reminder(ReminderStage::Showing)
-                    | PetState::Reminder(ReminderStage::Feeding)
-            )
-        {
+        if self.reminder_ui_active {
+            if let Some(place) = self.reminder_place {
+                let clip = pet.active_clip();
+                let pet_rgba = pet.display_rgba();
+                let now = Instant::now();
+                let (sx, sy) = pet.reminder_squash(now);
+                let slot = self.reminder_slot.unwrap_or(Point::new(
+                    place.dest_local.x as f64,
+                    place.dest_local.y as f64,
+                ));
+                let sw = place.origin_local.width.max(1) as f32;
+                let sh = place.origin_local.height.max(1) as f32;
+                let pw = (sw * sx).max(1.0);
+                let ph = (sh * sy).max(1.0);
+                let px = slot.x as f32 + (sw - pw) * 0.5;
+                let py = slot.y as f32 + (sh - ph);
+                let card_t = self.reminder_card_t.clamp(0.0, 1.0);
+                let traveling = pet.is_reminder_moving();
+                let pet_alpha = if traveling { 1.0 } else { 1.0 - card_t };
+                let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
+                let card_blit = if !traveling && card_t > 0.01 {
+                    self.reminder_card.as_ref().map(|card| OverlayCardBlit {
+                        card,
+                        bowl: self.feed_bowl.as_ref(),
+                        feeding,
+                        alpha: card_t,
+                        x: place.card_local.x,
+                        y: place.card_local.y,
+                        w: place.card_local.width.max(1) as u32,
+                        h: place.card_local.height.max(1) as u32,
+                    })
+                } else {
+                    None
+                };
+                let (w, h, composed) = compose_reminder_overlay(
+                    place.window.width.max(1) as u32,
+                    place.window.height.max(1) as u32,
+                    &pet_rgba,
+                    clip.frame_width,
+                    clip.frame_height,
+                    px,
+                    py,
+                    pw,
+                    ph,
+                    pet_alpha,
+                    card_blit,
+                );
+                let dpr = snap_dpr(self.scale_factor);
+                self.sprite_logical = (
+                    physical_to_logical_u32(place.window.width, dpr),
+                    physical_to_logical_u32(place.window.height, dpr),
+                );
+                self.hit_rgba = composed;
+                self.hit_size = (w, h);
+                self.texture_dirty = false;
+                return;
+            }
             let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
             if let Some(card) = &self.reminder_card {
                 let (w, h, composed) =
@@ -1123,6 +1190,8 @@ impl App {
                 self.settings_present_pos
             } else if self.yawn_ui_active {
                 self.yawn_present_pos
+            } else if self.reminder_present_pos.is_some() {
+                self.reminder_present_pos
             } else {
                 None
             };
@@ -1199,7 +1268,11 @@ impl App {
         {
             return;
         }
-        if let Some(p) = self.pet_desk_origin() {
+        let p = self
+            .idle_present_pos
+            .map(|(x, y)| Point::new(x as f64, y as f64))
+            .or_else(|| self.pet_desk_origin());
+        if let Some(p) = p {
             self.config.window.x = Some(p.x as i32);
             self.config.window.y = Some(p.y as i32);
             if let Some(saver) = self.saver.as_mut() {
@@ -1263,32 +1336,162 @@ impl App {
         self.redraw();
     }
 
-    fn enter_reminder_ui(&mut self) {
+    fn enter_reminder_travel(&mut self, desk_origin: Point, now: Instant) -> bool {
+        let dpr = snap_dpr(self.scale_factor);
+        let pet_phys = logical_to_physical(self.pet_size(), dpr);
+        let origin_pet = platform::Rect {
+            x: desk_origin.x.round() as i32,
+            y: desk_origin.y.round() as i32,
+            width: pet_phys,
+            height: pet_phys,
+        };
+        let work = platform::work_area_from_point(origin_pet.x + pet_phys / 2, origin_pet.y + pet_phys / 2)
+            .map(|m| m.work_area)
+            .ok()
+            .or_else(|| {
+                self.window
+                    .as_ref()
+                    .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
+            })
+            .or_else(|| platform::primary_work_area().ok())
+            .unwrap_or(platform::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
+        let desk = platform::work_area_from_point(origin_pet.x + pet_phys / 2, origin_pet.y + pet_phys / 2)
+            .map(|m| m.bounds)
+            .ok()
+            .unwrap_or(platform::Rect {
+                x: work.x,
+                y: work.y,
+                width: work.width,
+                height: work.height,
+            });
+        let dest_x = work.x + (work.width - pet_phys).max(0) / 2;
+        let dest_y = work.y + (work.height - pet_phys).max(0) / 2;
+        let dist = ((dest_x - origin_pet.x) as f64).hypot((dest_y - origin_pet.y) as f64);
+        let lift = hop_arc_height(dist).round() as i32;
+        let place = place_reminder_travel(
+            origin_pet,
+            work,
+            desk,
+            dpr,
+            lift,
+            REMINDER_WINDOW_W,
+            REMINDER_WINDOW_H,
+        );
+        let start = Point::new(place.origin_local.x as f64, place.origin_local.y as f64);
+        let dest = Point::new(place.dest_local.x as f64, place.dest_local.y as f64);
+        let msg = pick_message(&self.config.reminder.custom_messages);
+
+        let Some(pet) = self.pet.as_mut() else {
+            return false;
+        };
+        if !pet.begin_reminder(desk_origin, start, dest, msg, now) {
+            return false;
+        }
+
         self.clear_dock_hwnd();
         self.idle_present_pos = None;
-        let center =
-            self.work_area_center_top_left(REMINDER_WINDOW_W as i32, REMINDER_WINDOW_H as i32);
+        self.overlay_origin = Some(desk_origin);
+        self.reminder_place = Some(place);
+        self.reminder_present_pos = Some((place.window.x, place.window.y));
+        self.reminder_slot = Some(start);
+        self.reminder_card_t = 0.0;
+        self.reminder_card_anim = None;
         self.reminder_ui_active = true;
-        self.resize_pet_window(REMINDER_WINDOW_W, REMINDER_WINDOW_H);
+
         if let Some(w) = &self.window {
-            w.set_outer_position(PhysicalPosition::new(center.x as i32, center.y as i32));
-            // Force non-transparent click capture for whole reminder surface.
+            if let Err(e) = platform::sync_layered_hwnd(
+                w.as_ref(),
+                place.window.x,
+                place.window.y,
+                place.window.width.max(1) as u32,
+                place.window.height.max(1) as u32,
+            ) {
+                warn!("sync_layered_hwnd reminder travel: {e}");
+            }
             let _ = platform::set_click_through(w.as_ref(), false);
             self.click_through = false;
         }
-        if let Some(pet) = self.pet.as_mut() {
-            let (x, y, bw, bh) = food_button_layout();
-            pet.food_button_rect = Some((x, y, bw, bh));
-        }
         self.texture_dirty = true;
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
-        info!("reminder UI entered (food button active)");
+        self.redraw();
+        info!(
+            win = ?(place.window.x, place.window.y, place.window.width, place.window.height),
+            "reminder travel overlay entered"
+        );
+        true
     }
 
-    fn exit_reminder_ui_to_pet_size(&mut self, top_left: Point) {
+    fn start_reminder_card_reveal(&mut self, now: Instant) {
+        self.reminder_card_anim = Some((
+            now,
+            self.reminder_card_t,
+            1.0,
+            Duration::from_millis(140),
+        ));
+    }
+
+    fn start_reminder_card_dismiss(&mut self, now: Instant) {
+        self.reminder_card_anim = Some((
+            now,
+            self.reminder_card_t,
+            0.0,
+            Duration::from_millis(120),
+        ));
+    }
+
+    fn tick_reminder_card_anim(&mut self, now: Instant) -> bool {
+        let Some((started, from, to, dur)) = self.reminder_card_anim else {
+            return false;
+        };
+        let u = if dur.is_zero() {
+            1.0
+        } else {
+            (now.duration_since(started).as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0)
+        };
+        self.reminder_card_t = from + (to - from) * ease_out_cubic(u);
+        if u < 1.0 {
+            return true;
+        }
+        self.reminder_card_t = to;
+        self.reminder_card_anim = None;
+        if to <= 0.01 {
+            if let (Some(place), Some(pet)) = (self.reminder_place, self.pet.as_mut()) {
+                let from = Point::new(place.dest_local.x as f64, place.dest_local.y as f64);
+                let home = Point::new(place.origin_local.x as f64, place.origin_local.y as f64);
+                pet.start_reminder_return(from, home, now);
+                self.reminder_slot = Some(from);
+            }
+        }
+        true
+    }
+
+    fn current_reminder_pet_screen(&self) -> Point {
+        if let Some(place) = self.reminder_place {
+            let slot = self.reminder_slot.unwrap_or(Point::new(
+                place.dest_local.x as f64,
+                place.dest_local.y as f64,
+            ));
+            return Point::new(
+                place.window.x as f64 + slot.x,
+                place.window.y as f64 + slot.y,
+            );
+        }
+        self.pet_desk_origin()
+            .unwrap_or(Point::new(100.0, 100.0))
+    }
+
+    fn exit_reminder_overlay_to_pet(&mut self, top_left: Point) {
         self.reminder_ui_active = false;
+        self.reminder_place = None;
+        self.reminder_present_pos = None;
+        self.reminder_slot = None;
+        self.reminder_card_t = 0.0;
+        self.reminder_card_anim = None;
+        self.overlay_origin = None;
         if let Some(pet) = self.pet.as_mut() {
             pet.food_button_rect = None;
         }
@@ -2918,36 +3121,28 @@ impl App {
             return;
         }
 
-        let window_pos = self
-            .window
-            .as_ref()
-            .and_then(|w| w.outer_position().ok())
-            .map(|p| Point::new(p.x as f64, p.y as f64))
+        let mut window_pos = self
+            .idle_present_pos
+            .map(|(x, y)| Point::new(x as f64, y as f64))
+            .or_else(|| self.pet_desk_origin())
             .unwrap_or(Point::new(100.0, 100.0));
 
-        let s = self.pet_size() as i32;
-        let center = self.work_area_center_top_left(s, s);
-        let msg = pick_message(&self.config.reminder.custom_messages);
-
-        if let Some(pet) = self.pet.as_mut() {
-            if pet.begin_reminder(window_pos, center, msg, now) {
-                if let Some(origin) = pet.reminder_origin {
-                    if (origin.x - window_pos.x).abs() > 0.5
-                        || (origin.y - window_pos.y).abs() > 0.5
-                    {
-                        if let Some(w) = &self.window {
-                            w.set_outer_position(PhysicalPosition::new(
-                                origin.x as i32,
-                                origin.y as i32,
-                            ));
-                        }
-                    }
+        if matches!(
+            self.pet.as_ref().map(|p| &p.state),
+            Some(PetState::HiddenAtEdge(_))
+        ) {
+            if let Some(pet) = self.pet.as_mut() {
+                if let Some(home) = pet.snap_restore_from_edge(now) {
+                    window_pos = home;
                 }
-                if let Some(s) = self.scheduler.as_mut() {
-                    s.consume_due();
-                }
-                self.texture_dirty = true;
             }
+        }
+
+        if self.enter_reminder_travel(window_pos, now) {
+            if let Some(s) = self.scheduler.as_mut() {
+                s.consume_due();
+            }
+            self.texture_dirty = true;
         }
     }
 
@@ -3139,11 +3334,13 @@ impl App {
         }
         // Menu open/close + hover microinteractions need ~60fps for silk motion.
         // Launcher→settings handoff is the same class of motion.
-        if self.menu_ui_active || self.settings_transition.is_some() {
+        if self.menu_ui_active
+            || self.settings_transition.is_some()
+            || self.reminder_ui_active
+        {
             return Duration::from_millis(16);
         }
         if self.settings_ui_active
-            || self.reminder_ui_active
             || self.drag.dragging
             || self.file_picker_busy
         {
@@ -3332,13 +3529,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // Keep overlay_origin for restore after drag end.
                     }
                     if self.reminder_ui_active {
-                        let pos = self
-                            .window
-                            .as_ref()
-                            .and_then(|w| w.outer_position().ok())
-                            .map(|p| Point::new(p.x as f64, p.y as f64))
-                            .unwrap_or(Point::new(100.0, 100.0));
-                        self.exit_reminder_ui_to_pet_size(pos);
+                        let pos = self.current_reminder_pet_screen();
+                        self.exit_reminder_overlay_to_pet(pos);
                     } else if self.settings_ui_active {
                         self.settings_ui_active = false;
                         self.settings_transition = None;
@@ -3479,24 +3671,20 @@ impl ApplicationHandler<UserEvent> for App {
                     // Food button
                     if self.reminder_ui_active {
                         if let Some(pet) = self.pet.as_ref() {
-                            if matches!(pet.state, PetState::Reminder(ReminderStage::Showing)) {
-                                let (client_w, client_h) = self
-                                    .window
-                                    .as_ref()
-                                    .map(|w| {
-                                        let s = w.inner_size();
-                                        (s.width as f64, s.height as f64)
-                                    })
-                                    .unwrap_or((
-                                        REMINDER_WINDOW_W as f64,
-                                        REMINDER_WINDOW_H as f64,
-                                    ));
-                                let (lx, ly) = client_to_layout(
-                                    self.cursor_in_window.x,
-                                    self.cursor_in_window.y,
-                                    client_w,
-                                    client_h,
-                                );
+                            if matches!(pet.state, PetState::Reminder(ReminderStage::Showing))
+                                && self.reminder_card_t > 0.8
+                            {
+                                let (lx, ly) = if let Some(place) = self.reminder_place {
+                                    let dpr = snap_dpr(self.scale_factor).max(0.01);
+                                    (
+                                        (self.cursor_in_window.x - place.card_local.x as f64)
+                                            / dpr,
+                                        (self.cursor_in_window.y - place.card_local.y as f64)
+                                            / dpr,
+                                    )
+                                } else {
+                                    (self.cursor_in_window.x, self.cursor_in_window.y)
+                                };
                                 let hit = pet.hit_food_button(lx, ly)
                                     || feed_zone_hit(lx, ly);
                                 if hit {
@@ -3813,25 +4001,21 @@ impl ApplicationHandler<UserEvent> for App {
                 .unwrap_or(false);
             let mut entered_showing = false;
             let mut returned_idle = false;
+            let reminder_home = self
+                .pet
+                .as_ref()
+                .and_then(|p| p.reminder_origin);
+            let mut hop_slot: Option<Point> = None;
+            let mut hwnd_slide: Option<Point> = None;
             if movement_was_active {
                 if let Some(pet) = self.pet.as_mut() {
-                    if let Some(mut new_pos) = pet.update_movement(now) {
-                        if pet.is_reminder_moving() {
-                            if let Some(wa) = self
-                                .window
-                                .as_ref()
-                                .and_then(|w| platform::work_area_for_window(w.as_ref()).ok())
-                            {
-                                new_pos.y = new_pos.y.max(wa.y as f64);
-                            }
+                    let reminder_hop = pet.is_reminder_moving();
+                    if let Some(new_pos) = pet.update_movement(now) {
+                        if reminder_hop {
+                            hop_slot = Some(new_pos);
+                        } else {
+                            hwnd_slide = Some(new_pos);
                         }
-                        if let Some(w) = &self.window {
-                            w.set_outer_position(PhysicalPosition::new(
-                                new_pos.x as i32,
-                                new_pos.y as i32,
-                            ));
-                        }
-                        need_redraw = true;
                     }
                     if movement_was_active
                         && !pet.movement.is_active()
@@ -3844,12 +4028,36 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            if let Some(slot) = hop_slot {
+                self.reminder_slot = Some(slot);
+                need_redraw = true;
+                present_now = true;
+            }
+            if let Some(pos) = hwnd_slide {
+                if let Some(w) = &self.window {
+                    w.set_outer_position(PhysicalPosition::new(pos.x as i32, pos.y as i32));
+                }
+                need_redraw = true;
+            }
             if entered_showing {
-                self.enter_reminder_ui();
+                if let Some(place) = self.reminder_place {
+                    self.reminder_slot = Some(Point::new(
+                        place.dest_local.x as f64,
+                        place.dest_local.y as f64,
+                    ));
+                }
+                self.start_reminder_card_reveal(now);
+                present_now = true;
             }
             if returned_idle {
-                self.reminder_ui_active = false;
+                let home = reminder_home.unwrap_or_else(|| self.current_reminder_pet_screen());
+                self.exit_reminder_overlay_to_pet(home);
                 self.persist_window_pos();
+            }
+
+            if self.tick_reminder_card_anim(now) {
+                need_redraw = true;
+                present_now = true;
             }
 
             // Gaze follows the screen cursor whenever we can see the pet.
@@ -3975,6 +4183,7 @@ impl ApplicationHandler<UserEvent> for App {
 
             // Animation + interaction end + feed end.
             let mut playing_yawn = false;
+            let reminder_card_animating = self.reminder_card_anim.is_some();
             if let Some(pet) = self.pet.as_mut() {
                 let prev_clip = pet.player.clip_name().to_string();
                 let prev_f = pet.display_frame_f;
@@ -4007,6 +4216,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // Direct present for clip playback (same path as menu open silk).
                     if pet.is_playing_cute_action()
                         || pet.is_crossfading()
+                        || pet.is_reminder_moving()
+                        || reminder_card_animating
                         || matches!(
                             pet.state,
                             PetState::Watching
@@ -4027,7 +4238,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.exit_yawn_ui();
             }
 
-            // Feed animation done → shrink + return + persist.
+            // Feed animation done → fade card out, then overlay-hop home.
             let feed_done = self
                 .pet
                 .as_mut()
@@ -4038,14 +4249,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handle_feed_completed(now);
                     self.feed_persist_pending = false;
                 }
-                let ps = self.pet_size() as i32;
-                let center_small = self.work_area_center_top_left(ps, ps);
-                self.exit_reminder_ui_to_pet_size(center_small);
-                if let Some(pet) = self.pet.as_mut() {
-                    pet.start_reminder_return(center_small, now);
-                    self.texture_dirty = true;
-                }
+                self.start_reminder_card_dismiss(now);
+                self.texture_dirty = true;
                 need_redraw = true;
+                present_now = true;
             }
 
             if present_now && self.visible {

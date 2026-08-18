@@ -13,7 +13,8 @@ pub use animation::{
 pub use look::LookController;
 pub use interaction::{DistanceLevel, InteractionDetector};
 pub use movement::{
-    reminder_hop_duration, MovementController, MovementTarget, EDGE_DURATION,
+    hop_arc_height, reminder_hop_duration, reminder_squash_at, MovementController,
+    MovementTarget, EDGE_DURATION,
 };
 pub use state::{can_interrupt, try_transition, Edge, PetState, ReminderStage};
 
@@ -526,9 +527,7 @@ impl PetController {
         // Reminder travel: pose phase = hop progress.
         // Dense clips (≥8 frames): continuous player / progress sampling at 30fps.
         // Tiny blink clips (≤4 frames): hold-based blink on the sit master.
-        let (frame, finished) = if self.is_reminder_moving() && self.movement.is_reminder_hop() {
-            self.tick_hop_synced(now)
-        } else if on_blink_base {
+        let (frame, finished) = if on_blink_base {
             self.tick_blink_hold(now)
         } else {
             self.tick_continuous(now)
@@ -796,16 +795,6 @@ impl PetController {
         self.blink_wait = 2.8 + u * 3.4;
         self.blink_rng = self.blink_rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         self.blink_double = (self.blink_rng % 100) < 18;
-    }
-
-    /// Map reminder-hop progress onto `reminder_hop` frames (gather / flight / land).
-    fn tick_hop_synced(&mut self, now: Instant) -> (u32, bool) {
-        let n = self.player.frame_count_pub().max(1);
-        let t = self.movement.progress(now).unwrap_or(1.0);
-        let f = t * ((n - 1) as f32);
-        self.display_frame_f = f;
-        let frame = f.floor() as u32;
-        (frame.min(n - 1), false)
     }
 
     /// Time-based continuous sampling for dense clips (idle loop / one-shot actions).
@@ -1104,8 +1093,9 @@ impl PetController {
 
     pub fn begin_reminder(
         &mut self,
-        current_top_left: Point,
-        center_top_left: Point,
+        desk_origin: Point,
+        travel_start: Point,
+        travel_dest: Point,
         message: String,
         now: Instant,
     ) -> bool {
@@ -1113,13 +1103,7 @@ impl PetController {
         self.movement.cancel();
         self.look.snap_front();
 
-        let start = if matches!(self.state, PetState::HiddenAtEdge(_)) {
-            self.snap_restore_from_edge(now).unwrap_or(current_top_left)
-        } else {
-            current_top_left
-        };
-
-        self.reminder_origin = Some(start);
+        self.reminder_origin = Some(desk_origin);
         self.reminder_message = message;
         self.pending_reminder = false;
         self.feed_started = None;
@@ -1130,21 +1114,29 @@ impl PetController {
             PetState::Reminder(ReminderStage::MovingToCenter),
         ) {
             self.state = s;
-            let dist = (center_top_left.x - start.x).hypot(center_top_left.y - start.y);
+            let dist = (travel_dest.x - travel_start.x).hypot(travel_dest.y - travel_start.y);
             self.movement.start(
-                start,
-                MovementTarget::ReminderCenter(center_top_left),
+                travel_start,
+                MovementTarget::ReminderCenter(travel_dest),
                 now,
                 reminder_hop_duration(dist),
             );
             self.switch_clip_for_state(now);
-            info!(dist, "reminder begin: hopping to center");
+            info!(dist, "reminder begin: overlay hop to center");
             true
         } else {
             self.pending_reminder = true;
             warn!("could not enter reminder state; kept pending");
             false
         }
+    }
+
+    /// Sit squash/stretch while the overlay hop is in flight.
+    pub fn reminder_squash(&self, now: Instant) -> (f32, f32) {
+        if !self.is_reminder_moving() || !self.movement.is_reminder_hop() {
+            return (1.0, 1.0);
+        }
+        reminder_squash_at(self.movement.progress(now).unwrap_or(1.0))
     }
 
     fn layout_food_button(&mut self) {
@@ -1193,10 +1185,9 @@ impl PetController {
         true
     }
 
-    /// After feed feedback: return home from `current` window top-left.
+    /// After feed feedback: hop the overlay slot from `current` back to `home`.
     /// Caller should persist last_completed_at when this is first invoked after feed.
-    pub fn start_reminder_return(&mut self, current: Point, now: Instant) -> bool {
-        let home = self.reminder_origin.unwrap_or(current);
+    pub fn start_reminder_return(&mut self, current: Point, home: Point, now: Instant) -> bool {
         if let Ok(s) = try_transition(&self.state, PetState::Reminder(ReminderStage::Returning)) {
             self.state = s;
             self.food_button_rect = None;
@@ -1208,7 +1199,7 @@ impl PetController {
                 reminder_hop_duration(dist),
             );
             self.switch_clip_for_state(now);
-            debug!("reminder returning home");
+            debug!("reminder returning home (overlay slot)");
             true
         } else {
             false
@@ -1320,15 +1311,7 @@ impl PetController {
             PetState::Watching => IDLE_BASE.to_string(),
             PetState::Dragging => IDLE_BASE.to_string(),
             PetState::HiddenAtEdge(_) => IDLE_BASE.to_string(),
-            PetState::Reminder(ReminderStage::Feeding) => IDLE_BASE.to_string(),
-            PetState::Reminder(ReminderStage::Showing) => IDLE_BASE.to_string(),
-            PetState::Reminder(_) => {
-                if self.library.get("reminder_hop").is_some() {
-                    "reminder_hop".to_string()
-                } else {
-                    IDLE_BASE.to_string()
-                }
-            }
+            PetState::Reminder(_) => IDLE_BASE.to_string(),
             // Keep the current clip when possible so open doesn't crossfade-flash.
             PetState::MenuOpen => {
                 let cur = self.player.clip_name().to_string();
@@ -1425,13 +1408,43 @@ mod master_identity_tests {
     fn reminder_showing_keeps_master_sit() {
         let now = Instant::now();
         let mut pet = load_pet(now);
-        assert!(pet.begin_reminder(Point::new(0.0, 0.0), Point::new(0.0, 0.0), "hi".into(), now));
+        assert!(pet.begin_reminder(
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 0.0),
+            "hi".into(),
+            now
+        ));
         assert!(pet.on_movement_complete(now + std::time::Duration::from_millis(1)));
         assert!(matches!(
             pet.state,
             PetState::Reminder(ReminderStage::Showing)
         ));
         assert_eq!(pet.player.clip_name(), IDLE_BASE);
+    }
+
+    #[test]
+    fn reminder_travel_stays_on_master_sit() {
+        let now = Instant::now();
+        let mut pet = load_pet(now);
+        assert!(pet.begin_reminder(
+            Point::new(10.0, 20.0),
+            Point::new(0.0, 80.0),
+            Point::new(400.0, 80.0),
+            "up".into(),
+            now
+        ));
+        assert!(matches!(
+            pet.state,
+            PetState::Reminder(ReminderStage::MovingToCenter)
+        ));
+        assert_eq!(
+            pet.player.clip_name(),
+            IDLE_BASE,
+            "overlay hop must keep the sit master, not reminder_hop"
+        );
+        let (sx, sy) = pet.reminder_squash(now + Duration::from_millis(40));
+        assert!(sx > 1.0 && sy < 1.0, "gather squash sx={sx} sy={sy}");
     }
 
     #[test]
