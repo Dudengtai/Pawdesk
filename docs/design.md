@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.22**（2026-08-18：改大小 50%–100%；设置卡钉死不裁；角上无重影） |
-| 依据 | `prd.md` v0.7.9 · `tech.md` v0.19 |
+| 版本 | **v0.23**（2026-08-18：开坞不闪 — 关坞保留坞尺寸 HWND） |
+| 依据 | `prd.md` v0.7.9 · `tech.md` v0.20 |
 | 效果图 | `mockups/launcher-preview.*` · `launcher-pin-flip.*` · `tishi.png`（提醒卡片） |
 
 ---
@@ -28,7 +28,7 @@
 - 菜单 / 设置 / 提醒叠层：CPU 自绘 + HiDPI 物理像素；开合对静帧卡层 scale+fade + hover/press 插值。  
 - **观感目标**：点宠 → **卡片从身边长出**；宠不闪、不跳、不弹（宠始终全不透明、自由剪影，不套玻璃托盘）。  
 - 点右上角肉垫印 → **设置从该印中心长出**并停靠坞旁。设置**只从启动坞进入**。  
-- 开坞 / 设置转场呈现 **~60fps**；几何开局锁定；同帧原子 present（防空帧闪）。  
+- 开坞 / 设置转场呈现 **~60fps**；几何开局锁定；**关坞不把 HWND 缩回 128**（改尺寸会丢掉 layered 位图，宠闪）。  
 - 列表：**视口约 5 行 + 滚轮滚动**（软上限 128，**不是**封顶 5 个）；其上固定「最近启用」图标条。  
 - 文字：Windows **GDI 栅格**（hinted）；更精致字体渲染 **后期再做**。  
 - 形象与飞扑精修放后期（见 `task.md` M6-D / PET-A07）。
@@ -269,6 +269,7 @@
 - 整窗（含宠）统一 `apply_rgba_alpha` → 宠先消失再淡入 = 闪。  
 - 开坞用 `ease.out_back` → 弹跳割裂。  
 - 先 resize 再等下一帧 redraw → 空帧闪。  
+- 关坞把 HWND 缩回 128、下次开坞再放大 → **每次开坞都改 layered 窗尺寸**，位图被丢掉，DWM 偶发合成空帧 = 宠闪。正确做法：第一次开坞长大后**保持坞尺寸**，之后开/关只换位图。  
 - 卡片高度不够 + `break` 裁行 → 只显示 2 个应用。  
 - fontdue 小字拉丁 → 波浪/大小不一。  
 - 弹系统文件框前把窗从 `AlwaysOnTop` 切到 `Normal` 再切回 → launcher **闪一下**。  
@@ -355,7 +356,7 @@
 | --- | --- | --- |
 | 单击开坞 | 卡 scale 0.95→1 + fade（宠钉住不闪）；静帧缓存 ~60fps | out_quint ~180ms |
 | 关坞 | 卡连续收回；宠保持 | out_quint ~140ms |
-| 开坞首帧 | 原子 present（尺寸+坐标+像素同帧）；自由剪影连续 | tech §5.4 |
+| 开坞首帧 | 卡缓存先画好；已有坞尺寸则只 ULW（不 SetWindowPos）；自由剪影连续 | tech §5.4 |
 | 管理 → 设置 | 面板从按钮中心 **15%→100%** 生长 + fade；启动坞卡层前段淡出；最终停靠坞旁 | out_quint + out_cubic ~340ms |
 | 点暂停 | 身侧气泡 + 狡猾脸（身体/脚不动） | 持有 ~2.8s |
 | 列表 / 按钮 hover | 色与阴影插值 | approach ~100ms |
@@ -409,7 +410,7 @@ assets/tray/icon.png
 | 列表滚动 | `menu_list_scroll` + `layout_pinned_scroll` + `MouseWheel`；视口 `LIST_VISIBLE_ROWS=5` |
 | 最近启用条 | `ShortcutItem.launch_count` / `last_launched_at_ms` · `rank_frequent` · `MenuEntry::Recent`；卡高 `360×450` |
 | 60fps 坞时钟 | `app::frame_interval` → 16ms when `menu_ui_active` |
-| 开坞无空帧 | `enter_menu_ui` 立即 `redraw`；`update_layered_rgba_ex(pos)` 原子 present |
+| 开坞无空帧 | `dock_hwnd` 关坞不缩窗；再开只 ULW；`sync_layered_hwnd` 仅首次长大 |
 | 添加应用不闪 / 桌面完整 | `shortcut/picker` 原生 `IFileOpenDialog` + Shell 虚拟桌面；owner 绑定、不切 z-order |
 | 宠物大小 | `config.pet.scale` · `pet_logical_size` · 设置/托盘 |
 | 灵动全套 clip | `assets/pets/cow-cat/*` · `build_lively_pet.py` |
@@ -443,3 +444,4 @@ assets/tray/icon.png
 | **v0.20** | **2026-08-17** | 坞卡去掉外投影与内 hairline，顶高光裁进圆角；宠始终自由剪影、不随卡 scale；去掉「轻点关闭」；长按拖动分层合成（预渲染行/碗/拎起行）；prd **v0.7.7** · tech **v0.17** |
 | **v0.21** | **2026-08-17** | 取消托盘暂停/打开设置；设置「暂停」气泡+`sly_pause`（只改脸）；改大小预览且完成不抖；拎起行无投影；prd **v0.7.8** · tech **v0.18** |
 | **v0.22** | **2026-08-18** | 宠物大小上限 **100%**（设置/托盘同一钳位）；设置改大小不扩叠层窗（卡不裁、不抖），完成钉新原点；设置卡去掉顶高光（角上无重影）；prd **v0.7.9** · tech **v0.19** |
+| **v0.23** | **2026-08-18** | 开坞偶发闪一下：根因是关坞缩 HWND 再开坞放大，layered 位图被丢；关坞保留坞尺寸，再开只换位图；tech **v0.20** |

@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.19**（2026-08-18：改大小 50%–100%；设置卡钉死） |
-| 依据 | `prd.md` v0.7.9 · `design.md` v0.22 |
+| 版本 | **v0.20**（2026-08-18：开坞不闪 — `dock_hwnd` 关坞不缩窗） |
+| 依据 | `prd.md` v0.7.9 · `design.md` v0.23 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -28,7 +28,7 @@
 - 业务状态机集中在 `pet`；UI 不直改状态。  
 - 主线程不阻塞 I/O；配置防抖写盘。  
 - 宠物 HWND：**CPU RGBA + `UpdateLayeredWindow`**，不挂 DXGI/wgpu 交换链。  
-- 启动坞：**钉宠 + Flip/Shift**，单窗 union(宠, 卡)；开合动画几何锁定；**卡层动画 / 宠不闪**。
+- 启动坞：**钉宠 + Flip/Shift**，单窗 union(宠, 卡)；开合动画几何锁定；**关坞保留坞尺寸 HWND，开/关只换位图**（改尺寸会丢掉 layered 位图）。
 
 ---
 
@@ -205,12 +205,13 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 
 | 模式 | 大致尺寸 | 说明 |
 | --- | --- | --- |
-| 宠物 | 128×`pet.scale` 逻辑（默认 ~77） | 日常；用户可调 |
-| 启动坞 | union(宠, 卡) | `place_launcher` |
-| 提醒 | 固定提醒窗 | 居中 |
+| 宠物（未开过坞） | 128×`pet.scale` 逻辑（默认 ~77） | 日常；用户可调 |
+| 宠物（开过坞之后） | **保持**上次 `place_launcher` union 尺寸 | `dock_hwnd`：宠画在槽位，空白透明穿透；**不再缩回 128** |
+| 启动坞 | union(宠, 卡) | `place_launcher`；尺寸已与待机相同则只 ULW |
+| 提醒 | 固定提醒窗 | 居中；进提醒清 `dock_hwnd` |
 | 设置 | 启动坞卡内滑入 | 仅肉垫印入口；窗几何锁在坞上 |
 
-`overlay_origin`：进叠层前宠物 top-left；退出恢复；**禁止**把坞临时坐标写入配置。
+`overlay_origin`：进叠层前**宠物桌面点**（`pet_desk_origin` = `dock_hwnd.pos` + 宠槽，不是 HWND 原点）；退出恢复；**禁止**把坞临时坐标写入配置。持久化位置同样写宠桌面点。
 
 ---
 
@@ -248,7 +249,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 
 | 步骤 | 位置 |
 | --- | --- |
-| 开坞 | `app::enter_menu_ui`：探头 snap → `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → `menu_present_pos` → resize → **宠物-only 立即 present** → 合成静帧卡层缓存 |
+| 开坞 | `app::enter_menu_ui`：探头 snap（只写 `overlay_origin`，不挪 HWND）→ `place_launcher` → `menu_list_scroll=0` → `layout_pinned_scroll` → 先栅格卡缓存 → 尺寸已是坞则**只 ULW**，否则 `sync_layered_hwnd` 一次长大 → `remember_dock_hwnd` |
 | 布局 | `layout_pinned_scroll(entries, …, list_scroll)`：chrome + 固定「最近启用」框 +「应用列表」标题 + **视口内**快捷行；宠在 **pet_local** |
 | 列表数据 | `build_entries`：`rank_frequent` 最多 6 个 `Recent` + 全部 **enabled** 快捷方式，`.take(MAX_SHORTCUTS=128)` 仅软上限；常用条不计入 `list_total` |
 | 滚动 | `app::scroll_menu_list` ← `WindowEvent::MouseWheel`；`clamp_list_scroll`（转场中 / 开合动画中禁用） |
@@ -261,7 +262,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | 拖动合成 | 按下即 `prerender_drag_images`（拎起行无投影 / 碗 / 文案）+ `prerender_list_rows` + 空白卡层；`DragLayersKey` 只在 scroll/总数/hover/press/say 变时重建；每帧 `present_menu_drag` 只 blit 行到 `drag_slot_y` + 拎起行 + 碗 |
 | 肉垫印→设置 | `handle_menu_entry` → `begin_settings_from_launcher`（见 §5.4）；**唯一**设置入口 |
 | 设置「暂停」 | 不写 `reminder.paused`；`menu_say = SAY_NO_PAUSE` + `pet.begin_sly_pause`（`sly_pause` 1 帧，只换脸，~2.8s） |
-| 关坞 | Closing 完 → `restore_overlay_origin`；清 `menu_present_pos` / scroll；280ms 防连点 |
+| 关坞 | Closing 完 → `restore_overlay_origin_window`：有 `dock_hwnd` 则**不缩窗**，把窗原点钉回宠槽对桌面点，`compose_pet_in_slot` 只画宠；无 `dock_hwnd` 才走 `begin_idle_present_at` 缩回 128；280ms 防连点 |
 | 窗外点击 | `platform::OutsideClickGuard`：`WH_MOUSE_LL` 专用钩子线程 + 原子标志（不吞点击）；`enter_menu_ui` 装、`about_to_wait` 每帧 `take_outside_click()` → 窗外左键即 `exit_menu_ui`；每帧同步窗口物理矩形；设置转场 340ms 内忽略；`menu_ui_active` 置 false 的各路径卸载（关坞 / 设置转场落定） |
 | 多屏 | `work_area_from_point(宠中心)` |
 
@@ -274,7 +275,11 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 | --- | --- |
 | 原子 present | `platform::update_layered_rgba_ex(w,h,rgba, Some((x,y)))`：同一次 `UpdateLayeredWindow` 设 **位图 + 尺寸 + 屏坐标** |
 | 叠层尺寸 | 菜单/设置/提醒 present 使用 **compose 缓冲尺寸**（`hit_size`），**不**依赖 winit 异步 resize 完成后再画 |
-| 开坞首帧 | `enter_menu_ui` 内 `texture_dirty` + **同步 `redraw()`**，禁止只 `request_redraw` 等下一圈 |
+| **关坞不缩 HWND** | `dock_hwnd` 记住坞物理框 + 宠槽。`WS_EX_LAYERED`+ULW 窗 **`SetWindowPos` 改尺寸会丢掉位图**，DWM 偶发合成空帧 = 宠闪。关坞只换位图；再开尺寸相同则不再 `SetWindowPos`。 |
+| 禁止 winit 改坞窗 | winit `request_inner_size` / `set_outer_position` 用 `SWP_ASYNCWINDOWPOS` + `InvalidateRgn`，尺寸在 ULW **之后**落地，必闪。长大用 `platform::sync_layered_hwnd`（同步、无 `ASYNCWINDOWPOS` / `NOCOPYBITS`）。 |
+| 开坞首帧 | 先 `compose_menu_card_layer`，再（如需）同步长大，立刻 `redraw()` |
+| 待机画在坞框里 | `compose_pet_in_slot`：宠在原槽，周围透明穿透。禁止把精灵 letterbox 进剩余大 HWND（会把猫拉变形）。 |
+| DWM 过渡 | `enable_transparent_window` 设 `DWMWA_TRANSITIONS_FORCEDISABLED`（提醒/哈欠等仍会改尺寸的路径） |
 | 设置转场 | 点击肉垫印 → `begin_settings_from_launcher`：`settings_embed`，窗几何锁在启动坞；卡内 220ms `ease_in_out_cubic` 横滑（坞左出、设置从右进）；宠全不透明。落定后 `compose_settings_card` + `hit_settings_card`。设置卡无顶高光（避免圆角双线）。「完成」反转滑回，宠停在提交后的槽位 |
 | 开合帧路径 | `about_to_wait` 中 menu 动画进行时 **直接 `redraw()`**，减少 `RedrawRequested` 一跳延迟 |
 | 帧率 | `menu_ui_active` **或** `settings_transition.is_some()` → `frame_interval` **16ms（~60fps)**；其它密集态约 33ms |
@@ -285,6 +290,8 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 
 1. 整缓冲全局 alpha 含宠 → 宠先消失。现仅卡/控件 per-layer alpha。  
 2. 先 resize 再延迟 paint → 空帧。现原子 present + 立即 redraw。  
+2b. **关坞缩回 128、开坞再放大** → 每次开坞都丢 layered 位图。现 `dock_hwnd` 保持坞尺寸。  
+2c. 只 ULW、不先把 HWND 撑到卡大小 → 128 窗裁到 union 左上角空白，猫消失、卡不出。长大必须先 `SetWindowPos`（仅首次 / 翻面尺寸变了）。  
 3. 30fps + `ease_out_back` → 顿 + 弹。现 60fps + out_quint/out_cubic。  
 4. Primary 顶 `INNER_HL` + 底阴影 → 「两道影 / 白条」。现 **flat solid** + 细描边。设置卡同样去掉顶高光 / 内缩圆角高光，否则左上/右上重影。  
 5. fontdue 拉丁无 hinting → 波浪字。现 **GDI**（精致字体后期再优化）。  
@@ -482,3 +489,4 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.17** | **2026-08-17** | 坞卡去掉外投影；宠自由剪影且不随卡 scale；拖动分层：长按预热 `ghost/bowl/hint` + 空白卡 + 行位图，插缝只 blit；design **v0.20** · prd **v0.7.7** |
 | **v0.18** | **2026-08-17** | 取消托盘暂停/打开设置；设置暂停 `SAY_NO_PAUSE` + `sly_pause`；`pet_scale_draft` 预览 + `idle_present_pos`；拎起行无投影；design **v0.21** · prd **v0.7.8** |
 | **v0.19** | **2026-08-18** | `PET_SCALE_MAX=1.0`（设置/托盘同一 `step_pet_scale`）；设置改大小不扩叠层（`sync_pet_slot_to_scale` + 裁剪出界宠）；完成钉 `overlay_origin`；设置卡去顶高光；design **v0.22** · prd **v0.7.9** |
+| **v0.20** | **2026-08-18** | 开坞闪：`dock_hwnd` 关坞不缩窗；`sync_layered_hwnd` 替代 winit 异步 resize；`compose_pet_in_slot` 待机画在坞槽；`pet_desk_origin` 持久化宠点；`DWMWA_TRANSITIONS_FORCEDISABLED`；design **v0.23** |

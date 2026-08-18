@@ -261,6 +261,38 @@ pub fn compose_menu_card_layer(
     (w, h, out)
 }
 
+/// Pet silhouette in a logical window slot (idle dock HWND / first open frame).
+pub fn compose_pet_in_slot(
+    pet_rgba: &[u8],
+    pet_src_w: u32,
+    pet_src_h: u32,
+    window_w: u32,
+    window_h: u32,
+    pet_x: f32,
+    pet_y: f32,
+    pet_w: f32,
+    pet_h: f32,
+    dpr: f32,
+) -> (u32, u32, Vec<u8>) {
+    let dpi = Dpi::new(dpr);
+    let w = dpi.su(window_w);
+    let h = dpi.su(window_h);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    draw_avatar(
+        &mut out,
+        w,
+        dpi,
+        pet_x,
+        pet_y,
+        pet_w,
+        pet_h,
+        pet_rgba,
+        pet_src_w,
+        pet_src_h,
+    );
+    (w, h, out)
+}
+
 /// Pet silhouette only — first present after resize, before the card cache exists.
 pub fn compose_menu_pet_only(
     pet_rgba: &[u8],
@@ -269,23 +301,18 @@ pub fn compose_menu_pet_only(
     layout: &RadialLayout,
     dpr: f32,
 ) -> (u32, u32, Vec<u8>) {
-    let dpi = Dpi::new(dpr);
-    let w = dpi.su(layout.window_w);
-    let h = dpi.su(layout.window_h);
-    let mut out = vec![0u8; (w * h * 4) as usize];
-    draw_avatar(
-        &mut out,
-        w,
-        dpi,
+    compose_pet_in_slot(
+        pet_rgba,
+        pet_w,
+        pet_h,
+        layout.window_w,
+        layout.window_h,
         layout.pet_x,
         layout.pet_y,
         layout.pet_w,
         layout.pet_h,
-        pet_rgba,
-        pet_w,
-        pet_h,
-    );
-    (w, h, out)
+        dpr,
+    )
 }
 
 /// Settings live-size preview: the pet drawn inside its fixed layout rect,

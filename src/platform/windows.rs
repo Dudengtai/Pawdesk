@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use tracing::{debug, info, warn};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
@@ -16,8 +17,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetSystemMetrics, GetWindowLongW, SetClassLongPtrW,
     SetWindowsHookExW, SetWindowLongW, SetWindowPos, SystemParametersInfoW, UnhookWindowsHookEx,
     UpdateLayeredWindow, GCLP_HBRBACKGROUND, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA, WH_MOUSE_LL,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
+    WH_MOUSE_LL,
     WM_LBUTTONDOWN, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -152,6 +154,15 @@ pub fn enable_transparent_window(window: &impl HasWindowHandle) -> Result<(), Ap
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
+        // DWM's resize transition otherwise fades/flashes the old layered
+        // surface when the HWND box changes (reminder / first dock grow).
+        let disable: i32 = 1;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disable as *const i32 as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
     }
     info!("layered window ready for UpdateLayeredWindow present (no color-key)");
     Ok(())
@@ -279,6 +290,40 @@ pub fn update_layered_rgba_ex(
         }
         Ok(())
     })
+}
+
+/// Move and resize a layered HWND in one **synchronous** `SetWindowPos`.
+///
+/// winit's `request_inner_size` / `set_outer_position` use `SWP_ASYNCWINDOWPOS`
+/// plus `InvalidateRgn`. The real size change lands *after* our
+/// `UpdateLayeredWindow`, drops the layered bitmap, and the cat flashes.
+///
+/// Do not pass `SWP_NOCOPYBITS` (that discards the bitmap on purpose) and do
+/// not pass `SWP_ASYNCWINDOWPOS`. Caller must `UpdateLayeredWindow` immediately
+/// after this returns.
+pub fn sync_layered_hwnd(
+    window: &impl HasWindowHandle,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), AppError> {
+    let hwnd = hwnd_from_window(window)?;
+    let w = width.max(1) as i32;
+    let h = height.max(1) as i32;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+        )
+        .map_err(|e| AppError::Platform(format!("sync_layered_hwnd SetWindowPos: {e}")))?;
+    }
+    Ok(())
 }
 
 thread_local! {

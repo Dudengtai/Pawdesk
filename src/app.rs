@@ -27,7 +27,7 @@ use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
 use crate::render::easing::ease_in_out_cubic;
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
-    compose_menu_pet_only, compose_settings_card,
+    compose_menu_pet_only, compose_pet_in_slot, compose_settings_card,
     compose_settings_frame, draw_say_bubble, hit_settings,
     hit_settings_card, menu_visual_fade, menu_visual_scale, prerender_drag_images,
     prerender_list_rows, present_menu_cached, present_menu_drag, MenuChromeState,
@@ -88,6 +88,20 @@ struct SettingsTransition {
     t: f32,
     /// true = dock → settings (in from right); false = settings → dock.
     entering: bool,
+}
+
+/// Persistent dock HWND box. Size stays put across open/close so layered
+/// present never has to `SetWindowPos`-resize (that wipe is the cat flash).
+#[derive(Debug, Clone, Copy)]
+struct DockHwnd {
+    pos: (i32, i32),
+    phys: (u32, u32),
+    win_log_w: u32,
+    win_log_h: u32,
+    pet_x: f32,
+    pet_y: f32,
+    pet_w: f32,
+    pet_h: f32,
 }
 
 /// Re-composition key for the cached drag layers — the static card (rows
@@ -173,6 +187,10 @@ pub struct App {
     menu_press_t: f32,
     /// Overlay window top-left (physical) for atomic layered present during menu open.
     menu_present_pos: Option<(i32, i32)>,
+    /// Dock-sized HWND kept after close. Growing/shrinking a layered window
+    /// discards the ULW bitmap; DWM then composites an empty frame (the flash).
+    /// Open/close after the first grow only change the bitmap.
+    dock_hwnd: Option<DockHwnd>,
     /// Rest-state card layer (physical, no pet) for open/close scale+fade.
     menu_card_cache: Option<(u32, u32, Vec<u8>)>,
     /// Shortcut list scroll (first visible row index). Supports many apps via wheel.
@@ -299,6 +317,7 @@ impl App {
             menu_hover_t: 0.0,
             menu_press_t: 0.0,
             menu_present_pos: None,
+            dock_hwnd: None,
             menu_card_cache: None,
             menu_list_scroll: 0,
             menu_say: None,
@@ -377,6 +396,38 @@ impl App {
     /// Pet window edge in logical px (design 128 × config scale).
     fn pet_size(&self) -> u32 {
         pet_logical_size(self.config.pet.scale)
+    }
+
+    /// Desk-spot of the pet (physical), not the dock HWND origin.
+    fn pet_desk_origin(&self) -> Option<Point> {
+        if let Some(d) = self.dock_hwnd {
+            let dpr = snap_dpr(self.scale_factor);
+            let lx = (d.pet_x as f64 * dpr).round();
+            let ly = (d.pet_y as f64 * dpr).round();
+            return Some(Point::new(d.pos.0 as f64 + lx, d.pos.1 as f64 + ly));
+        }
+        self.window.as_ref().and_then(|w| {
+            w.outer_position()
+                .ok()
+                .map(|p| Point::new(p.x as f64, p.y as f64))
+        })
+    }
+
+    fn remember_dock_hwnd(&mut self, pos: (i32, i32), phys: (u32, u32), layout: &RadialLayout) {
+        self.dock_hwnd = Some(DockHwnd {
+            pos,
+            phys,
+            win_log_w: layout.window_w,
+            win_log_h: layout.window_h,
+            pet_x: layout.pet_x,
+            pet_y: layout.pet_y,
+            pet_w: layout.pet_w,
+            pet_h: layout.pet_h,
+        });
+    }
+
+    fn clear_dock_hwnd(&mut self) {
+        self.dock_hwnd = None;
     }
 
     /// Scale shown/persisted right now: the settings preview draft when one is
@@ -844,6 +895,33 @@ impl App {
             }
         }
 
+        // Idle after the dock has been grown once: keep painting the pet in
+        // its slot inside the dock-sized buffer. Letterboxing into inner_size
+        // would stretch the cat across the leftover overlay HWND.
+        if let Some(dock) = self.dock_hwnd {
+            let clip = pet.active_clip();
+            let pet_rgba = pet.display_rgba();
+            let dpr = self.scale_factor.clamp(1.0, 3.0) as f32;
+            let (w, h, composed) = compose_pet_in_slot(
+                &pet_rgba,
+                clip.frame_width,
+                clip.frame_height,
+                dock.win_log_w,
+                dock.win_log_h,
+                dock.pet_x,
+                dock.pet_y,
+                dock.pet_w,
+                dock.pet_h,
+                dpr,
+            );
+            self.sprite_logical = (dock.win_log_w, dock.win_log_h);
+            self.hit_rgba = composed;
+            self.hit_size = (w, h);
+            self.last_clip_name = clip.name.clone();
+            self.texture_dirty = false;
+            return;
+        }
+
         let clip = pet.active_clip();
         // Sub-frame blend for smooth 30fps motion without identity swaps.
         let rgba = pet.display_rgba();
@@ -907,6 +985,16 @@ impl App {
             ) {
                 error!("update_layered_rgba: {e}");
             }
+        } else if let Some(dock) = self.dock_hwnd {
+            if let Err(e) = platform::update_layered_rgba_ex(
+                window.as_ref(),
+                sw.max(1),
+                sh.max(1),
+                &self.hit_rgba,
+                Some(dock.pos),
+            ) {
+                error!("update_layered_rgba: {e}");
+            }
         } else {
             // While the idle lock is set, present at the committed pet size and
             // desk spot — do not use the stale HWND inner_size (still the
@@ -950,9 +1038,9 @@ impl App {
     }
 
     fn persist_window_pos(&mut self) {
-        let Some(window) = self.window.as_ref() else {
+        if self.window.is_none() {
             return;
-        };
+        }
         // Don't persist temporary overlay positions as home config.
         if self.reminder_ui_active
             || self.menu_ui_active
@@ -961,9 +1049,9 @@ impl App {
         {
             return;
         }
-        if let Ok(pos) = window.outer_position() {
-            self.config.window.x = Some(pos.x);
-            self.config.window.y = Some(pos.y);
+        if let Some(p) = self.pet_desk_origin() {
+            self.config.window.x = Some(p.x as i32);
+            self.config.window.y = Some(p.y as i32);
             if let Some(saver) = self.saver.as_mut() {
                 saver.mark_dirty();
             }
@@ -1026,6 +1114,7 @@ impl App {
     }
 
     fn enter_reminder_ui(&mut self) {
+        self.clear_dock_hwnd();
         self.idle_present_pos = None;
         let center =
             self.work_area_center_top_left(REMINDER_WINDOW_W as i32, REMINDER_WINDOW_H as i32);
@@ -1065,6 +1154,7 @@ impl App {
         }
         self.idle_present_pos = None;
         self.capture_overlay_origin();
+        self.clear_dock_hwnd();
         let dpr = snap_dpr(self.scale_factor);
         let origin = self.overlay_origin.unwrap_or(Point::new(100.0, 100.0));
         let pet_phys = logical_to_physical(self.pet_size(), dpr);
@@ -1139,10 +1229,8 @@ impl App {
         if self.overlay_origin.is_some() {
             return;
         }
-        if let Some(w) = &self.window {
-            if let Ok(pos) = w.outer_position() {
-                self.overlay_origin = Some(Point::new(pos.x as f64, pos.y as f64));
-            }
+        if let Some(p) = self.pet_desk_origin() {
+            self.overlay_origin = Some(p);
         }
     }
 
@@ -1160,9 +1248,21 @@ impl App {
         self.yawn_place = None;
         self.yawn_present_pos = None;
         self.menu_layout = None;
-        // Atomic ULW at the pre-overlay desk spot + committed size. winit
-        // resize is async; without the lock the next frame would letterbox
-        // the pet into the leftover overlay HWND and the feet would jump.
+        // Keep the dock-sized HWND. Shrinking back to 128 discards the layered
+        // bitmap; the next open then grows and flashes. Re-anchor the existing
+        // box so the pet slot sits on `origin`, then ULW pet-only (same size).
+        if let Some(mut dock) = self.dock_hwnd {
+            let dpr = snap_dpr(self.scale_factor);
+            let lx = (dock.pet_x as f64 * dpr).round() as i32;
+            let ly = (dock.pet_y as f64 * dpr).round() as i32;
+            dock.pos = (origin.x as i32 - lx, origin.y as i32 - ly);
+            self.dock_hwnd = Some(dock);
+            self.idle_present_pos = None;
+            self.texture_dirty = true;
+            self.redraw();
+            return;
+        }
+        // First session (dock never grown): lock ULW to the pet box.
         self.begin_idle_present_at(origin);
     }
 
@@ -1173,11 +1273,11 @@ impl App {
         self.idle_present_pos = None;
 
         // L2: leave edge-hide before capture so pin uses fully-visible home.
+        // Do not move the HWND here — that would wipe the layered bitmap before
+        // the first dock present. Seed overlay_origin so placement uses home.
         if let Some(pet) = self.pet.as_mut() {
             if let Some(home) = pet.snap_restore_from_edge(now) {
-                if let Some(w) = &self.window {
-                    w.set_outer_position(PhysicalPosition::new(home.x as i32, home.y as i32));
-                }
+                self.overlay_origin = Some(home);
             }
         }
 
@@ -1275,19 +1375,9 @@ impl App {
         // Atomic layered present target (physical). Avoids empty frames during resize.
         self.menu_present_pos = Some((place.window.x, place.window.y));
 
-        // Keep winit geometry in sync for hit-testing / outer_position queries.
-        self.resize_pet_window(win_log_w, win_log_h);
-        if let Some(w) = &self.window {
-            w.set_outer_position(PhysicalPosition::new(place.window.x, place.window.y));
-            let _ = platform::set_click_through(w.as_ref(), false);
-            self.click_through = false;
-        }
-
-        // Pet-only first present (card cache is still empty) so the cat never
-        // flashes while the rest card is rasterized once.
+        // Rasterize the rest card while the idle pet is still on screen, so the
+        // first ULW after the HWND grows is a complete frame.
         self.menu_card_cache = None;
-        self.texture_dirty = true;
-        self.redraw();
         if let Some(layout) = self.menu_layout.as_ref() {
             let dpr_f = self.scale_factor.clamp(1.0, 3.0) as f32;
             let (cw, ch, card) = compose_menu_card_layer(
@@ -1299,6 +1389,38 @@ impl App {
                 },
             );
             self.menu_card_cache = Some((cw, ch, card));
+        }
+
+        // Growing a layered HWND discards the ULW bitmap (the flash). After
+        // the first open we keep that size and only UpdateLayeredWindow.
+        let target = (
+            place.window.width.max(1) as u32,
+            place.window.height.max(1) as u32,
+        );
+        let reuse = self
+            .dock_hwnd
+            .is_some_and(|d| d.phys == target);
+        if !reuse {
+            if let Some(w) = &self.window {
+                if let Err(e) = platform::sync_layered_hwnd(
+                    w.as_ref(),
+                    place.window.x,
+                    place.window.y,
+                    target.0,
+                    target.1,
+                ) {
+                    warn!("sync_layered_hwnd: {e}");
+                }
+            }
+        }
+        if let Some(layout) = self.menu_layout.clone() {
+            self.remember_dock_hwnd((place.window.x, place.window.y), target, &layout);
+        }
+        self.texture_dirty = true;
+        self.redraw();
+        if let Some(w) = &self.window {
+            let _ = platform::set_click_through(w.as_ref(), false);
+            self.click_through = false;
         }
 
         // Outside-click guard: clicking the desktop / another window closes the dock.
@@ -1653,6 +1775,7 @@ impl App {
             return;
         }
         // Fresh settings session — start from the committed size, not a stale draft.
+        self.clear_dock_hwnd();
         self.idle_present_pos = None;
         self.pet_scale_draft = None;
         self.settings_transition = None;
@@ -2731,15 +2854,11 @@ impl App {
         let overlay =
             self.settings_ui_active || self.menu_ui_active || self.reminder_ui_active;
         if !overlay {
-            if let Some(w) = &self.window {
-                if let Ok(pos) = w.outer_position() {
-                    self.idle_present_pos = Some((pos.x, pos.y));
-                }
-            }
-            let s = self.pet_size();
-            self.resize_pet_window(s, s);
-            self.texture_dirty = true;
-            self.redraw();
+            let origin = self
+                .pet_desk_origin()
+                .unwrap_or(Point::new(100.0, 100.0));
+            self.clear_dock_hwnd();
+            self.begin_idle_present_at(origin);
         } else {
             // Settings panel still open — just refresh the percentage label.
             self.texture_dirty = true;
@@ -3016,7 +3135,10 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings_present_pos = None;
                         let s = self.pet_size();
                         self.resize_pet_window(s, s);
-                    } else if self.overlay_origin.is_some() && !self.menu_ui_active {
+                    } else if self.overlay_origin.is_some()
+                        && !self.menu_ui_active
+                        && self.dock_hwnd.is_none()
+                    {
                         if let Some(o) = self.overlay_origin {
                             self.begin_idle_present_at(o);
                         }
@@ -3028,6 +3150,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = self.window.as_ref() {
                     self.drag.apply_drag(w);
                     if self.drag.dragging {
+                        if let Some(d) = self.dock_hwnd.as_mut() {
+                            if let Ok(pos) = w.outer_position() {
+                                d.pos = (pos.x, pos.y);
+                            }
+                        }
                         self.persist_window_pos();
                     }
                 }
@@ -3259,9 +3386,6 @@ impl ApplicationHandler<UserEvent> for App {
                         if self.yawn_ui_active && self.yawn_hit_bubble() {
                             // Bubble is not a launcher hit target.
                         } else {
-                            if self.yawn_ui_active {
-                                self.exit_yawn_ui();
-                            }
                             // Debounce: avoid reopen on the same click that closed, or double-tap.
                             let reopen_ok = self
                                 .menu_reopen_after
@@ -3275,6 +3399,17 @@ impl ApplicationHandler<UserEvent> for App {
                                         | Some(PetState::Watching)
                                         | Some(PetState::HiddenAtEdge(_))
                                 );
+                            if self.yawn_ui_active {
+                                if can_open {
+                                    // Opening the dock next — do not shrink back to
+                                    // idle first (that wipe + grow is a guaranteed flash).
+                                    self.yawn_ui_active = false;
+                                    self.yawn_place = None;
+                                    self.yawn_present_pos = None;
+                                } else {
+                                    self.exit_yawn_ui();
+                                }
+                            }
                             if can_open {
                                 self.menu_reopen_after = None;
                                 self.enter_menu_ui(now);
@@ -3351,6 +3486,11 @@ impl ApplicationHandler<UserEvent> for App {
             if self.drag.dragging {
                 if let Some(w) = &self.window {
                     self.drag.apply_drag(w);
+                    if let Some(d) = self.dock_hwnd.as_mut() {
+                        if let Ok(pos) = w.outer_position() {
+                            d.pos = (pos.x, pos.y);
+                        }
+                    }
                 }
             }
 
@@ -3530,6 +3670,12 @@ impl ApplicationHandler<UserEvent> for App {
                             pos.y as f64 + size.height as f64 / 2.0,
                         )
                     }
+                } else if let Some(d) = self.dock_hwnd {
+                    let dpr = snap_dpr(self.scale_factor);
+                    Point::new(
+                        d.pos.0 as f64 + (d.pet_x as f64 + d.pet_w as f64 * 0.5) * dpr,
+                        d.pos.1 as f64 + (d.pet_y as f64 + d.pet_h as f64 * 0.5) * dpr,
+                    )
                 } else {
                     Point::new(
                         pos.x as f64 + size.width as f64 / 2.0,
@@ -3555,18 +3701,49 @@ impl ApplicationHandler<UserEvent> for App {
                         .and_then(|w| platform::work_area_for_window(w.as_ref()).ok());
 
                     if let (Some(cursor), Some((pos, size))) = (cursor_pt, window_info) {
-                        let window_top_left = Point::new(pos.x as f64, pos.y as f64);
-                        let pet_center = Point::new(
-                            pos.x as f64 + size.width as f64 / 2.0,
-                            pos.y as f64 + size.height as f64 / 2.0,
-                        );
+                        let dpr = snap_dpr(self.scale_factor);
+                        let (window_top_left, pet_center, pet_rect, win_w, win_h) =
+                            if let Some(d) = self.dock_hwnd {
+                                let px = d.pos.0 as f64 + d.pet_x as f64 * dpr;
+                                let py = d.pos.1 as f64 + d.pet_y as f64 * dpr;
+                                let pw = (d.pet_w as f64 * dpr).max(1.0);
+                                let ph = (d.pet_h as f64 * dpr).max(1.0);
+                                (
+                                    Point::new(px, py),
+                                    Point::new(px + pw * 0.5, py + ph * 0.5),
+                                    platform::Rect {
+                                        x: px.round() as i32,
+                                        y: py.round() as i32,
+                                        width: pw.round() as i32,
+                                        height: ph.round() as i32,
+                                    },
+                                    pw,
+                                    ph,
+                                )
+                            } else {
+                                (
+                                    Point::new(pos.x as f64, pos.y as f64),
+                                    Point::new(
+                                        pos.x as f64 + size.width as f64 / 2.0,
+                                        pos.y as f64 + size.height as f64 / 2.0,
+                                    ),
+                                    platform::Rect {
+                                        x: pos.x,
+                                        y: pos.y,
+                                        width: size.width as i32,
+                                        height: size.height as i32,
+                                    },
+                                    size.width as f64,
+                                    size.height as f64,
+                                )
+                            };
                         if let Some(pet) = self.pet.as_mut() {
                             if pet.update_interaction(
                                 cursor,
                                 pet_center,
                                 window_top_left,
-                                size.width as f64,
-                                size.height as f64,
+                                win_w,
+                                win_h,
                                 now,
                             ) {
                                 self.texture_dirty = true;
@@ -3574,12 +3751,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             if self.config.pet.edge_hide_enabled {
                                 if let Some(wa) = work_area {
-                                    let pet_rect = platform::Rect {
-                                        x: pos.x,
-                                        y: pos.y,
-                                        width: size.width as i32,
-                                        height: size.height as i32,
-                                    };
+                                    let pet_rect = pet_rect;
                                     if pet.update_edge(pet_rect, wa, now).is_some() {
                                         self.texture_dirty = true;
                                         need_redraw = true;
@@ -4130,6 +4302,39 @@ mod tests {
         assert_eq!(app.menu_present_pos, pos_before);
         assert_eq!(pet_screen_of(&app), pet_before);
         assert_eq!(card_screen_of(&app), card_before);
+    }
+
+    #[test]
+    fn restore_with_dock_hwnd_keeps_size() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        app.scale_factor = 1.0;
+        app.dock_hwnd = Some(DockHwnd {
+            pos: (40, 50),
+            phys: (500, 480),
+            win_log_w: 500,
+            win_log_h: 480,
+            pet_x: 8.0,
+            pet_y: 80.0,
+            pet_w: 128.0,
+            pet_h: 128.0,
+        });
+        app.overlay_origin = Some(Point::new(100.0, 200.0));
+        app.restore_overlay_origin_window();
+        let dock = app.dock_hwnd.expect("dock hwnd must stay");
+        assert_eq!(dock.phys, (500, 480), "must not shrink the layered HWND");
+        assert_eq!(
+            dock.pos,
+            (100 - 8, 200 - 80),
+            "window origin re-anchors so the pet slot sits on overlay_origin"
+        );
+        assert!(
+            app.idle_present_pos.is_none(),
+            "must not lock a 128×128 idle present (that would grow again on open)"
+        );
+        assert!(app.overlay_origin.is_none());
     }
 
     #[test]
