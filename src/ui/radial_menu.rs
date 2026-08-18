@@ -123,6 +123,33 @@ pub struct RadialLayout {
     pub list_label_y: f32,
 }
 
+impl RadialLayout {
+    /// Shift every window-local coordinate. Used when the overlay origin
+    /// moves left/up to reserve space for a larger pet — screen positions
+    /// stay put if the caller also shifts `menu_present_pos` by `-dx/-dy`.
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        self.pet_x += dx;
+        self.pet_y += dy;
+        self.card_x += dx;
+        self.card_y += dy;
+        self.list_top += dy;
+        self.list_bottom += dy;
+        self.recent_label_y += dy;
+        self.recent_box_x += dx;
+        self.recent_box_y += dy;
+        self.list_label_y += dy;
+        for it in &mut self.items {
+            it.cx += dx;
+            it.cy += dy;
+            it.x += dx;
+            it.y += dy;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpandDir {
     Right,
@@ -824,5 +851,33 @@ mod tests {
         assert_eq!(recents[0], "A0");
         assert_eq!(recents[5], "A5");
         assert_eq!(count_shortcuts(&e), 8);
+    }
+
+    #[test]
+    fn translate_shifts_pet_card_and_items() {
+        let entries = vec![MenuEntry::AddShortcut, MenuEntry::Manage];
+        let mut lay = layout_pinned(
+            &entries,
+            500,
+            480,
+            (8.0, 80.0, 77.0, 77.0),
+            (100.0, 20.0, CARD_LOGICAL_W as f32, CARD_LOGICAL_H as f32),
+            ExpandDir::Right,
+            1.0,
+        );
+        let item0 = lay.items[0].clone();
+        let list_top0 = lay.list_top;
+        let recent_x0 = lay.recent_box_x;
+        lay.translate(40.0, 6.0);
+        assert!((lay.pet_x - 48.0).abs() < 0.01);
+        assert!((lay.pet_y - 86.0).abs() < 0.01);
+        assert!((lay.card_x - 140.0).abs() < 0.01);
+        assert!((lay.card_y - 26.0).abs() < 0.01);
+        assert!((lay.items[0].x - (item0.x + 40.0)).abs() < 0.01);
+        assert!((lay.items[0].y - (item0.y + 6.0)).abs() < 0.01);
+        assert!((lay.items[0].cx - (item0.cx + 40.0)).abs() < 0.01);
+        assert!((lay.list_top - (list_top0 + 6.0)).abs() < 0.01);
+        assert!((lay.recent_box_x - (recent_x0 + 40.0)).abs() < 0.01);
+        assert_eq!(lay.window_w, 500);
     }
 }

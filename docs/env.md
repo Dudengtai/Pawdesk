@@ -320,18 +320,21 @@ target/x86_64-pc-windows-msvc/release/
 
 配置文件不应预置用户机器路径。用户配置应在首次运行时生成到应用数据目录。
 
-### 12.3 本地三个 exe 的关系
+### 12.3 本地产物的关系
 
 | 路径 | 怎么生成 | 什么时候用 |
 | --- | --- | --- |
 | `target/debug/pawdesk.exe` | `cargo build` / `cargo run` | 开发调试 |
 | `target/release/pawdesk.exe` | `cargo build --release` | 验收最新功能、日常自用 |
-| `dist/PawDesk/pawdesk.exe` | `tools/package.ps1` | 便携分发；**不是** cargo 自动产物 |
+| `dist/PawDesk/` | `tools/package.ps1` | 便携分发；**不是** cargo 自动产物 |
+| `dist/PawDesk-Setup-<ver>.exe` | `tools/make-installer.ps1` | **给别人安装的演示安装包** |
+| `dist/PawDesk-<ver>-portable.zip` | `tools/make-installer.ps1` | 便携 zip（不解压安装程序） |
 
-注意：只编 release **不会**更新 `dist/`。要刷新便携包：
+注意：只编 release **不会**更新 `dist/`。要刷新便携包或安装包：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/package.ps1
+powershell -ExecutionPolicy Bypass -File tools/make-installer.ps1
 ```
 
 日常验证最新修复请优先：
@@ -356,17 +359,26 @@ cargo build --release
 
 ## 13. 安装包部署
 
-当前**未实现**正式安装包；需要时可选用 Inno Setup / WiX 等。若后续制作安装包，安装程序应满足：
+演示安装包由 **Inno Setup** 编译，脚本在 `tools/installer/PawDesk.iss`，一键入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/make-installer.ps1
+```
+
+本机若还没有 Inno Setup，脚本会尝试**当前用户静默安装**编译器（不要求管理员）。也可先从 https://jrsoftware.org/isinfo.php 自行安装。
+
+产物给别人用：把 `dist/PawDesk-Setup-<ver>.exe` 发给对方，双击即可。
+
+安装程序满足：
 
 - 支持 Windows 10/11 x64。
-- 默认安装到用户可写目录或正确处理安装权限。
-- 不强制要求管理员权限，除非明确提供系统级安装功能。
-- 可以创建开始菜单快捷方式。
-- 可选提供开机启动。
-- 卸载时保留或明确询问是否删除用户配置。
-- 清理临时文件和安装器产生的无用资源。
-
-安装包工具不在当前技术方案中强制指定，可根据发布方式选择 WiX、Inno Setup 或其他 Windows 安装方案。
+- 默认安装到 `%LOCALAPPDATA%\Programs\PawDesk`（用户可写）。
+- **不要求管理员权限**；可选改为系统级目录。
+- 创建开始菜单快捷方式；可选桌面图标。
+- 可选「开机时启动」（写入当前用户启动文件夹）。
+- 装完可立刻启动；安装/卸载前会结束正在运行的 `pawdesk.exe`。
+- 卸载时默认保留用户配置；询问是否删除 `%APPDATA%\PawDesk` 与日志目录。
+- 用户配置仍在首次运行时写入应用数据目录，安装包不预置机器路径。
 
 ## 14. 环境验证清单
 

@@ -4,10 +4,20 @@ Windows 桌面轻量互动宠物：陪伴待机 + 快捷启动坞 + 健康提醒
 
 ## 快速开始
 
+开发调试：
+
 ```powershell
 # 需要：Rust stable-msvc、Windows SDK
 cargo run --release
 ```
+
+给别人用（Windows 10/11 x64，**无需管理员**）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/make-installer.ps1
+```
+
+把生成的 `dist/PawDesk-Setup-<版本>.exe` 发给对方，双击安装即可。也可发 `dist/PawDesk-<版本>-portable.zip`，解压后双击 `pawdesk.exe`。
 
 环境与部署细节见 [`docs/env.md`](docs/env.md)。
 

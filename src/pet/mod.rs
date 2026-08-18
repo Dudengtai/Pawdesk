@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::event::Point;
 use crate::platform::Rect;
+use crate::render::reminder_ui::food_button_layout;
 
 const FEED_DURATION: Duration = Duration::from_millis(900);
 /// Soft blend when switching clips (UI / non-body). Pet body oneshots rely on
@@ -47,16 +48,15 @@ fn seed_blink_rng(_now: Instant) -> u32 {
 }
 
 /// Reminder UI layout in logical pixels (96 DPI baseline).
-/// Wider/taller than the card art so the bubble and feed pill can grow
-/// without scaling the cat up.
-pub const REMINDER_WINDOW_W: u32 = 560;
-pub const REMINDER_WINDOW_H: u32 = 420;
+/// 16:9 card that tightly frames the tishi artwork (bubble + cat).
+pub const REMINDER_WINDOW_W: u32 = 640;
+pub const REMINDER_WINDOW_H: u32 = 360;
 /// Design baseline pet window (logical px @ 96 DPI). Actual size = baseline × `pet.scale`.
 pub const PET_WINDOW_SIZE: u32 = 128;
 /// Legacy square hit size; the visible control is the feed bowl.
 pub const FOOD_BUTTON_SIZE: f32 = 64.0;
-pub const FEED_BOWL_W: f32 = 120.0;
-pub const FEED_BOWL_H: f32 = 120.0;
+pub const FEED_BOWL_W: f32 = 96.0;
+pub const FEED_BOWL_H: f32 = 96.0;
 
 /// Logical pet window edge length from config scale (clamped).
 pub fn pet_logical_size(scale: f32) -> u32 {
@@ -1148,13 +1148,7 @@ impl PetController {
     }
 
     fn layout_food_button(&mut self) {
-        let w = REMINDER_WINDOW_W as f32;
-        let h = REMINDER_WINDOW_H as f32;
-        let pw = FEED_BOWL_W;
-        let ph = FEED_BOWL_H;
-        let x = (w - pw) * 0.5;
-        let y = h - ph - 20.0;
-        self.food_button_rect = Some((x, y, pw, ph));
+        self.food_button_rect = Some(food_button_layout());
     }
 
     pub fn hit_food_button(&self, local_x: f64, local_y: f64) -> bool {

@@ -40,9 +40,8 @@ const HINT_TEXT: [u8; 4] = [0x2A, 0x22, 0x1C, 0xFF];
 /// The mockup has no alpha channel: near-white background (as seen from the
 /// border) is removed with a border flood-fill, so warm-tinted fur and light
 /// fills stay opaque. The artwork is then auto-cropped to its bounding box and
-/// contain-fitted into the window (fills the height), so the cat reads big.
-/// Color is downsampled premultiplied by alpha, which prevents white / dark
-/// halos on the soft edges.
+/// contain-fitted into the 16:9 window. Color is downsampled premultiplied by
+/// alpha, which prevents white / dark halos on the soft edges.
 pub fn load_reminder_card(path: &Path, out_w: u32, out_h: u32) -> Option<ReminderCard> {
     let img = image::open(path).ok()?.to_rgba8();
     let (iw, ih) = img.dimensions();
@@ -57,16 +56,16 @@ pub fn load_reminder_card(path: &Path, out_w: u32, out_h: u32) -> Option<Reminde
         return None;
     }
 
-    // Show the whole illustration (bubble + cat + glass). Leave a bottom
-    // strip for the feed bowl; do not crop or cover the artwork.
-    let bowl_reserve = FEED_BOWL_H as u32 + 16;
-    let max_h = out_h.saturating_sub(bowl_reserve).max(1);
-    let max_w = out_w.saturating_sub(8).max(1);
+    // 16:9 window frames the whole illustration (bubble + cat + glass).
+    // No reserved bowl strip — the bowl sits in the lower-left empty pocket.
+    let pad = 8u32;
+    let max_h = out_h.saturating_sub(pad * 2).max(1);
+    let max_w = out_w.saturating_sub(pad * 2).max(1);
     let scale = (max_w as f32 / cw as f32).min(max_h as f32 / ch as f32);
     let sw = (cw as f32 * scale).round().max(1.0) as u32;
     let sh = (ch as f32 * scale).round().max(1.0) as u32;
     let dst_x = (out_w.saturating_sub(sw)) / 2;
-    let dst_y = 8;
+    let dst_y = (out_h.saturating_sub(sh)) / 2;
 
     let (rgb, alpha) = downscale_card(&src, &mask, iw, x0, y0, cw, ch, sw, sh);
 
@@ -283,22 +282,21 @@ pub fn compose_reminder_frame(
     let h = REMINDER_WINDOW_H;
     let mut out = vec![0u8; (w * h * 4) as usize];
 
-    // Soft panel card (opaque enough to read on desktop wallpaper).
-    fill_round_rect(&mut out, w, h, 12, 64, w - 24, h - 76, 18, PANEL);
+    // Soft 16:9 panel; pet sits on the right, copy on the left.
+    fill_round_rect(&mut out, w, h, 8, 8, w - 16, h - 16, 18, PANEL);
 
-    // Pet near top-center.
-    let pet_x = ((w as i32 - pet_w as i32) / 2).max(0) as u32;
-    let pet_y = 4u32;
+    let pet_x = w.saturating_sub(pet_w + 16);
+    let pet_y = ((h as i32 - pet_h as i32) / 2).max(4) as u32;
     blit(&mut out, w, h, pet_rgba, pet_w, pet_h, pet_x, pet_y);
 
-    // Message text on panel.
+    let text_w = w.saturating_sub(pet_w + 48).max(80);
     if !feeding {
-        if let Some((tw, th, trgba)) = rasterize_text(message, w - 40, 22.0, TEXT) {
-            blit(&mut out, w, h, &trgba, tw, th, 20, 140);
+        if let Some((tw, th, trgba)) = rasterize_text(message, text_w, 20.0, TEXT) {
+            blit(&mut out, w, h, &trgba, tw, th, 24, 56);
         }
-    } else if let Some((tw, th, trgba)) = rasterize_text("呼～活力恢复了！", w - 40, 22.0, TEXT)
+    } else if let Some((tw, th, trgba)) = rasterize_text("呼～活力恢复了！", text_w, 20.0, TEXT)
     {
-        blit(&mut out, w, h, &trgba, tw, th, 20, 150);
+        blit(&mut out, w, h, &trgba, tw, th, 24, 56);
     }
 
     let _ = button_scale;
@@ -308,9 +306,12 @@ pub fn compose_reminder_frame(
 }
 
 /// Feed-bowl rect in reminder layout coordinates.
+///
+/// Lower-left pocket under the speech bubble — the cropped tishi art leaves
+/// that quadrant empty, so the bowl does not cover the cat or the cup.
 pub fn food_button_layout() -> (f32, f32, f32, f32) {
-    let x = (REMINDER_WINDOW_W as f32 - FEED_BOWL_W) * 0.5;
-    let y = REMINDER_WINDOW_H as f32 - FEED_BOWL_H - 12.0;
+    let x = 96.0;
+    let y = REMINDER_WINDOW_H as f32 - FEED_BOWL_H - 16.0;
     (x, y, FEED_BOWL_W, FEED_BOWL_H)
 }
 
@@ -502,6 +503,11 @@ mod card_tests {
     }
 
     #[test]
+    fn reminder_window_is_16_by_9() {
+        assert_eq!(REMINDER_WINDOW_W * 9, REMINDER_WINDOW_H * 16);
+    }
+
+    #[test]
     fn card_loads_to_window_size() {
         let card = load_reminder_card(&card_path(), REMINDER_WINDOW_W, REMINDER_WINDOW_H)
             .expect("reminder card should load");
@@ -512,7 +518,18 @@ mod card_tests {
         assert!(transparent > 0, "white background should be transparent");
         // …while the bubble + cat + tail remain (matches the mockup artwork).
         let frac = opaque_frac(&card.rgba);
-        assert!(frac > 0.10 && frac < 0.60, "opaque fraction {frac:.2}");
+        assert!(frac > 0.10 && frac < 0.75, "opaque fraction {frac:.2}");
+    }
+
+    #[test]
+    fn feed_bowl_sits_inside_window() {
+        let (x, y, w, h) = food_button_layout();
+        assert!(x >= 0.0 && y >= 0.0);
+        assert!(x + w <= REMINDER_WINDOW_W as f32);
+        assert!(y + h <= REMINDER_WINDOW_H as f32);
+        // Lower-left pocket, not centered under the cat.
+        assert!(x + w < REMINDER_WINDOW_W as f32 * 0.5);
+        assert!(y > REMINDER_WINDOW_H as f32 * 0.5);
     }
 
     #[test]

@@ -6,8 +6,8 @@
 | --- | --- |
 | 项目名称 | 桌面快速访问互动宠物（PawDesk） |
 | 文档类型 | 开发任务与模块排期 |
-| 当前版本 | **v0.28**（2026-08-18：开坞不闪 — 关坞保留坞尺寸 HWND） |
-| 依据文档 | `prd.md` v0.7.9、`tech.md` v0.20、`design.md` v0.23 |
+| 当前版本 | **v0.29**（2026-08-18：设置放大预留叠层，尾巴不被裁） |
+| 依据文档 | `prd.md` v0.7.10、`tech.md` v0.23、`design.md` v0.25 |
 | 环境参考 | `env.md` |
 | 状态 | **M0–M6 可日常使用**；**M7**：母版 / 眨眼 / 跟随 / 哈欠 / 伸懒腰已接入 |
 | **下一步** | PET-M06 拖拽拎起 + 回坐 |
@@ -53,6 +53,7 @@
 | **v0.26** | **2026-08-17** | 取消托盘暂停/打开设置；设置「暂停」气泡+`sly_pause`；改大小预览且完成不抖；prd **v0.7.8** · tech **v0.18** · design **v0.21** |
 | **v0.27** | **2026-08-18** | 宠物大小 **50%–100%**（设置/托盘同一钳位）；设置改大小不扩叠层（卡完整、不抖），完成钉新原点；设置卡去顶高光；prd **v0.7.9** · tech **v0.19** · design **v0.22** |
 | **v0.28** | **2026-08-18** | **开坞偶发闪一下**：根因是关坞缩 HWND 再开坞放大，layered 位图被丢；`dock_hwnd` 关坞不缩窗；再开尺寸相同只 ULW；design **v0.23** · tech **v0.20** |
+| **v0.29** | **2026-08-18** | **设置放大裁尾巴**：开坞/进设置按 100% 预留叠层；完成兜底扩画布；关坞 HWND 只长大；prd **v0.7.10** · tech **v0.23** · design **v0.25** |
 
 ### 1.3 2026-08-11 精灵与呈现收口（已落地）
 
@@ -624,7 +625,7 @@ foundation (工程/错误/日志/事件总线)
 - **启动坞（拍板）**：**钉宠 + Flip → Shift → Size**；半透明玻璃拟态；单 HWND = `union(pet_rect, card_rect)`；效果图 `mockups/launcher-pin-flip.*`
 - **呈现**：CPU RGBA → `UpdateLayeredWindow(ULW_ALPHA)` 预乘 BGRA；禁止宠物 HWND 挂 DXGI/wgpu
 - **色键**：仅品红；**禁止黑键**
-- **工具**：`tools/pack_idle_stretch.py`、`pack_idle_yawn.py`、`pack_pitch_from_gen.py`、`pack_reminder_hop.py`、`despill_pet_edges.py`、`package.ps1`
+- **工具**：`tools/pack_idle_stretch.py`、`pack_idle_yawn.py`、`pack_pitch_from_gen.py`、`pack_reminder_hop.py`、`despill_pet_edges.py`、`package.ps1`、`make-installer.ps1`
 - **配置坑**：勿用 PowerShell `Set-Content`/`ConvertTo-Json` 乱写 `config.json`（易 BOM/非法 JSON → 回退 bak 的旧 scale）
 - **添加应用**：`shortcut/picker.rs` → Windows 原生 `IFileOpenDialog`；`build_pick_context` + 后台 STA；虚拟桌面；不切 z-order（tech §7.4）
 - **构建产物**：`target/debug` 开发 · `target/release` 正式 · `dist/PawDesk` 仅 package 快照（不会随 cargo 自动更新）
@@ -669,7 +670,7 @@ foundation (工程/错误/日志/事件总线)
 
 - 分层真透明桌宠 + 配置持久化 + 托盘完整菜单  
 - **待机真眨眼** + **头眼跟随** + **60s 哈欠 / 伸懒腰轮播**；距离迟滞 / Watching 驻留  
-- **宠物大小可调**（设置步进 + 托盘变大/变小；**50%–100%** 同一钳位；默认 0.6；schema v3）  
+- **宠物大小可调**（设置步进 + 托盘变大/变小；**50%–100%** 同一钳位；默认 0.6；schema v3；设置放大预留叠层，剪影不被裁）  
 - 提醒闭环 + 设置内开关/间隔（「暂停」只开玩笑）  
 - 快捷启动坞（钉宠玻璃卡）+ **原生**异步文件选择（虚拟桌面 / 不闪）  
 - 隐藏不抢提醒；显示后 pending；工作区钳制  
@@ -685,6 +686,7 @@ foundation (工程/错误/日志/事件总线)
 | Debug（开发） | `target\debug\pawdesk.exe` ← `cargo run` / `cargo build` |
 | Release（最新优化） | `target\release\pawdesk.exe` ← `cargo build --release` |
 | 便携包（可选快照） | `dist\PawDesk\` ← `tools\package.ps1`（从 release 复制，**不入库 / 不自动同步**） |
+| 演示安装包 | `dist\PawDesk-Setup-<ver>.exe` ← `tools\make-installer.ps1`（Inno Setup，免管理员） |
 | 配置 | `%APPDATA%\PawDesk\config.json` |
 | 日志 | `%LOCALAPPDATA%\PawDesk\logs\app.log` |
 | 资源 | `assets\pets\cow-cat\` · `assets\tray\icon.png` |

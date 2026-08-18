@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | **v0.20**（2026-08-18：开坞不闪 — `dock_hwnd` 关坞不缩窗） |
-| 依据 | `prd.md` v0.7.9 · `design.md` v0.23 |
+| 版本 | **v0.23**（2026-08-18：开坞/进设置按 100% 预留叠层，完成不裁尾巴） |
+| 依据 | `prd.md` v0.7.10 · `design.md` v0.25 |
 | 排期 | `task.md` |
 | 环境 | `env.md` |
 | 文档目录 | 本文件与其它规格均在仓库 `docs/` 下（见 `docs/README.md`） |
@@ -91,8 +91,8 @@ src/
 
 assets/pets/cow-cat/    分 clip 帧序列 + meta.json
 assets/tray/            托盘图标
-tools/                  抽帧、打包、despill/软边、look_pitch 重打包
-dist/PawDesk/           便携包（package.ps1）
+tools/                  抽帧、打包、安装包（package.ps1 / make-installer.ps1）
+dist/                   便携包 + Setup.exe（不入库）
 ```
 
 | 模块 | 职责 |
@@ -169,7 +169,7 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 | 默认 | **0.6**（schema v3 迁移会把旧 `1.0` 拉到默认） |
 | 范围 / 步进 | **0.5–1.0** / **0.1**（`clamp_pet_scale` / `step_pet_scale`；设置与托盘共用） |
 | 入口 | 设置页 `−`/`+`（`pet_scale_draft` 预览，「完成」写入）；托盘 `PetScaleUp` / `PetScaleDown` |
-| 生效 | 待机即时改窗 + `idle_present_pos` 原子 ULW。设置内 **不改** 叠层 HWND / `menu_present_pos` / 卡片几何（扩窗会裁掉半张设置卡并抖）；`sync_pet_slot_to_scale` 只动宠槽，朝卡边钉 `DEFAULT_GAP`，槽可出画布由 `draw_avatar` 裁。旧配置 `>1.0` 启动时钳回 1.0。「完成」写 scale + `overlay_origin`（预览桌面点）；Esc 回 `settings_layout_snapshot` |
+| 生效 | 待机即时改窗 + `idle_present_pos` 原子 ULW。开坞（`enter_menu_ui`）与进设置（`begin_settings_from_launcher`）先跑 `overlay_pad_for_max_pet`：按 `PET_SCALE_MAX` 预留叠层，卡片/当前宠的**屏幕**矩形不动，只把 origin 往宠外侧挪并 `RadialLayout::translate`。`±` 仍只走 `sync_pet_slot_to_scale`（卡与 present 钉死）。旧配置 `>1.0` 启动时钳回 1.0。「完成」写 scale + `overlay_origin`；`grow_overlay_to_contain_pet_slot` 兜底扩画布（只长大）；`sync_dock_hwnd_slot_from_layout` 抄槽且 **HWND 只允许变大**（缩窗会丢掉 layered 位图）。Esc 回进入时 snapshot（已是预留后的画布）。 |
 | 建窗 | `create_window` 用 `pet_size()`，并强制物理 resize（防 DPI 忽略 LogicalSize） |
 
 ---
@@ -320,7 +320,7 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 
 ```text
 Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距跳过；躲边先 snap restore）
-    → Showing：tishi 整图 520×400（猫右侧保持原大小；左侧 22px 大气泡；底部 220×52 投喂胶囊）
+    → Showing：tishi 整图 contain-fit 进 640×360（16:9）；96×96 猫粮碗落气泡下方左空档
     → Feeding（~900ms）→ reminder_hop 轻跃回原位 → Idle
 ```
 
@@ -331,8 +331,8 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 1. 边界 flood 抠白：相邻近白像素（`BG_MIN_RGB=244`，含最浅抗锯齿环）置透明。
 2. 自动裁剪到**内容外框**（+12px 边距），去掉 mockup 四周空白。
 3. **premultiplied 缩放**：颜色先乘 alpha 再缩小、最后除回 → 边缘色只来自画面，无白边/暗晕。
-4. 猫按高约 300 贴右侧（不跟窗等比放大）；左侧裁掉图里烤死的小气泡。  
-5. 运行时画 22px 三行奶油气泡 + 220×52「点击投喂」胶囊（投喂中变「呼～活力恢复了！」）；热区与胶囊对齐（`client_to_layout`）。
+4. contain-fit 铺满 640×360，垂直居中；不再预留底部碗带。  
+5. 投喂碗 `food_button_layout` 锚在左下（气泡下方透明空档）；热区与碗对齐（`client_to_layout`）。缺图时 fallback 同窗同碗坐标。
 
 ---
 
@@ -415,17 +415,21 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | `target/debug/pawdesk.exe` | `cargo build` / `cargo run` | 开发调试 |
 | `target/release/pawdesk.exe` | `cargo build --release` | 日常使用 / 验收最新修复 |
 | `dist/PawDesk/` | `tools/package.ps1` 从 **release** 复制（**不入库**，按需生成） | 便携分发包（exe + 精简 assets） |
+| `dist/PawDesk-Setup-<ver>.exe` | `tools/make-installer.ps1` + Inno Setup | 给他人安装的演示包（免管理员） |
+| `dist/PawDesk-<ver>-portable.zip` | `tools/make-installer.ps1` | 便携 zip |
 
 ```text
 源码
- ├─ cargo build           → target/debug/
- ├─ cargo build --release → target/release/
- └─ tools/package.ps1     → dist/PawDesk/  （依赖 release 已编好）
+ ├─ cargo build                 → target/debug/
+ ├─ cargo build --release       → target/release/
+ ├─ tools/package.ps1           → dist/PawDesk/
+ └─ tools/make-installer.ps1    → dist/PawDesk-Setup-<ver>.exe
+                                  + dist/PawDesk-<ver>-portable.zip
 ```
 
-- 改代码后若只跑 `cargo build --release`，**不会**自动更新 `dist/`；要便携包须再跑 `package.ps1`。  
+- 改代码后若只跑 `cargo build --release`，**不会**自动更新 `dist/`；要便携包须再跑 `package.ps1`，要安装包再跑 `make-installer.ps1`。  
 - 无管理员常规运行；运行时资源优先 exe 旁 `assets/`，开发时回退工程根 `assets/`。  
-- 正式安装包（Inno Setup / WiX 等）**尚未实现**，首期以便携包或直接跑 release 为主。
+- 安装包：Inno Setup，per-user 默认 `%LOCALAPPDATA%\Programs\PawDesk`；配置仍在 `%APPDATA%\PawDesk`。
 
 ### 8.4 测试
 
@@ -490,3 +494,6 @@ Due → 存原位 → reminder_hop 轻跃中央（攒劲钉死 + 弧线；近距
 | **v0.18** | **2026-08-17** | 取消托盘暂停/打开设置；设置暂停 `SAY_NO_PAUSE` + `sly_pause`；`pet_scale_draft` 预览 + `idle_present_pos`；拎起行无投影；design **v0.21** · prd **v0.7.8** |
 | **v0.19** | **2026-08-18** | `PET_SCALE_MAX=1.0`（设置/托盘同一 `step_pet_scale`）；设置改大小不扩叠层（`sync_pet_slot_to_scale` + 裁剪出界宠）；完成钉 `overlay_origin`；设置卡去顶高光；design **v0.22** · prd **v0.7.9** |
 | **v0.20** | **2026-08-18** | 开坞闪：`dock_hwnd` 关坞不缩窗；`sync_layered_hwnd` 替代 winit 异步 resize；`compose_pet_in_slot` 待机画在坞槽；`pet_desk_origin` 持久化宠点；`DWMWA_TRANSITIONS_FORCEDISABLED`；design **v0.23** |
+| **v0.21** | **2026-08-18** | 提醒窗 640×360 16:9：插画铺满、碗 96px 落左下；`layout_food_button` 复用 `food_button_layout`；design **v0.24** |
+| **v0.22** | **2026-08-18** | 设置改大小后关坞缩回旧尺寸：完成 / `finish_exit_menu_ui` 把 `menu_layout` 宠槽抄回 `dock_hwnd`；design **v0.24** |
+| **v0.23** | **2026-08-18** | 开坞/进设置 `overlay_pad_for_max_pet` 预留 100% 宠；`±` 不再裁尾巴；完成兜底 `grow_overlay_to_contain_pet_slot`；dock HWND 只长大不缩小；design **v0.25** · prd **v0.7.10** |

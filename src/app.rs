@@ -15,7 +15,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::config::{AppConfig, ConfigRepository, DebouncedSaver};
+use crate::config::{AppConfig, ConfigRepository, DebouncedSaver, PET_SCALE_MAX};
 use crate::error::AppError;
 use crate::event::{AppEvent, Point, TrayCommand};
 use crate::pet::{
@@ -47,8 +47,9 @@ use crate::shortcut::{
     ShortcutRepository,
 };
 use crate::ui::launcher_place::{
-    infer_attach_dir, logical_to_physical, physical_to_logical, physical_to_logical_u32,
-    place_launcher, snap_dpr, DEFAULT_GAP, DEFAULT_MARGIN,
+    infer_attach_dir, logical_to_physical, overlay_pad_for_max_pet, physical_to_logical,
+    physical_to_logical_u32, place_launcher, snap_dpr, DEFAULT_GAP, DEFAULT_MARGIN,
+    WINDOW_PADDING,
 };
 use crate::ui::list_drag::{
     bowl_rect, edge_scroll_delta, insert_index_from_y, pointer_dist, reorder_ids, should_start_drag,
@@ -428,6 +429,155 @@ impl App {
 
     fn clear_dock_hwnd(&mut self) {
         self.dock_hwnd = None;
+    }
+
+    /// Copy the on-screen pet slot into `dock_hwnd`. The HWND box may grow
+    /// to the current overlay (settings size preview) but never shrink —
+    /// shrinking discards the layered bitmap and flashes on the next open.
+    fn sync_dock_hwnd_slot_from_layout(&mut self) {
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let Some(dock) = self.dock_hwnd.as_mut() else {
+            return;
+        };
+        if let Some(pos) = self.menu_present_pos {
+            dock.pos = pos;
+        }
+        dock.pet_x = layout.pet_x;
+        dock.pet_y = layout.pet_y;
+        dock.pet_w = layout.pet_w;
+        dock.pet_h = layout.pet_h;
+        let dpr = snap_dpr(self.scale_factor);
+        let new_phys = (
+            logical_to_physical(layout.window_w, dpr).max(1) as u32,
+            logical_to_physical(layout.window_h, dpr).max(1) as u32,
+        );
+        if new_phys.0 > dock.phys.0 || new_phys.1 > dock.phys.1 {
+            dock.phys = (dock.phys.0.max(new_phys.0), dock.phys.1.max(new_phys.1));
+            dock.win_log_w = dock.win_log_w.max(layout.window_w);
+            dock.win_log_h = dock.win_log_h.max(layout.window_h);
+        }
+    }
+
+    /// Grow the overlay so a 100% pet still fits against the locked card.
+    /// Card and current pet **screen** rects stay put. Returns true if the
+    /// canvas grew (callers should rebuild caches / sync the HWND).
+    fn ensure_overlay_fits_max_pet(&mut self) -> bool {
+        let Some(pos) = self.menu_present_pos else {
+            return false;
+        };
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return false;
+        };
+        let dpr = snap_dpr(self.scale_factor);
+        let window = platform::Rect {
+            x: pos.0,
+            y: pos.1,
+            width: logical_to_physical(layout.window_w, dpr),
+            height: logical_to_physical(layout.window_h, dpr),
+        };
+        let card = Self::layout_rect_on_screen(
+            pos,
+            layout.card_x,
+            layout.card_y,
+            layout.card_w,
+            layout.card_h,
+            dpr,
+        );
+        let pet = Self::layout_rect_on_screen(
+            pos,
+            layout.pet_x,
+            layout.pet_y,
+            layout.pet_w,
+            layout.pet_h,
+            dpr,
+        );
+        let dir = infer_attach_dir(pet, card);
+        let max_pet = logical_to_physical(pet_logical_size(PET_SCALE_MAX), dpr);
+        let pad = overlay_pad_for_max_pet(
+            window,
+            card,
+            pet,
+            dir,
+            max_pet,
+            DEFAULT_GAP,
+            WINDOW_PADDING,
+        );
+        if pad.is_zero() {
+            return false;
+        }
+        let dx_log = physical_to_logical(-pad.origin_dx, dpr);
+        let dy_log = physical_to_logical(-pad.origin_dy, dpr);
+        let new_phys_w = (window.width + pad.extra_w).max(1);
+        let new_phys_h = (window.height + pad.extra_h).max(1);
+        let new_log_w = physical_to_logical_u32(new_phys_w, dpr);
+        let new_log_h = physical_to_logical_u32(new_phys_h, dpr);
+        let new_pos = (pos.0 + pad.origin_dx, pos.1 + pad.origin_dy);
+        let Some(layout) = self.menu_layout.as_mut() else {
+            return false;
+        };
+        layout.translate(dx_log, dy_log);
+        layout.window_w = new_log_w;
+        layout.window_h = new_log_h;
+        layout.window = new_log_w;
+        self.menu_present_pos = Some(new_pos);
+        self.menu_logical_size = (new_log_w, new_log_h);
+        if let Some(g) = &self.menu_outside_guard {
+            g.update_rect(platform::Rect {
+                x: new_pos.0,
+                y: new_pos.1,
+                width: new_phys_w,
+                height: new_phys_h,
+            });
+        }
+        self.sync_dock_hwnd_slot_from_layout();
+        true
+    }
+
+    /// Safety net after 「完成」: if the pet slot hangs off the overlay
+    /// (pad was skipped), grow the canvas toward the overflow. Never shrinks.
+    /// Returns true when the canvas grew.
+    fn grow_overlay_to_contain_pet_slot(&mut self) -> bool {
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return false;
+        };
+        let dpr = snap_dpr(self.scale_factor);
+        let pad_l = (-layout.pet_x).max(0.0);
+        let pad_t = (-layout.pet_y).max(0.0);
+        let overflow_r = (layout.pet_x + layout.pet_w - layout.window_w as f32).max(0.0);
+        let overflow_b = (layout.pet_y + layout.pet_h - layout.window_h as f32).max(0.0);
+        if pad_l < 0.01 && pad_t < 0.01 && overflow_r < 0.01 && overflow_b < 0.01 {
+            return false;
+        }
+        let Some(layout) = self.menu_layout.as_mut() else {
+            return false;
+        };
+        layout.translate(pad_l, pad_t);
+        let new_w = ((layout.window_w as f32) + pad_l + overflow_r)
+            .round()
+            .max(1.0) as u32;
+        let new_h = ((layout.window_h as f32) + pad_t + overflow_b)
+            .round()
+            .max(1.0) as u32;
+        layout.window_w = new_w;
+        layout.window_h = new_h;
+        layout.window = new_w;
+        if let Some(pos) = self.menu_present_pos.as_mut() {
+            // Do not use `logical_to_physical` here: it clamps 0 → 1.
+            pos.0 -= (pad_l as f64 * dpr).round() as i32;
+            pos.1 -= (pad_t as f64 * dpr).round() as i32;
+        }
+        self.menu_logical_size = (new_w, new_h);
+        if let (Some(g), Some(pos)) = (&self.menu_outside_guard, self.menu_present_pos) {
+            g.update_rect(platform::Rect {
+                x: pos.0,
+                y: pos.1,
+                width: logical_to_physical(new_w, dpr),
+                height: logical_to_physical(new_h, dpr),
+            });
+        }
+        true
     }
 
     /// Scale shown/persisted right now: the settings preview draft when one is
@@ -1374,6 +1524,8 @@ impl App {
         self.menu_drag_layers = None;
         // Atomic layered present target (physical). Avoids empty frames during resize.
         self.menu_present_pos = Some((place.window.x, place.window.y));
+        // Reserve canvas for a 100% pet so settings ± never clips the tail.
+        let _ = self.ensure_overlay_fits_max_pet();
 
         // Rasterize the rest card while the idle pet is still on screen, so the
         // first ULW after the HWND grows is a complete frame.
@@ -1393,10 +1545,27 @@ impl App {
 
         // Growing a layered HWND discards the ULW bitmap (the flash). After
         // the first open we keep that size and only UpdateLayeredWindow.
-        let target = (
-            place.window.width.max(1) as u32,
-            place.window.height.max(1) as u32,
-        );
+        let dpr_phys = snap_dpr(self.scale_factor);
+        let (target, present) = if let Some(layout) = self.menu_layout.as_ref() {
+            let present = self
+                .menu_present_pos
+                .unwrap_or((place.window.x, place.window.y));
+            (
+                (
+                    logical_to_physical(layout.window_w, dpr_phys).max(1) as u32,
+                    logical_to_physical(layout.window_h, dpr_phys).max(1) as u32,
+                ),
+                present,
+            )
+        } else {
+            (
+                (
+                    place.window.width.max(1) as u32,
+                    place.window.height.max(1) as u32,
+                ),
+                (place.window.x, place.window.y),
+            )
+        };
         let reuse = self
             .dock_hwnd
             .is_some_and(|d| d.phys == target);
@@ -1404,8 +1573,8 @@ impl App {
             if let Some(w) = &self.window {
                 if let Err(e) = platform::sync_layered_hwnd(
                     w.as_ref(),
-                    place.window.x,
-                    place.window.y,
+                    present.0,
+                    present.1,
                     target.0,
                     target.1,
                 ) {
@@ -1414,7 +1583,7 @@ impl App {
             }
         }
         if let Some(layout) = self.menu_layout.clone() {
-            self.remember_dock_hwnd((place.window.x, place.window.y), target, &layout);
+            self.remember_dock_hwnd(present, target, &layout);
         }
         self.texture_dirty = true;
         self.redraw();
@@ -1485,6 +1654,7 @@ impl App {
         self.settings_card_cache = None;
         self.settings_layout_snapshot = None;
         self.pet_scale_draft = None;
+        self.sync_dock_hwnd_slot_from_layout();
         self.restore_overlay_origin_window();
         // L3-05: ignore click that closed the dock + brief double-tap reopen.
         self.menu_reopen_after = Some(now + Duration::from_millis(280));
@@ -1556,6 +1726,24 @@ impl App {
         // Fresh session: any previously discarded preview draft must not leak
         // into this one (config is always the source of truth on entry).
         self.pet_scale_draft = None;
+        // Pad before caches/snapshot so ± never clips the tail and Esc
+        // restores the already-reserved canvas (no HWND shrink).
+        if self.ensure_overlay_fits_max_pet() {
+            self.menu_card_cache = None;
+            if let (Some(w), Some(pos), Some(layout)) = (
+                self.window.as_ref(),
+                self.menu_present_pos,
+                self.menu_layout.as_ref(),
+            ) {
+                let dpr = snap_dpr(self.scale_factor);
+                let tw = logical_to_physical(layout.window_w, dpr).max(1) as u32;
+                let th = logical_to_physical(layout.window_h, dpr).max(1) as u32;
+                if let Err(e) = platform::sync_layered_hwnd(w.as_ref(), pos.0, pos.1, tw, th)
+                {
+                    warn!("sync_layered_hwnd: {e}");
+                }
+            }
+        }
         self.settings_ui_active = true;
         self.settings_embed = true;
         self.settings_card_cache = None;
@@ -1671,8 +1859,8 @@ impl App {
         }) else {
             return;
         };
-        // Overlay HWND / card stay frozen. The pet slot may hang off the
-        // canvas; draw_avatar clips so the card is never cropped.
+        // Overlay HWND / card stay frozen during ±. The canvas was reserved
+        // for a max-size pet on enter, so the slot should stay on-canvas.
         let (ww, hh, mut out) = compose_menu_pet_only(&pet_rgba, fw, fh, &layout, dpr);
         let d = if (dpr - dpr.round()).abs() < 0.08 {
             dpr.round()
@@ -2451,6 +2639,28 @@ impl App {
                 if self.settings_embed {
                     self.sync_pet_slot_to_scale(self.config.pet.scale);
                     self.commit_previewed_pet_origin();
+                    let grew = self.grow_overlay_to_contain_pet_slot();
+                    self.sync_dock_hwnd_slot_from_layout();
+                    if grew {
+                        if let (Some(w), Some(pos), Some(layout)) = (
+                            self.window.as_ref(),
+                            self.menu_present_pos,
+                            self.menu_layout.as_ref(),
+                        ) {
+                            let dpr = snap_dpr(self.scale_factor);
+                            let tw = logical_to_physical(layout.window_w, dpr).max(1) as u32;
+                            let th = logical_to_physical(layout.window_h, dpr).max(1) as u32;
+                            if let Err(e) = platform::sync_layered_hwnd(
+                                w.as_ref(),
+                                pos.0,
+                                pos.1,
+                                tw,
+                                th,
+                            ) {
+                                warn!("sync_layered_hwnd: {e}");
+                            }
+                        }
+                    }
                 }
                 self.exit_settings_ui();
             }
@@ -4233,6 +4443,59 @@ mod tests {
     }
 
     #[test]
+    fn close_after_scale_commit_keeps_new_slot_on_dock_hwnd() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let old_scale = app.config.pet.scale;
+        let old_pet = pet_logical_size(old_scale) as f32;
+        seed_embedded_settings(&mut app, old_scale);
+        let lay = app.menu_layout.as_ref().unwrap();
+        app.dock_hwnd = Some(DockHwnd {
+            pos: (40, 50),
+            phys: (500, 480),
+            win_log_w: lay.window_w,
+            win_log_h: lay.window_h,
+            pet_x: lay.pet_x,
+            pet_y: lay.pet_y,
+            pet_w: old_pet,
+            pet_h: old_pet,
+        });
+        app.pet_scale_draft = Some(0.9);
+
+        app.handle_settings_hit(SettingsHit::Done);
+        app.finish_exit_menu_ui(Instant::now());
+
+        let expected = pet_logical_size(0.9) as f32;
+        let dock = app.dock_hwnd.expect("dock hwnd must stay after close");
+        assert!(
+            dock.phys.0 >= 500 && dock.phys.1 >= 480,
+            "must not shrink the layered HWND, got {:?}",
+            dock.phys
+        );
+        assert!(
+            (dock.pet_w - expected).abs() < 0.01 && (dock.pet_h - expected).abs() < 0.01,
+            "idle slot must be the committed size, got {}x{}",
+            dock.pet_w,
+            dock.pet_h
+        );
+        assert!(
+            dock.pet_x >= -0.01,
+            "idle slot must not hang off the left of the dock canvas"
+        );
+        assert!(
+            dock.pet_x + dock.pet_w <= dock.win_log_w as f32 + 0.01,
+            "idle slot must not hang off the right of the dock canvas"
+        );
+        assert!((app.config.pet.scale - 0.9).abs() < 0.001);
+        assert!(
+            (dock.pet_w - old_pet).abs() > 0.01,
+            "slot must have left the pre-settings size"
+        );
+    }
+
+    #[test]
     fn scale_steps_do_not_move_card_or_present() {
         let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
         let saver = crate::config::DebouncedSaver::new(repo);
@@ -4274,6 +4537,119 @@ mod tests {
             card0.x,
             "facing gap stays DEFAULT_GAP"
         );
+    }
+
+    #[test]
+    fn pad_then_preview_max_keeps_pet_inside_canvas() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let start_scale = app.config.pet.scale;
+        seed_embedded_settings(&mut app, start_scale);
+        let card0 = card_screen_of(&app);
+        let pet0 = pet_screen_of(&app);
+
+        assert!(
+            app.ensure_overlay_fits_max_pet(),
+            "60% seed must reserve room for 100%"
+        );
+        assert_eq!(card_screen_of(&app), card0, "pad must not move the card");
+        assert_eq!(
+            pet_screen_of(&app),
+            pet0,
+            "pad must not move the current pet"
+        );
+
+        // 0.6 → 1.0 is four + steps.
+        for _ in 0..4 {
+            app.preview_pet_scale(1);
+        }
+        assert!((app.effective_pet_scale() - 1.0).abs() < 0.001);
+
+        let lay = app.menu_layout.as_ref().unwrap();
+        assert!(
+            lay.pet_x >= -0.01,
+            "previewed pet must not clip on the left, pet_x={}",
+            lay.pet_x
+        );
+        assert!(
+            lay.pet_y >= -0.01,
+            "previewed pet must not clip on the top, pet_y={}",
+            lay.pet_y
+        );
+        assert!(
+            lay.pet_x + lay.pet_w <= lay.window_w as f32 + 0.01,
+            "previewed pet must not clip on the right"
+        );
+        assert!(
+            (lay.pet_x + lay.pet_w + DEFAULT_GAP as f32 - lay.card_x).abs() < 0.6,
+            "facing gap stays DEFAULT_GAP after pad+preview, pet={}x{} card={}",
+            lay.pet_x,
+            lay.pet_w,
+            lay.card_x
+        );
+        assert_eq!(card_screen_of(&app), card0, "± after pad must not move the card");
+    }
+
+    #[test]
+    fn done_after_pad_keeps_idle_slot_inside_dock() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let start_scale = app.config.pet.scale;
+        seed_embedded_settings(&mut app, start_scale);
+        assert!(app.ensure_overlay_fits_max_pet());
+        let lay = app.menu_layout.as_ref().unwrap();
+        app.dock_hwnd = Some(DockHwnd {
+            pos: app.menu_present_pos.unwrap(),
+            phys: (lay.window_w, lay.window_h),
+            win_log_w: lay.window_w,
+            win_log_h: lay.window_h,
+            pet_x: lay.pet_x,
+            pet_y: lay.pet_y,
+            pet_w: lay.pet_w,
+            pet_h: lay.pet_h,
+        });
+        for _ in 0..4 {
+            app.preview_pet_scale(1);
+        }
+
+        app.handle_settings_hit(SettingsHit::Done);
+        app.finish_exit_menu_ui(Instant::now());
+
+        let expected = pet_logical_size(1.0) as f32;
+        let dock = app.dock_hwnd.expect("dock hwnd must stay after close");
+        assert!(
+            (dock.pet_w - expected).abs() < 0.01 && (dock.pet_h - expected).abs() < 0.01
+        );
+        assert!(dock.pet_x >= -0.01);
+        assert!(dock.pet_y >= -0.01);
+        assert!(dock.pet_x + dock.pet_w <= dock.win_log_w as f32 + 0.01);
+        assert!(dock.pet_y + dock.pet_h <= dock.win_log_h as f32 + 0.01);
+    }
+
+    #[test]
+    fn contain_slot_grows_canvas_when_pet_is_off_left() {
+        let repo = crate::config::ConfigRepository::default_paths().expect("config paths");
+        let saver = crate::config::DebouncedSaver::new(repo);
+        let config = crate::config::AppConfig::default();
+        let mut app = App::new(PathBuf::from("."), config, saver);
+        let start_scale = app.config.pet.scale;
+        seed_embedded_settings(&mut app, start_scale);
+        {
+            let lay = app.menu_layout.as_mut().unwrap();
+            lay.pet_x = -20.0;
+            lay.pet_w = 128.0;
+            lay.pet_h = 128.0;
+        }
+        let card0 = card_screen_of(&app);
+        assert!(app.grow_overlay_to_contain_pet_slot());
+        let lay = app.menu_layout.as_ref().unwrap();
+        assert!(lay.pet_x >= -0.01);
+        assert!(lay.pet_x + lay.pet_w <= lay.window_w as f32 + 0.01);
+        assert_eq!(card_screen_of(&app), card0, "contain-grow must not move the card");
     }
 
     #[test]
