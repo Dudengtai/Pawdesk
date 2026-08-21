@@ -66,9 +66,11 @@ chinesesimplified.LaunchAfterInstall=立即启动 PawDesk
 chinesesimplified.CreateDesktopIcon=创建桌面快捷方式
 chinesesimplified.StartupIcon=开机时启动 PawDesk（登录后自动出现桌宠）
 chinesesimplified.AdditionalIcons=附加选项
+chinesesimplified.FreshStart=以出厂状态安装（清空已添加的应用、提醒和宠物位置）
 chinesesimplified.DeleteUserData=是否同时删除个人配置和日志？%n%n包含快捷方式列表、提醒设置、宠物位置等。%n选择「否」则下次安装后仍可恢复。
 
 [Tasks]
+Name: "freshstart"; Description: "{cm:FreshStart}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "startupicon"; Description: "{cm:StartupIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
@@ -93,6 +95,20 @@ var
   ResultCode: Integer;
 begin
   Exec('taskkill.exe', '/IM pawdesk.exe /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+  begin
+    CloseRunningApp;
+    { Factory-reset user data so 1.0 ships as an empty dock, not leftover
+      apps from a previous cargo-run / 0.1 install on this machine. }
+    if WizardIsTaskSelected('freshstart') then
+    begin
+      DelTree(ExpandConstant('{userappdata}\PawDesk'), True, True, True);
+    end;
+  end;
 end;
 
 function InitializeSetup(): Boolean;

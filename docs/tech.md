@@ -438,7 +438,7 @@ Due → 存原位（躲边先 snap restore）
 
 - 改代码后若只跑 `cargo build --release`，**不会**自动更新 `dist/`；要便携包须再跑 `package.ps1`，要安装包再跑 `make-installer.ps1`。  
 - 无管理员常规运行；运行时资源优先 exe 旁 `assets/`，开发时回退工程根 `assets/`。  
-- 安装包：Inno Setup，per-user 默认 `%LOCALAPPDATA%\Programs\PawDesk`；配置仍在 `%APPDATA%\PawDesk`。
+- 安装包：Inno Setup，per-user 默认 `%LOCALAPPDATA%\Programs\PawDesk`；配置仍在 `%APPDATA%\PawDesk`。默认勾选「以出厂状态安装」，安装时清空该配置（空启动坞、默认提醒与宠物位置）；取消勾选则保留旧应用列表。
 
 ### 8.4 测试
 
