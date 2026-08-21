@@ -17,10 +17,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetSystemMetrics, GetWindowLongW, SetClassLongPtrW,
     SetWindowsHookExW, SetWindowLongW, SetWindowPos, SystemParametersInfoW, UnhookWindowsHookEx,
     UpdateLayeredWindow, GCLP_HBRBACKGROUND, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
-    WH_MOUSE_LL,
-    WM_LBUTTONDOWN, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    MessageBoxW, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    ULW_ALPHA, WH_MOUSE_LL, WM_LBUTTONDOWN, MB_ICONERROR, MB_OK, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -115,6 +115,29 @@ pub fn work_area_from_point(x: i32, y: i32) -> Result<MonitorInfo, AppError> {
     }
 }
 
+/// Tray-app chrome: hide from the taskbar and Alt-Tab. Layered re-arm
+/// (`enable_transparent_window`) must keep this bit, or the icon comes back.
+fn apply_tray_tool_window(ex: i32) -> i32 {
+    let mut ex = ex;
+    ex |= WS_EX_TOOLWINDOW.0 as i32;
+    ex &= !(WS_EX_APPWINDOW.0 as i32);
+    ex
+}
+
+/// Show a blocking error dialog. Used when Release has no console.
+pub fn show_fatal_error(title: &str, message: &str) {
+    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let message: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 /// Prepare a layered window for per-pixel alpha via [`update_layered_rgba`].
 ///
 /// DXGI swapchain / color-key are unreliable (solid white/magenta square).
@@ -129,6 +152,7 @@ pub fn enable_transparent_window(window: &impl HasWindowHandle) -> Result<(), Ap
         // Toggle layered bit so any prior SetLayeredWindowAttributes is reset.
         ex &= !(WS_EX_LAYERED.0 as i32);
         ex &= !(WS_EX_TRANSPARENT.0 as i32);
+        ex = apply_tray_tool_window(ex);
         SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
         let _ = SetWindowPos(
             hwnd,
@@ -143,6 +167,7 @@ pub fn enable_transparent_window(window: &impl HasWindowHandle) -> Result<(), Ap
         ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
         ex |= WS_EX_LAYERED.0 as i32;
         ex &= !(WS_EX_TRANSPARENT.0 as i32);
+        ex = apply_tray_tool_window(ex);
         SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
         let _ = SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
         let _ = SetWindowPos(
@@ -700,6 +725,7 @@ pub fn set_click_through(window: &impl HasWindowHandle, enabled: bool) -> Result
         let mut style = GetWindowLongW(hwnd, GWL_EXSTYLE);
         // Ensure layered for composition with transparent surfaces.
         style |= WS_EX_LAYERED.0 as i32;
+        style = apply_tray_tool_window(style);
         if enabled {
             style |= WS_EX_TRANSPARENT.0 as i32;
         } else {

@@ -1,6 +1,10 @@
 //! PawDesk entry point.
 
 #![allow(dead_code)] // M0 keeps forward-looking stubs for M1+ modules.
+#![cfg_attr(
+    all(windows, not(debug_assertions), not(test)),
+    windows_subsystem = "windows"
+)]
 
 mod app;
 mod config;
@@ -20,6 +24,8 @@ fn main() {
         // Logging may have failed before init; still print.
         eprintln!("PawDesk failed: {err}");
         error!("fatal: {err}");
+        #[cfg(not(debug_assertions))]
+        platform::show_fatal_error("PawDesk", &err.user_message());
         std::process::exit(1);
     }
 }

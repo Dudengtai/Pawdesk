@@ -11,6 +11,7 @@ pub const BUILTIN_MESSAGES: &[&str] = &[
 ];
 
 static LAST_INDEX: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LAST_CARD: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Pick a message, preferring built-ins and avoiding immediate repeats.
 pub fn pick_message(custom: &[String]) -> String {
@@ -23,15 +24,25 @@ pub fn pick_message(custom: &[String]) -> String {
     if pool.is_empty() {
         return "该起来活动一下了。".into();
     }
+    pool[pick_index(pool.len(), &LAST_INDEX)].clone()
+}
 
-    let last = LAST_INDEX.load(Ordering::Relaxed);
-    let n = pool.len();
+/// Pick a reminder-card index, avoiding an immediate repeat when `n > 1`.
+pub fn pick_card_index(n: usize) -> usize {
+    pick_index(n, &LAST_CARD)
+}
+
+fn pick_index(n: usize, slot: &AtomicUsize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let last = slot.load(Ordering::Relaxed);
     let mut idx = (simple_seed() as usize) % n;
     if n > 1 && idx == last {
         idx = (idx + 1) % n;
     }
-    LAST_INDEX.store(idx, Ordering::Relaxed);
-    pool[idx].clone()
+    slot.store(idx, Ordering::Relaxed);
+    idx
 }
 
 fn simple_seed() -> u64 {
@@ -65,5 +76,15 @@ mod tests {
             }
         }
         assert!(saw || !pick_message(&custom).is_empty());
+    }
+
+    #[test]
+    fn pick_card_index_stays_in_range() {
+        assert_eq!(pick_card_index(0), 0);
+        assert_eq!(pick_card_index(1), 0);
+        for _ in 0..24 {
+            let i = pick_card_index(2);
+            assert!(i < 2);
+        }
     }
 }

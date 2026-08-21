@@ -182,7 +182,9 @@ Idle ──贴边──> HiddenAtEdge ──点/恢复──> Idle
 ### 4.1 窗口属性
 
 - 无边框、置顶、不抢焦点。  
-- 关窗 ≠ 退出（退出走托盘）。  
+- **Release 无控制台**（`windows_subsystem = "windows"`）；debug `cargo run` 仍留控制台。启动失败 Release 弹系统 MessageBox，日志仍写 `%LOCALAPPDATA%/PawDesk/logs/app.log`。  
+- 宠 HWND：`WS_EX_TOOLWINDOW` + winit `skip_taskbar`，不进任务栏 / Alt-Tab。托盘是唯一程序入口。  
+- 关窗 ≠ 退出（只藏猫；退出走托盘）。  
 - 位置：工作区坐标；多屏用宠所在屏 `work_area`；显示器变化时钳制。  
 - 宠窗逻辑边长随 `pet.scale` 变化（非写死 128）。
 
@@ -325,20 +327,21 @@ UpdateLayeredWindow + 预乘 BGRA + ULW_ALPHA
 Due → 存原位（躲边先 snap restore）
     → 一次 sync_layered_hwnd 长大到 union(原位宠, 中央 640×360 卡, 弧线包围盒)
     → 叠层内 sit+squash 轻跃到卡中心宠槽（近距跳过；禁止每帧 set_outer_position）
-    → Showing：同缓冲 fade 出 tishi + 96×96 碗；16ms 直呈
+    → Showing：同缓冲 fade 出本轮卡片（举杯 / 小喇叭轮换）+ 96×96 碗；16ms 直呈
     → Feeding（~900ms）→ 卡 fade 出 → 叠层内轻跃回原位槽
     → begin_idle_present_at(原位) 一次缩回 → Idle
 ```
 
 拖动中 due → pending；松手后再进。隐藏宠物时 due 可 pending，显示后再出。
 
-**卡片管线**（`render/reminder_ui.rs::load_reminder_card`）
+**卡片管线**（`render/reminder_ui.rs::load_reminder_card` / `load_reminder_card_deck`）
 
-1. 边界 flood 抠白：相邻近白像素（`BG_MIN_RGB=244`，含最浅抗锯齿环）置透明。
-2. 自动裁剪到**内容外框**（+12px 边距），去掉 mockup 四周空白。
-3. **premultiplied 缩放**：颜色先乘 alpha 再缩小、最后除回 → 边缘色只来自画面，无白边/暗晕。
-4. contain-fit 铺满 640×360，垂直居中；不再预留底部碗带。  
-5. 投喂碗 `food_button_layout` 锚在左下（气泡下方透明空档）；热区与碗对齐（`client_to_layout`）。缺图时 fallback 同窗同碗坐标。
+1. 启动时加载 `ui/reminder_card.png` + `ui/reminder_card_activity.png`（缺一张用剩下的；都缺走程序合成 fallback）。进场 `pick_card_index` 抽一张，避免连抽。  
+2. 边界 flood 抠白：相邻近白像素（`BG_MIN_RGB=244`，含最浅抗锯齿环）置透明。
+3. 自动裁剪到**内容外框**（+12px 边距），去掉 mockup 四周空白。
+4. **premultiplied 缩放**：颜色先乘 alpha 再缩小、最后除回 → 边缘色只来自画面，无白边/暗晕。
+5. contain-fit 铺满 640×360，垂直居中；不再预留底部碗带。  
+6. 投喂碗 `food_button_layout` 锚在左下（气泡下方透明空档）；热区与碗对齐（`client_to_layout`）。缺图时 fallback 同窗同碗坐标。
 
 ---
 

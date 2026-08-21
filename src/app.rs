@@ -13,6 +13,7 @@ use winit::event::{
 };
 use winit::keyboard::{Key, NamedKey};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::config::{AppConfig, ConfigRepository, DebouncedSaver, PET_SCALE_MAX};
@@ -23,7 +24,7 @@ use crate::pet::{
     REMINDER_WINDOW_H, REMINDER_WINDOW_W,
 };
 use crate::platform;
-use crate::reminder::{now_rfc3339, pick_message, ReminderScheduler};
+use crate::reminder::{now_rfc3339, pick_card_index, pick_message, ReminderScheduler};
 use crate::render::easing::{ease_in_out_cubic, ease_out_cubic};
 use crate::render::menu_ui::{
     blit_rgba, blit_rgba_clipped, compose_menu_card_layer, compose_menu_frame,
@@ -37,7 +38,7 @@ use crate::render::menu_ui::{
 use crate::render::sample_rgba_bilinear;
 use crate::render::reminder_ui::{
     compose_reminder_card_frame, compose_reminder_frame, compose_reminder_overlay,
-    food_button_layout, load_feed_bowl, load_reminder_card, FeedBowl, OverlayCardBlit,
+    food_button_layout, load_feed_bowl, load_reminder_card_deck, FeedBowl, OverlayCardBlit,
     ReminderCard,
 };
 use crate::render::yawn_bubble::{compose_yawn_frame, place_yawn_bubble, YawnPlacement};
@@ -170,8 +171,10 @@ pub struct App {
     reminder_card_t: f32,
     /// Card fade: (started, from, to, duration).
     reminder_card_anim: Option<(Instant, f32, f32, Duration)>,
-    /// Whole-image reminder card (tishi.png mockup), None → composed fallback.
-    reminder_card: Option<ReminderCard>,
+    /// Whole-image reminder cards (drink / activity). Empty → composed fallback.
+    reminder_cards: Vec<ReminderCard>,
+    /// Index into `reminder_cards` for the current reminder cycle.
+    reminder_card_index: usize,
     /// Kibble bowl used as the feed control.
     feed_bowl: Option<FeedBowl>,
     /// Feed completed this session cycle; persist once when return starts.
@@ -280,14 +283,14 @@ impl App {
             config.shortcuts = shortcuts.list_sorted();
             saver.mark_dirty();
         }
-        let reminder_card = load_reminder_card(
-            &assets_dir.join("ui/reminder_card.png"),
+        let reminder_cards = load_reminder_card_deck(
+            &assets_dir,
             REMINDER_WINDOW_W,
             REMINDER_WINDOW_H,
         );
-        match &reminder_card {
-            Some(_) => info!("reminder card loaded (tishi.png mockup)"),
-            None => warn!("reminder card image missing; using composed reminder UI"),
+        match reminder_cards.len() {
+            0 => warn!("reminder card images missing; using composed reminder UI"),
+            n => info!(count = n, "reminder card deck loaded"),
         }
         let feed_bowl = load_feed_bowl(&assets_dir.join("ui/feed_bowl.png"));
         match &feed_bowl {
@@ -319,7 +322,8 @@ impl App {
             reminder_slot: None,
             reminder_card_t: 0.0,
             reminder_card_anim: None,
-            reminder_card,
+            reminder_cards,
+            reminder_card_index: 0,
             feed_bowl,
             feed_persist_pending: false,
             shortcuts,
@@ -632,7 +636,8 @@ impl App {
             .with_resizable(false)
             .with_visible(true)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_active(false);
+            .with_active(false)
+            .with_skip_taskbar(true);
 
         let window = Arc::new(
             event_loop
@@ -908,7 +913,14 @@ impl App {
                 closing: pet.menu_closing,
                 say: self.menu_say.map(|(_, s)| s),
                 reduced_motion: !platform::client_area_animation_enabled(),
-                drag: self.list_drag_visual.clone(),
+                // The visual is pre-built at press time to warm the 400 ms
+                // long-press; only render it once the drag actually started,
+                // so a plain click never flashes the delete bowl / ghost.
+                drag: if self.list_drag.is_dragging() {
+                    self.list_drag_visual.clone()
+                } else {
+                    None
+                },
                 drag_draft: false,
                 rows_blank: false,
             };
@@ -1007,7 +1019,7 @@ impl App {
                 let pet_alpha = if traveling { 1.0 } else { 1.0 - card_t };
                 let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
                 let card_blit = if !traveling && card_t > 0.01 {
-                    self.reminder_card.as_ref().map(|card| OverlayCardBlit {
+                    self.active_reminder_card().map(|card| OverlayCardBlit {
                         card,
                         bowl: self.feed_bowl.as_ref(),
                         feeding,
@@ -1044,7 +1056,7 @@ impl App {
                 return;
             }
             let feeding = matches!(pet.state, PetState::Reminder(ReminderStage::Feeding));
-            if let Some(card) = &self.reminder_card {
+            if let Some(card) = self.active_reminder_card() {
                 let (w, h, composed) =
                     compose_reminder_card_frame(card, self.feed_bowl.as_ref(), feeding);
                 self.sprite_logical = (w, h);
@@ -1336,6 +1348,14 @@ impl App {
         self.redraw();
     }
 
+    fn active_reminder_card(&self) -> Option<&ReminderCard> {
+        if self.reminder_cards.is_empty() {
+            return None;
+        }
+        let i = self.reminder_card_index.min(self.reminder_cards.len() - 1);
+        self.reminder_cards.get(i)
+    }
+
     fn enter_reminder_travel(&mut self, desk_origin: Point, now: Instant) -> bool {
         let dpr = snap_dpr(self.scale_factor);
         let pet_phys = logical_to_physical(self.pet_size(), dpr);
@@ -1391,6 +1411,10 @@ impl App {
         };
         if !pet.begin_reminder(desk_origin, start, dest, msg, now) {
             return false;
+        }
+
+        if !self.reminder_cards.is_empty() {
+            self.reminder_card_index = pick_card_index(self.reminder_cards.len());
         }
 
         self.clear_dock_hwnd();

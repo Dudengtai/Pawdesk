@@ -35,6 +35,20 @@ const CROP_PAD: u32 = 12;
 const PARCHMENT: [u8; 4] = [0xF6, 0xEC, 0xD8, 0xFF];
 const INK: [u8; 4] = [0x2A, 0x22, 0x1C, 0xFF];
 const HINT_TEXT: [u8; 4] = [0x2A, 0x22, 0x1C, 0xFF];
+/// Built-in whole-image reminder cards (relative to the assets directory).
+pub const REMINDER_CARD_FILES: &[&str] = &[
+    "ui/reminder_card.png",
+    "ui/reminder_card_activity.png",
+];
+
+/// Load every built-in reminder card that exists on disk.
+pub fn load_reminder_card_deck(assets_dir: &Path, out_w: u32, out_h: u32) -> Vec<ReminderCard> {
+    REMINDER_CARD_FILES
+        .iter()
+        .filter_map(|rel| load_reminder_card(&assets_dir.join(rel), out_w, out_h))
+        .collect()
+}
+
 /// Load and prepare the reminder card image for the reminder window.
 ///
 /// The mockup has no alpha channel: near-white background (as seen from the
@@ -668,6 +682,14 @@ mod card_tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ui/reminder_card.png")
     }
 
+    fn activity_card_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ui/reminder_card_activity.png")
+    }
+
+    fn all_card_paths() -> [PathBuf; 2] {
+        [card_path(), activity_card_path()]
+    }
+
     fn opaque_frac(rgba: &[u8]) -> f64 {
         let n = rgba.chunks_exact(4).count() as f64;
         let opaque = rgba.chunks_exact(4).filter(|p| p[3] > 200).count() as f64;
@@ -701,16 +723,60 @@ mod card_tests {
 
     #[test]
     fn card_loads_to_window_size() {
-        let card = load_reminder_card(&card_path(), REMINDER_WINDOW_W, REMINDER_WINDOW_H)
-            .expect("reminder card should load");
-        assert_eq!((card.w, card.h), (REMINDER_WINDOW_W, REMINDER_WINDOW_H));
-        assert_eq!(card.rgba.len(), (card.w * card.h * 4) as usize);
-        // White paper background is keyed out…
-        let transparent = card.rgba.chunks_exact(4).filter(|p| p[3] == 0).count();
-        assert!(transparent > 0, "white background should be transparent");
-        // …while the bubble + cat + tail remain (matches the mockup artwork).
-        let frac = opaque_frac(&card.rgba);
-        assert!(frac > 0.10 && frac < 0.75, "opaque fraction {frac:.2}");
+        for path in all_card_paths() {
+            let card = load_reminder_card(&path, REMINDER_WINDOW_W, REMINDER_WINDOW_H)
+                .unwrap_or_else(|| panic!("{} should load", path.display()));
+            assert_eq!((card.w, card.h), (REMINDER_WINDOW_W, REMINDER_WINDOW_H));
+            assert_eq!(card.rgba.len(), (card.w * card.h * 4) as usize);
+            let transparent = card.rgba.chunks_exact(4).filter(|p| p[3] == 0).count();
+            assert!(
+                transparent > 0,
+                "{} white background should be transparent",
+                path.display()
+            );
+            let frac = opaque_frac(&card.rgba);
+            assert!(
+                frac > 0.10 && frac < 0.75,
+                "{} opaque fraction {frac:.2}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn card_deck_loads_both() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let deck = load_reminder_card_deck(&assets, REMINDER_WINDOW_W, REMINDER_WINDOW_H);
+        assert_eq!(deck.len(), REMINDER_CARD_FILES.len());
+    }
+
+    #[test]
+    fn bowl_pocket_is_empty_on_cards() {
+        let (bx, by, bw, bh) = food_button_layout();
+        let x0 = bx.round().max(0.0) as u32;
+        let y0 = by.round().max(0.0) as u32;
+        let bw = bw.round().max(1.0) as u32;
+        let bh = bh.round().max(1.0) as u32;
+        for path in all_card_paths() {
+            let card = load_reminder_card(&path, REMINDER_WINDOW_W, REMINDER_WINDOW_H).unwrap();
+            let mut opaque = 0u32;
+            let mut n = 0u32;
+            for y in y0..(y0 + bh).min(card.h) {
+                for x in x0..(x0 + bw).min(card.w) {
+                    n += 1;
+                    let a = card.rgba[((y * card.w + x) * 4 + 3) as usize];
+                    if a > 40 {
+                        opaque += 1;
+                    }
+                }
+            }
+            let frac = opaque as f64 / n.max(1) as f64;
+            assert!(
+                frac < 0.08,
+                "{} bowl pocket opaque {frac:.3}",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -748,13 +814,17 @@ mod card_tests {
     #[test]
     #[ignore]
     fn dump_card_preview() {
-        let card = load_reminder_card(&card_path(), REMINDER_WINDOW_W, REMINDER_WINDOW_H).unwrap();
         let bowl = load_feed_bowl(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/ui/feed_bowl.png"),
         );
         assert!(bowl.is_some(), "feed_bowl.png should key and load");
-        let (w, h, frame) = compose_reminder_card_frame(&card, bowl.as_ref(), false);
-        let out = {
+        let dumps = [
+            (card_path(), "card_preview.png"),
+            (activity_card_path(), "card_preview_activity.png"),
+        ];
+        for (src, name) in dumps {
+            let card = load_reminder_card(&src, REMINDER_WINDOW_W, REMINDER_WINDOW_H).unwrap();
+            let (w, h, frame) = compose_reminder_card_frame(&card, bowl.as_ref(), false);
             let mut img = image::RgbaImage::new(w, h);
             for (i, px) in img.pixels_mut().enumerate() {
                 let s = i * 4;
@@ -765,16 +835,16 @@ mod card_tests {
                     frame[s + 3],
                 ]);
             }
-            img
-        };
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/card_preview.png");
-        out.save(&path).unwrap();
-        eprintln!(
-            "card {}x{} opaque={:.1}% saved to {}",
-            w,
-            h,
-            opaque_frac(&frame) * 100.0,
-            path.display()
-        );
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(name);
+            img.save(&path).unwrap();
+            eprintln!(
+                "{} {}x{} opaque={:.1}% saved to {}",
+                src.file_name().unwrap().to_string_lossy(),
+                w,
+                h,
+                opaque_frac(&frame) * 100.0,
+                path.display()
+            );
+        }
     }
 }

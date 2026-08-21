@@ -3,5 +3,5 @@
 mod messages;
 mod scheduler;
 
-pub use messages::pick_message;
+pub use messages::{pick_card_index, pick_message};
 pub use scheduler::{now_rfc3339, ReminderScheduler};
